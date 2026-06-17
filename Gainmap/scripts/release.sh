@@ -119,7 +119,7 @@ TAG="v$VER"
 # Enclosure URLs resolve to the *latest* release's assets (stable feed).
 "$GEN_APPCAST" --download-url-prefix "https://github.com/hurd300403/Gainmap/releases/latest/download/" "$DIST"
 
-echo "▸ publishing GitHub Release $TAG…"
+echo "▸ publishing GitHub Release ${TAG} ..."
 gh release create "$TAG" "$DMG" "$DIST/appcast.xml" "$ZIP" \
     --repo hurd300403/Gainmap --title "Gainmap $VER" --notes "Gainmap $VER" \
   || gh release upload "$TAG" "$DMG" "$DIST/appcast.xml" "$ZIP" --repo hurd300403/Gainmap --clobber
