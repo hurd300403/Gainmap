@@ -26,5 +26,12 @@
     <string>© Legacy Lab. Built on libultrahdr (Apache-2.0) and libjpeg-turbo.</string>
     <key>ATSApplicationFontsPath</key>
     <string>Fonts</string>
+    <!-- Sparkle auto-update -->
+    <key>SUFeedURL</key>
+    <string>https://github.com/hurd300403/Gainmap/releases/latest/download/appcast.xml</string>
+    <key>SUPublicEDKey</key>
+    <string>OntsKfVJZEgyfDqAhxG/y4JQ76fklmyC7ifzGbghAew=</string>
+    <key>SUEnableAutomaticChecks</key>
+    <true/>
 </dict>
 </plist>

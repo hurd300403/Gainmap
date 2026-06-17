@@ -69,7 +69,24 @@ ZIP="$DIST/Lightroom-UltraHDR-mac.zip"; rm -f "$ZIP"
 xcrun notarytool submit "$ZIP" --keychain-profile "$PROFILE" --wait
 # (.lrplugin can't be stapled; notarizing the binary inside clears Gatekeeper.)
 
+# ---------------------------------------------------------------------------
+# 3. Sparkle appcast — EdDSA-sign the DMG (keychain key) + write appcast.xml,
+#    then publish the GitHub Release the app's SUFeedURL points at.
+# ---------------------------------------------------------------------------
+echo "▸ generating Sparkle appcast…"
+GEN_APPCAST="$(find "$HOME/Library/Developer/Xcode/DerivedData" -path '*sparkle/Sparkle/bin/generate_appcast' 2>/dev/null | head -1)"
+VER="$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$APP/Contents/Info.plist")"
+TAG="v$VER"
+# Enclosure URLs resolve to the *latest* release's assets (stable feed).
+"$GEN_APPCAST" --download-url-prefix "https://github.com/hurd300403/Gainmap/releases/latest/download/" "$DIST"
+
+echo "▸ publishing GitHub Release $TAG…"
+gh release create "$TAG" "$DMG" "$DIST/appcast.xml" "$ZIP" \
+    --repo hurd300403/Gainmap --title "Gainmap $VER" --notes "Gainmap $VER" \
+  || gh release upload "$TAG" "$DMG" "$DIST/appcast.xml" "$ZIP" --repo hurd300403/Gainmap --clobber
+
 echo
 echo "✓ artifacts in $DIST:"
 echo "  • Gainmap.dmg                  (notarized + stapled)"
 echo "  • Lightroom-UltraHDR-mac.zip   (notarized)"
+echo "  • appcast.xml                  (EdDSA-signed; published to GitHub Release $TAG)"
