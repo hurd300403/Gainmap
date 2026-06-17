@@ -41,6 +41,21 @@ final class BatchModelTests: XCTestCase {
         XCTAssertEqual(m.sdrURL, m.items.first?.sdrURL)
     }
 
+    func testImportJumpsToFreshlyAddedPhoto() {
+        let m = MergeModel()
+        m.addFiles([url("a")])
+        XCTAssertEqual(m.selectedItem?.sdrURL.lastPathComponent, "a.jpg")
+        // A single new file becomes the displayed one.
+        m.addFiles([url("b")])
+        XCTAssertEqual(m.selectedItem?.sdrURL.lastPathComponent, "b.jpg")
+        // A batch jumps to the FIRST of the new set, not the last.
+        m.addFiles([url("c"), url("d")])
+        XCTAssertEqual(m.selectedItem?.sdrURL.lastPathComponent, "c.jpg")
+        // Importing only duplicates adds nothing → selection is left alone.
+        m.addFiles([url("a")])
+        XCTAssertEqual(m.selectedItem?.sdrURL.lastPathComponent, "c.jpg")
+    }
+
     // MARK: Navigation
 
     func testNextPreviousBounds() {

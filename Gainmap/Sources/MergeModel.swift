@@ -211,7 +211,9 @@ final class MergeModel: ObservableObject {
         }
         guard !added.isEmpty else { return }
         items.append(contentsOf: added)
-        if selectedID == nil { select(added[0].id) }
+        // Jump the session to the freshly-imported photo: the new file when a
+        // single one is added, or the FIRST of a dragged-in / auto-selected batch.
+        select(added[0].id)
     }
 
     func remove(_ id: UUID) {
