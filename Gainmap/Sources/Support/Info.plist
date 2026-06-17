@@ -33,5 +33,15 @@
     <string>OntsKfVJZEgyfDqAhxG/y4JQ76fklmyC7ifzGbghAew=</string>
     <key>SUEnableAutomaticChecks</key>
     <true/>
+    <!-- Sentry crash reporting. DSN is injected at build time via $(SENTRY_DSN);
+         empty in dev builds => the SDK is a silent no-op. A DSN is not a secret
+         (ingest-only public key). -->
+    <key>SentryDSN</key>
+    <string>$(SENTRY_DSN)</string>
+    <!-- Remote version gate ("disable old versions"). The app fetches this on
+         launch and blocks only if its build is below the minimum; fails OPEN on
+         any network/parse error so it can never strand an offline user. -->
+    <key>GainmapGateURL</key>
+    <string>https://samhurdphotography.com/gainmap/gate.json</string>
 </dict>
 </plist>

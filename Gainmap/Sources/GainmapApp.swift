@@ -12,14 +12,24 @@ import Sparkle
 
 @main
 struct GainmapApp: App {
+    // Arm crash reporting FIRST — declared before any other stored property so
+    // Swift's in-order initialization runs it before Sparkle starts (so an
+    // early-launch crash is still captured). No-op if the user opted out or no DSN.
+    private let crashBootstrap: Void = CrashReporting.bootstrap()
+
     // Sparkle auto-update. Starts the updater; checks the appcast at SUFeedURL
     // (GitHub Releases) and verifies updates against SUPublicEDKey in Info.plist.
     private let updaterController = SPUStandardUpdaterController(
         startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
 
+    @StateObject private var versionGate = VersionGate()
+
     var body: some Scene {
         Window("Gainmap", id: "main") {
             ContentView()
+                .modifier(FirstRunCrashNotice())
+                .modifier(VersionGateOverlay(gate: versionGate, updater: updaterController.updater))
+                .task { await versionGate.check() }
         }
         .windowResizability(.contentSize)
         .windowStyle(.hiddenTitleBar)
@@ -29,6 +39,8 @@ struct GainmapApp: App {
                 CheckForUpdatesView(updater: updaterController.updater)
             }
         }
+
+        Settings { SettingsView() }
     }
 }
 
@@ -43,5 +55,87 @@ struct CheckForUpdatesView: View {
         Button("Check for Updates…") { updater.checkForUpdates() }
             .disabled(!canCheck)
             .onReceive(updater.publisher(for: \.canCheckForUpdates)) { canCheck = $0 }
+    }
+}
+
+// MARK: - Settings (Preferences ⌘,)
+
+struct SettingsView: View {
+    @AppStorage(CrashReporting.defaultsKey) private var crashReporting = true
+
+    var body: some View {
+        Form {
+            Section {
+                Toggle("Send anonymous crash reports", isOn: $crashReporting)
+                Text("Helps fix bugs. No photos, file names, or IP address are ever sent. "
+                     + "Takes effect on next launch.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } header: {
+                Text("Privacy")
+            }
+        }
+        .formStyle(.grouped)
+        .frame(width: 420, height: 160)
+    }
+}
+
+// MARK: - First-run crash-reporting notice
+
+/// A one-time, non-blocking notice that crash reporting is on (with how to opt out).
+struct FirstRunCrashNotice: ViewModifier {
+    @AppStorage("gainmap.crashNoticeShown") private var shown = false
+    @State private var present = false
+
+    func body(content: Content) -> some View {
+        content
+            .onAppear { if !shown { present = true } }
+            .alert("Anonymous crash reports", isPresented: $present) {
+                Button("OK") { shown = true }
+            } message: {
+                Text("Gainmap sends anonymous crash reports — no photos, no file names, "
+                     + "no IP address — to help fix bugs. You can turn this off in Settings (⌘,).")
+            }
+    }
+}
+
+// MARK: - Version gate (blocking "please update" overlay)
+
+/// Non-dismissible overlay shown when the remote gate marks this build too old.
+/// Always offers a working path forward (Update Now via Sparkle + a download link).
+struct VersionGateOverlay: ViewModifier {
+    @ObservedObject var gate: VersionGate
+    let updater: SPUUpdater
+
+    func body(content: Content) -> some View {
+        content.overlay {
+            if gate.blocked {
+                ZStack {
+                    Rectangle().fill(.black.opacity(0.94)).ignoresSafeArea()
+                    VStack(spacing: 18) {
+                        Image(systemName: "arrow.down.circle.fill")
+                            .font(.system(size: 44, weight: .regular))
+                            .foregroundStyle(Theme.warn)
+                        Text("Update required")
+                            .font(Theme.mono(17, .semibold)).foregroundStyle(.white)
+                        Text(gate.message)
+                            .font(Theme.mono(12)).foregroundStyle(Theme.stone)
+                            .multilineTextAlignment(.center)
+                            .frame(maxWidth: 360)
+                            .fixedSize(horizontal: false, vertical: true)
+                        HStack(spacing: 12) {
+                            Button("Update Now") { updater.checkForUpdates() }
+                                .keyboardShortcut(.defaultAction)
+                            Link("Download", destination: gate.downloadURL)
+                                .font(Theme.mono(12))
+                        }
+                        .padding(.top, 4)
+                    }
+                    .padding(44)
+                }
+                .transition(.opacity)
+            }
+        }
+        .animation(.easeOut(duration: 0.2), value: gate.blocked)
     }
 }

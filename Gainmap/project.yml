@@ -22,6 +22,9 @@ packages:
   Sparkle:
     url: https://github.com/sparkle-project/Sparkle
     from: "2.6.0"
+  Sentry:
+    url: https://github.com/getsentry/sentry-cocoa
+    from: "8.0.0"
 
 targets:
   Gainmap:
@@ -29,6 +32,8 @@ targets:
     platform: macOS
     dependencies:
       - package: Sparkle
+      - package: Sentry
+        product: Sentry
     sources:
       - path: Sources
       # Asset catalog is compiled (app icon + accent color).
@@ -48,6 +53,11 @@ targets:
       base:
         PRODUCT_NAME: Gainmap
         PRODUCT_BUNDLE_IDENTIFIER: com.legacylab.gainmap
+        # Sentry DSN injected at build/release time (e.g. xcodebuild SENTRY_DSN=...);
+        # empty default keeps dev builds a silent no-op. Not a secret (ingest-only).
+        SENTRY_DSN: ""
+        # dSYMs so Sentry crash stacks symbolicate (release.sh uploads them).
+        DEBUG_INFORMATION_FORMAT: dwarf-with-dsym
         INFOPLIST_FILE: Sources/Support/Info.plist
         CODE_SIGN_ENTITLEMENTS: Sources/Support/Gainmap.entitlements
         ENABLE_HARDENED_RUNTIME: YES

@@ -11,7 +11,9 @@
 		076774F4675DBBFAA6350A60 /* BloomPreview.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CB4790B5DCD848E014661A6 /* BloomPreview.swift */; };
 		0833B119882DA5F154EAB002 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 419AA343FB617E9A173D012E /* ContentView.swift */; };
 		19EE4E5FB5D803FE2872EE10 /* GainmapApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2688668BEE2150854C41AE1 /* GainmapApp.swift */; };
+		335ECADF1A0C0B7A88136E61 /* CrashReporting.swift in Sources */ = {isa = PBXBuildFile; fileRef = CEF7ACAD99D406E088E181DA /* CrashReporting.swift */; };
 		494A91F9EDCC99861238AC58 /* Emblem.swift in Sources */ = {isa = PBXBuildFile; fileRef = 66FFF98E8C73C09D243819DA /* Emblem.swift */; };
+		49DC4BA687D363EEE04853D6 /* VersionGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D724E16B4C68C37240B0A7E /* VersionGate.swift */; };
 		4AA15C3398E062D0D7D50A4A /* DropWell.swift in Sources */ = {isa = PBXBuildFile; fileRef = C5A66B7B4B9CD1080533B9DB /* DropWell.swift */; };
 		4CB23A540E2CDE1F1304EA13 /* HDRPreview.swift in Sources */ = {isa = PBXBuildFile; fileRef = DBEA08B172994281C816D8BD /* HDRPreview.swift */; };
 		60EA7D057B6168CFBF6D7F2F /* UHDRRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 225C763D26EF9A9720F8337F /* UHDRRunner.swift */; };
@@ -24,6 +26,7 @@
 		CBFDCF04E877096CF9556BA5 /* Fonts in Resources */ = {isa = PBXBuildFile; fileRef = 59EE26C4812D1AA284910546 /* Fonts */; };
 		E0EA960FDCD3691152C3646D /* BatchFilmstrip.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A6CBFF136CE494EDDBBFA1A /* BatchFilmstrip.swift */; };
 		E60C9D4D3C771F9022773499 /* UHDRRunnerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BCF67B3800BE36F48ED1E2CA /* UHDRRunnerTests.swift */; };
+		E960DC990A52A896AB123791 /* Sentry in Frameworks */ = {isa = PBXBuildFile; productRef = FA4F173AAE7313382EB1DDCD /* Sentry */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -39,6 +42,7 @@
 /* Begin PBXFileReference section */
 		115EE894AA68D0BAE6052326 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		1D20FCF2B3E0444FD5E141B7 /* Helpers */ = {isa = PBXFileReference; lastKnownFileType = folder; name = Helpers; path = Resources/Helpers; sourceTree = SOURCE_ROOT; };
+		1D724E16B4C68C37240B0A7E /* VersionGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VersionGate.swift; sourceTree = "<group>"; };
 		225C763D26EF9A9720F8337F /* UHDRRunner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UHDRRunner.swift; sourceTree = "<group>"; };
 		2CB4790B5DCD848E014661A6 /* BloomPreview.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BloomPreview.swift; sourceTree = "<group>"; };
 		3B2CDC388645971B0388B688 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
@@ -53,6 +57,7 @@
 		BCF67B3800BE36F48ED1E2CA /* UHDRRunnerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UHDRRunnerTests.swift; sourceTree = "<group>"; };
 		C5A66B7B4B9CD1080533B9DB /* DropWell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DropWell.swift; sourceTree = "<group>"; };
 		C7EB50D266DFADDDDC930DD3 /* MergeModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MergeModel.swift; sourceTree = "<group>"; };
+		CEF7ACAD99D406E088E181DA /* CrashReporting.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CrashReporting.swift; sourceTree = "<group>"; };
 		D374B416D5C330650E7C175A /* Gainmap.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Gainmap.entitlements; sourceTree = "<group>"; };
 		DBEA08B172994281C816D8BD /* HDRPreview.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HDRPreview.swift; sourceTree = "<group>"; };
 		E31D3B58C1C7661BFA0D3E2D /* Gainmap.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Gainmap.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -65,6 +70,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A7B50B61F55AB544BE4DFEED /* Sparkle in Frameworks */,
+				E960DC990A52A896AB123791 /* Sentry in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -97,6 +103,7 @@
 				4A6CBFF136CE494EDDBBFA1A /* BatchFilmstrip.swift */,
 				2CB4790B5DCD848E014661A6 /* BloomPreview.swift */,
 				419AA343FB617E9A173D012E /* ContentView.swift */,
+				CEF7ACAD99D406E088E181DA /* CrashReporting.swift */,
 				C5A66B7B4B9CD1080533B9DB /* DropWell.swift */,
 				66FFF98E8C73C09D243819DA /* Emblem.swift */,
 				A2688668BEE2150854C41AE1 /* GainmapApp.swift */,
@@ -104,6 +111,7 @@
 				C7EB50D266DFADDDDC930DD3 /* MergeModel.swift */,
 				3B656E776D1ED9BE04140BCC /* Theme.swift */,
 				225C763D26EF9A9720F8337F /* UHDRRunner.swift */,
+				1D724E16B4C68C37240B0A7E /* VersionGate.swift */,
 			);
 			path = Sources;
 			sourceTree = "<group>";
@@ -181,6 +189,7 @@
 			name = Gainmap;
 			packageProductDependencies = (
 				8A46E4F2749932129E2112D8 /* Sparkle */,
+				FA4F173AAE7313382EB1DDCD /* Sentry */,
 			);
 			productName = Gainmap;
 			productReference = E31D3B58C1C7661BFA0D3E2D /* Gainmap.app */;
@@ -215,6 +224,7 @@
 			mainGroup = AE800318550274EA385894D5;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
+				76AF0D4F3F4038D72AADD75D /* XCRemoteSwiftPackageReference "sentry-cocoa" */,
 				DA1CFBB567A00F4BDE5BC12F /* XCRemoteSwiftPackageReference "Sparkle" */,
 			);
 			preferredProjectObjectVersion = 77;
@@ -259,6 +269,7 @@
 				E0EA960FDCD3691152C3646D /* BatchFilmstrip.swift in Sources */,
 				076774F4675DBBFAA6350A60 /* BloomPreview.swift in Sources */,
 				0833B119882DA5F154EAB002 /* ContentView.swift in Sources */,
+				335ECADF1A0C0B7A88136E61 /* CrashReporting.swift in Sources */,
 				4AA15C3398E062D0D7D50A4A /* DropWell.swift in Sources */,
 				494A91F9EDCC99861238AC58 /* Emblem.swift in Sources */,
 				19EE4E5FB5D803FE2872EE10 /* GainmapApp.swift in Sources */,
@@ -266,6 +277,7 @@
 				9F1BC1DA42368B4EF2C416B6 /* MergeModel.swift in Sources */,
 				C02D2A1E1E5B11E33F23B4F0 /* Theme.swift in Sources */,
 				60EA7D057B6168CFBF6D7F2F /* UHDRRunner.swift in Sources */,
+				49DC4BA687D363EEE04853D6 /* VersionGate.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -287,6 +299,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = Sources/Support/Gainmap.entitlements;
 				COMBINE_HIDPI_IMAGES = YES;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_HARDENED_RUNTIME = YES;
 				INFOPLIST_FILE = Sources/Support/Info.plist;
@@ -294,6 +307,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.legacylab.gainmap;
 				PRODUCT_NAME = Gainmap;
 				SDKROOT = macosx;
+				SENTRY_DSN = "";
 			};
 			name = Debug;
 		};
@@ -304,6 +318,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = Sources/Support/Gainmap.entitlements;
 				COMBINE_HIDPI_IMAGES = YES;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_HARDENED_RUNTIME = YES;
 				INFOPLIST_FILE = Sources/Support/Info.plist;
@@ -311,6 +326,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.legacylab.gainmap;
 				PRODUCT_NAME = Gainmap;
 				SDKROOT = macosx;
+				SENTRY_DSN = "";
 			};
 			name = Release;
 		};
@@ -508,6 +524,14 @@
 /* End XCConfigurationList section */
 
 /* Begin XCRemoteSwiftPackageReference section */
+		76AF0D4F3F4038D72AADD75D /* XCRemoteSwiftPackageReference "sentry-cocoa" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/getsentry/sentry-cocoa";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 8.0.0;
+			};
+		};
 		DA1CFBB567A00F4BDE5BC12F /* XCRemoteSwiftPackageReference "Sparkle" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/sparkle-project/Sparkle";
@@ -523,6 +547,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = DA1CFBB567A00F4BDE5BC12F /* XCRemoteSwiftPackageReference "Sparkle" */;
 			productName = Sparkle;
+		};
+		FA4F173AAE7313382EB1DDCD /* Sentry */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 76AF0D4F3F4038D72AADD75D /* XCRemoteSwiftPackageReference "sentry-cocoa" */;
+			productName = Sentry;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};
