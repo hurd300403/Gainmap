@@ -155,7 +155,6 @@ struct ContentView: View {
             VStack(spacing: 10) {
                 HDRPreviewPane(sdrURL: model.sdrURL, params: model.bloom,
                                cgamut: model.cgamut, sgamut: model.sgamut, bake: model.bakeGlowIntoSDR,
-                               previewSDR: model.previewSDR,
                                expanded: true,
                                onRequestAdd: model.items.isEmpty ? { addPhotos() } : nil)
                 Text(model.items.isEmpty ? "click the preview or drop SDR JPEGs anywhere to begin"
@@ -406,22 +405,11 @@ struct ContentView: View {
                         .toggleStyle(.switch)
                         .font(Theme.mono(10, .semibold))
                         .foregroundStyle(Theme.stoneDim)
-                        .help("On: the soft glow is baked into the SDR fallback so it shows on every screen (the fallback is your bloomed look, not the untouched original). Off: the SDR fallback is pixel-identical to your input and the glow appears only on HDR displays.")
-                    if !model.bakeGlowIntoSDR { InfoButton(title: "GLOW IN SDR (off)", text: "SDR fallback stays pixel-identical to your input; the glow lives only in the gain map and shows only where the display has HDR headroom.") }
+                        .help("SDR = the standard, non-HDR version of your photo (a regular JPEG — what most screens and apps show). On: the soft glow is baked into that SDR version so it shows on every screen. Off: the SDR version stays pixel-identical to your input, and the glow appears only on HDR displays.")
+                    InfoButton(title: "GLOW IN SDR",
+                               text: "“SDR” is the standard, non-HDR version of your photo — a regular JPEG, the kind every screen and app can show. Your export always tucks one inside as the fallback for non-HDR screens.\n\nOn: the soft glow is baked into that SDR version, so your look carries everywhere (the fallback is your bloomed photo, not the untouched original).\n\nOff: the SDR version is pixel-identical to the file you started with, and the glow lives only in the HDR layer — so it appears only on HDR-capable displays.")
                     Spacer()
-                    Text(model.bakeGlowIntoSDR ? "visible everywhere" : "pixel-identical SDR")
-                        .font(Theme.mono(9)).foregroundStyle(Theme.stoneFaint)
-                }
-                HStack {
-                    Toggle("PREVIEW ON A NON-HDR SCREEN", isOn: $model.previewSDR)
-                        .toggleStyle(.switch)
-                        .font(Theme.mono(10, .semibold))
-                        .foregroundStyle(Theme.stoneDim)
-                        .help("Shows the SDR fallback your export ships — what viewers on a non-HDR screen (or an app that ignores the gain map) actually see. The HDR pop rolls all the way down to the plain photo. Preview only; the exported file is unchanged.")
-                    InfoButton(title: "PREVIEW ON A NON-HDR SCREEN",
-                               text: "Your gain-map JPEG carries two looks: the HDR pop for capable screens, and a plain SDR version for everything else. Flip this on to see that SDR fallback — a quick gut-check that the photo still looks good with no HDR at all. (This differs from press-and-hold, which shows your untouched original; with GLOW IN SDR on, the fallback includes the baked-in soft glow.) Preview only — the exported file adapts to each viewer's display automatically.")
-                    Spacer()
-                    Text(model.previewSDR ? "SDR fallback" : "live HDR")
+                    Text(model.bakeGlowIntoSDR ? "shows on every screen" : "HDR screens only")
                         .font(Theme.mono(9)).foregroundStyle(Theme.stoneFaint)
                 }
                 sliderRow("GLOW", $model.bloom.glow, 0...1.5, fmt: "%.2f", "none", "bright",

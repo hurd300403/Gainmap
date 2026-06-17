@@ -325,19 +325,6 @@ enum AutoHDR {
         )?.cropped(to: bounds)
     }
 
-    /// The SDR fallback exactly as the export ships it — what a viewer on a
-    /// non-HDR screen (or any app that ignores the gain map) actually sees:
-    ///   • bake ON  → the soft-shouldered bloom (same `sdrShoulderKernel`, knee
-    ///     0.85, that `synthesizeInputs` bakes into the SDR primary)
-    ///   • bake OFF → the untouched base, passed through pixel-for-pixel
-    /// All values land ≤ 1.0, so the EDR view shows it as plain SDR on any display.
-    static func sdrFallbackCIImage(base: CIImage, params: BloomParams, bake: Bool) -> CIImage? {
-        guard bake else { return base }
-        guard let bloom = bloomCIImage(base: base, params: params) else { return base }
-        return sdrShoulderKernel.apply(extent: bloom.extent, arguments: [bloom, 0.85])?
-            .cropped(to: bloom.extent)
-    }
-
     /// Build the bloom-as-HDR rendition and render it to the engine's RGBA f16 buffer.
     static func synthesize(from sdrURL: URL, params: BloomParams) throws -> RawBuffer {
         let p = effectiveBloomParams(params, for: sdrURL)

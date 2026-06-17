@@ -124,7 +124,6 @@ final class PreviewRenderer: ObservableObject {
     private var curCgamut: Gamut = .rec709
     private var curSgamut: Gamut = .rec709
     private var curBake = true
-    private var curPreviewSDR = false
 
     /// Two-stage preview for real-time scrubbing:
     ///   • PROXY — render `bloomCIImage` (the same linear-HDR the export encodes)
@@ -137,12 +136,10 @@ final class PreviewRenderer: ObservableObject {
     /// layer (AUTO) is resolved up-front from cached scene stats and baked in, so
     /// the live proxy can't show a stronger look than the file actually saves.
     func request(sdr: URL?, params: AutoHDR.BloomParams,
-                 cgamut: Gamut = .rec709, sgamut: Gamut = .rec709, bake: Bool = true,
-                 previewSDR: Bool = false) {
+                 cgamut: Gamut = .rec709, sgamut: Gamut = .rec709, bake: Bool = true) {
         // Stash the latest inputs so a base-load that finishes later renders with
         // CURRENT params/gamut, not whatever they were when the load kicked off.
         curParams = params; curCgamut = cgamut; curSgamut = sgamut; curBake = bake
-        curPreviewSDR = previewSDR
         generation &+= 1
         guard let sdr else {
             loadTask?.cancel(); accurateTask?.cancel()
@@ -183,17 +180,6 @@ final class PreviewRenderer: ObservableObject {
     private func renderCurrent() {
         guard let sdr = baseURL else { return }
         let eff = effective(curParams)
-        // "Preview on a non-HDR screen": show the SDR fallback the export ships
-        // (values ≤ 1.0, plain SDR on any display). It's derived from the proxy,
-        // so no gain-map export is needed — skip the accurate pass entirely.
-        if curPreviewSDR {
-            accurateTask?.cancel()
-            rendering = false
-            if let base = baseImage {
-                image = AutoHDR.sdrFallbackCIImage(base: base, params: eff, bake: curBake) ?? base
-            }
-            return
-        }
         renderProxy(params: eff)
         scheduleAccurate(sdr: sdr, params: eff, cgamut: curCgamut, sgamut: curSgamut, bake: curBake, gen: generation)
     }
@@ -296,9 +282,6 @@ struct HDRPreviewPane: View {
     /// Bake the soft bloom into the SDR base (vs HDR-only glow) — affects the
     /// settled render so the preview reflects the chosen export mode.
     var bake: Bool = true
-    /// Preview the shipped SDR fallback (what a non-HDR screen shows) instead of
-    /// the live HDR. Always visibly different from HDR on any display.
-    var previewSDR: Bool = false
     /// Inline height (ignored when `expanded`, which fills the docked column).
     var height: CGFloat = 203
     /// Docked-to-side mode: taller, fills available height, collapse icon.
@@ -368,26 +351,21 @@ struct HDRPreviewPane: View {
         .onChange(of: cgamut) { _, _ in rerender() }
         .onChange(of: sgamut) { _, _ in rerender() }
         .onChange(of: bake) { _, _ in rerender() }
-        .onChange(of: previewSDR) { _, _ in showingOriginal = false; rerender() }
         .onAppear { rerender() }
     }
 
     private func rerender() {
-        renderer.request(sdr: sdrURL, params: params, cgamut: cgamut, sgamut: sgamut,
-                         bake: bake, previewSDR: previewSDR)
+        renderer.request(sdr: sdrURL, params: params, cgamut: cgamut, sgamut: sgamut, bake: bake)
     }
 
-    // The top-left tag: live HDR, the SDR-fallback simulation, or the peeked original.
+    // The top-left tag flips between the HDR look and the original SDR edit.
     private var stateBadge: some View {
-        let sdrMode = previewSDR && !showingOriginal
-        let label = showingOriginal ? "ORIGINAL · SDR" : (sdrMode ? "NON-HDR SCREEN" : "LIVE HDR")
-        let fg: Color = (showingOriginal || sdrMode) ? Theme.inset : .white
-        let bg: Color = showingOriginal ? Theme.stone : (sdrMode ? Theme.gold : Theme.accent)
-        return Text(label)
+        Text(showingOriginal ? "ORIGINAL · SDR" : "LIVE HDR")
             .font(Theme.mono(10, .semibold)).tracking(1.2)
-            .foregroundStyle(fg)
+            .foregroundStyle(showingOriginal ? Theme.inset : .white)
             .padding(.horizontal, 8).padding(.vertical, 4)
-            .background(bg.opacity(0.92), in: RoundedRectangle(cornerRadius: 5))
+            .background((showingOriginal ? Theme.stone : Theme.accent).opacity(0.92),
+                        in: RoundedRectangle(cornerRadius: 5))
             .padding(10)
     }
 

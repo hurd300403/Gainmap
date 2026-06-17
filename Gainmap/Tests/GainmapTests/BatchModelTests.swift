@@ -155,44 +155,6 @@ final class BatchModelTests: XCTestCase {
         return Float(sign) * Float(1024 + frac) / 1024 * pow(2, Float(exp - 15))
     }
 
-    // MARK: Non-HDR-screen (SDR fallback) preview
-
-    /// The SDR fallback the preview shows must land in SDR range (≤ ~1.0) — that's
-    /// what guarantees it looks different from the HDR pop on ANY display, unlike
-    /// the old headroom clamp which no-op'd above the panel's headroom. Renders a
-    /// real bloom (extended values up to ~peak·headroom) through sdrFallbackCIImage
-    /// and confirms the shoulder pulls the peak back into SDR.
-    func testSDRFallbackLandsInSDRRange() throws {
-        let space = CGColorSpace(name: CGColorSpace.extendedLinearSRGB)!
-        let ctx = CIContext(options: [.workingColorSpace: space])
-        let base = CIImage(contentsOf: try makeGradientJPEG(w: 64, h: 8))!
-
-        func maxChannel(_ img: CIImage) -> Float {
-            let w = Int(img.extent.width), h = Int(img.extent.height)
-            var px = [Float](repeating: 0, count: w * h * 4)
-            ctx.render(img, toBitmap: &px, rowBytes: w * 16, bounds: img.extent,
-                       format: .RGBAf, colorSpace: space)
-            return stride(from: 0, to: px.count, by: 4).reduce(Float(0)) {
-                max($0, max(px[$1], max(px[$1 + 1], px[$1 + 2])))
-            }
-        }
-
-        var p = AutoHDR.BloomParams()
-        p.glow = 1.5; p.headroom = 1.5     // a strong look → bloom peaks well above 1.0
-
-        // The raw HDR bloom exceeds SDR white…
-        let bloom = try XCTUnwrap(AutoHDR.bloomCIImage(base: base, params: p))
-        XCTAssertGreaterThan(maxChannel(bloom), 1.05, "bloom proxy should exceed SDR white")
-
-        // …but the baked SDR fallback is shouldered back into SDR range.
-        let baked = try XCTUnwrap(AutoHDR.sdrFallbackCIImage(base: base, params: p, bake: true))
-        XCTAssertLessThanOrEqual(maxChannel(baked), 1.02, "baked SDR fallback must stay ≤ ~1.0")
-
-        // With bake OFF the fallback is the untouched base (also SDR).
-        let plain = try XCTUnwrap(AutoHDR.sdrFallbackCIImage(base: base, params: p, bake: false))
-        XCTAssertLessThanOrEqual(maxChannel(plain), 1.02, "un-baked fallback is the SDR base")
-    }
-
     /// A horizontal black→white gradient JPEG, so highlights exist above the knee.
     private func makeGradientJPEG(w: Int, h: Int) throws -> URL {
         let cs = CGColorSpace(name: CGColorSpace.sRGB)!

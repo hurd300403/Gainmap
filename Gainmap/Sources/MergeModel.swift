@@ -150,12 +150,6 @@ final class MergeModel: ObservableObject {
         didSet { UserDefaults.standard.set(bakeGlowIntoSDR, forKey: "gainmap.bakeGlowIntoSDR") }
     }
 
-    /// Preview the SDR fallback (what a viewer on a non-HDR screen sees) instead
-    /// of the live HDR. Rolls the whole look down to the shipped SDR base, so it's
-    /// visible on any display at any brightness. Preview-only; not persisted (a
-    /// momentary check you wouldn't want sticking across launches).
-    @Published var previewSDR: Bool = false
-
     // MARK: Shared status (advanced phase + per-merge spinner)
 
     @Published var phase: Phase = .idle
