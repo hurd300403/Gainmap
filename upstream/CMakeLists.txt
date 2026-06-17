@@ -29,6 +29,13 @@ set(UHDR_BUILD_EXAMPLES OFF)
 set(UHDR_BUILD_TESTS OFF)
 set(UHDR_BUILD_BENCHMARK OFF)
 set(UHDR_ENABLE_INSTALL OFF)
+# Write BOTH gain-map metadata dialects: ISO 21496-1 (Apple Photos/Preview/Safari
+# read this — libultrahdr's default) AND the Google/Adobe XMP form (Instagram,
+# Android/Google Photos read this). libultrahdr defaults XMP off, so an ISO-only
+# file isn't recognized by Instagram → its HDR pop is lost there. Emitting both
+# (as Android 15 does) maximizes cross-platform reach with no downside on Apple.
+set(UHDR_WRITE_XMP ON)
+set(UHDR_WRITE_ISO ON)
 
 FetchContent_Declare(
     libultrahdr
