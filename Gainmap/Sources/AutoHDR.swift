@@ -60,6 +60,19 @@ enum AutoHDR {
     }
     """)!
 
+    /// Folds an extended-range (>1) bloom into [0,1] for the SDR primary: IDENTITY
+    /// below `knee` so the soft glow passes through UNCHANGED (→ gain ≈ 1 there, so
+    /// it shows identically on SDR and HDR), then a Reinhard shoulder on the excess
+    /// so highlights compress into [knee,1] instead of hard-clipping to white.
+    static let sdrShoulderKernel = CIColorKernel(source: """
+    kernel vec4 sdrShoulder(__sample s, float knee) {
+        vec3 x = max(s.rgb, vec3(0.0));
+        vec3 e = max(x - vec3(knee), vec3(0.0));
+        vec3 o = min(x, vec3(knee)) + (1.0 - knee) * (e / (e + vec3(1.0 - knee)));
+        return vec4(o, 1.0);
+    }
+    """)!
+
     /// The full set of dials for the bloom-as-HDR look.
     struct BloomParams: Equatable, Codable {
         var glow: Double = 0.40        // bloom intensity (0…1.5)
@@ -364,17 +377,18 @@ enum AutoHDR {
             .appendingPathComponent("gainmap-\(UUID().uuidString).rawf16")
         try data.write(to: hdrURL)
 
-        // Bloomed SDR primary: the same bloom clamped to [0,1], written as an sRGB
-        // JPEG. Soft glow survives; highlight cores clip to white (normal for SDR).
-        let clamp = CIFilter.colorClamp()
-        clamp.inputImage = hdr
-        clamp.minComponents = CIVector(x: 0, y: 0, z: 0, w: 0)
-        clamp.maxComponents = CIVector(x: 1, y: 1, z: 1, w: 1)
-        guard let sdrImg = clamp.outputImage?.cropped(to: bounds) else { throw SynthError.context }
+        // Bloomed SDR primary: the bloom folded into [0,1] with a soft highlight
+        // shoulder (identity below the knee so the glow passes through unchanged;
+        // highlights roll off instead of hard-clipping ~42% of a bright frame to
+        // flat white). Written as a real sRGB-gamma JPEG.
+        guard let sdrImg = sdrShoulderKernel.apply(extent: bounds, arguments: [hdr, 0.85])?
+            .cropped(to: bounds) else { throw SynthError.context }
         let sdrURLout = FileManager.default.temporaryDirectory
             .appendingPathComponent("gainmap-sdr-\(UUID().uuidString).jpg")
         let srgb = CGColorSpace(name: CGColorSpace.sRGB)!
-        try ciContext.writeJPEGRepresentation(of: sdrImg, to: sdrURLout, colorSpace: srgb)
+        let q = CIImageRepresentationOption(rawValue: kCGImageDestinationLossyCompressionQuality as String)
+        try ciContext.writeJPEGRepresentation(of: sdrImg, to: sdrURLout, colorSpace: srgb,
+                                              options: [q: 0.95])
 
         return UltraHDRInputs(hdr: RawBuffer(url: hdrURL, width: w, height: h), sdrJPEG: sdrURLout)
     }
