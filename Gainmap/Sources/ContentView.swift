@@ -628,11 +628,25 @@ struct ContentView: View {
             }
             .font(Theme.mono(10)).tracking(1.4)
 
-            Text("Made possible by my patrons ❤️")
-                .font(Theme.mono(10)).tracking(1.0)
-                .foregroundStyle(Theme.stoneDim)
+            patronsLink
         }
         .frame(maxWidth: .infinity)
+    }
+
+    /// Patron credit — a direct link to Patreon so anyone the app is shared with
+    /// can find it. (Confirm the exact URL.)
+    private var patronsLink: some View {
+        (Text("Made possible by my ").foregroundStyle(Theme.stoneDim)
+         + Text("patrons").foregroundStyle(Theme.accent)
+         + Text(" ❤️"))
+            .font(Theme.mono(10)).tracking(1.0)
+            .onTapGesture {
+                if let u = URL(string: "https://www.patreon.com/samhurd") { NSWorkspace.shared.open(u) }
+            }
+            .onHover { inside in
+                if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+            }
+            .help("Support Sam on Patreon")
     }
 }
 
