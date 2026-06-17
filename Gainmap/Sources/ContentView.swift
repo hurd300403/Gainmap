@@ -17,6 +17,11 @@ struct ContentView: View {
     @State private var showSettings = false
     @State private var showAdvancedLook = false
     @State private var window: NSWindow?
+    @State private var shareHover = false
+
+    // The Patreon post where the app can be downloaded — shared via the native
+    // macOS share sheet so patrons can pass the app along. TODO: confirm exact URL.
+    private let shareURL = URL(string: "https://www.patreon.com/samhurd")!
 
     var body: some View {
         ZStack {
@@ -112,9 +117,10 @@ struct ContentView: View {
     // MARK: Header
 
     private var header: some View {
-        // Right-justified so the branding clears the macOS traffic-light buttons in
-        // the top-left, letting the content ride higher in the window.
+        // Branding right-justified (clears the macOS traffic-light buttons); a small
+        // native share button fills the otherwise-empty top-left.
         HStack(spacing: 16) {
+            shareButton
             Spacer()
             VStack(alignment: .trailing, spacing: 2) {
                 (Text("Gain").foregroundStyle(Color.white)
@@ -647,6 +653,28 @@ struct ContentView: View {
                 if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
             }
             .help("Support Sam on Patreon")
+    }
+
+    /// Native macOS share button (top-left) — pops Messages / Mail / AirDrop /
+    /// Copy Link with the Patreon download post, so patrons can pass the app along.
+    private var shareButton: some View {
+        ShareLink(item: shareURL,
+                  subject: Text("Gainmap"),
+                  message: Text("Gainmap — fuse an SDR + HDR edit into one UltraHDR JPEG, with clean highlights everywhere.")) {
+            HStack(spacing: 8) {
+                Image(systemName: "square.and.arrow.up").font(.system(size: 14, weight: .semibold))
+                Text("Share").font(Theme.mono(13, .semibold)).tracking(1.5)
+            }
+            .foregroundStyle(shareHover ? .white : Theme.accent)
+            .padding(.horizontal, 16).padding(.vertical, 9)
+            .background(Capsule().fill(shareHover ? Theme.accent : Theme.accent.opacity(0.14)))
+            .overlay(Capsule().stroke(Theme.accent.opacity(shareHover ? 0 : 0.55), lineWidth: 1))
+            .shadow(color: Theme.accent.opacity(shareHover ? 0.45 : 0), radius: 12, y: 4)
+        }
+        .buttonStyle(.plain)
+        .padding(.leading, 44)        // clear the macOS traffic-light buttons
+        .onHover { shareHover = $0 }
+        .help("Share Gainmap with someone")
     }
 }
 
