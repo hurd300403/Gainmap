@@ -83,6 +83,36 @@ struct GainmapEmblem: View {
     }
 }
 
+// MARK: - GainmapAddEmblem (on-brand "add a photo" mark)
+
+/// The Gainmap flask mark with an accent "+" badge in the corner — used for the
+/// add tile / empty-state so the add affordance matches the app icon instead of
+/// a bare system glyph. `active` brightens the badge (hover/emphasis).
+struct GainmapAddEmblem: View {
+    var active: Bool = false
+    var body: some View {
+        GainmapEmblem()
+            .overlay {
+                GeometryReader { geo in
+                    let d = geo.size.width * 0.40          // badge ≈ 40% of the mark
+                    Circle()
+                        .fill(active ? Theme.accentHot : Theme.accent)
+                        .overlay {
+                            Image(systemName: "plus")
+                                .font(.system(size: d * 0.55, weight: .black))
+                                .foregroundStyle(.white)
+                        }
+                        // Dark ring separates the accent badge from the mark's accent rim.
+                        .overlay(Circle().stroke(Theme.surface, lineWidth: max(1, d * 0.11)))
+                        .frame(width: d, height: d)
+                        .shadow(color: .black.opacity(0.5), radius: 2, y: 1)
+                        .position(x: geo.size.width - d * 0.42, y: geo.size.height - d * 0.42)
+                }
+            }
+            .aspectRatio(1, contentMode: .fit)
+    }
+}
+
 // MARK: - ApertureIris (center fusion point)
 
 /// The six curved aperture blades, drawn to fill the view's frame.

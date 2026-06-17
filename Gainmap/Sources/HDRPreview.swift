@@ -325,10 +325,14 @@ struct HDRPreviewPane: View {
                 EDRMetalView(image: shown).allowsHitTesting(false)
             } else {
                 LinearGradient(colors: [Theme.surface, Theme.surfaceHi], startPoint: .top, endPoint: .bottom)
-                VStack(spacing: 8) {
-                    Image(systemName: onRequestAdd != nil ? "plus.circle" : "photo")
-                        .font(.system(size: 30, weight: .light))
-                        .foregroundStyle(Theme.stoneDim)
+                VStack(spacing: 10) {
+                    if onRequestAdd != nil {
+                        GainmapAddEmblem().frame(width: 60, height: 60)
+                    } else {
+                        Image(systemName: "photo")
+                            .font(.system(size: 30, weight: .light))
+                            .foregroundStyle(Theme.stoneDim)
+                    }
                     Text(onRequestAdd != nil ? "Click to add a photo" : "HDR preview")
                         .font(Theme.mono(11)).foregroundStyle(Theme.stoneDim)
                     if onRequestAdd != nil {

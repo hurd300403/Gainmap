@@ -126,9 +126,9 @@ struct AddTile: View {
         VStack(spacing: 5) {
             ZStack {
                 shape.fill(Theme.inset.opacity(0.6))
-                Image(systemName: "plus")
-                    .font(.system(size: 20, weight: .light))
-                    .foregroundStyle(hovering ? Theme.accent : Theme.stoneDim)
+                GainmapAddEmblem(active: hovering)
+                    .frame(height: cellH * 0.74)
+                    .opacity(hovering ? 1 : 0.92)
             }
             .frame(width: cellW, height: cellH)
             .clipShape(shape)

@@ -387,7 +387,7 @@ struct ContentView: View {
                 Button("Reset") { model.resetToDefault() }
                     .buttonStyle(.plain)
                     .font(Theme.mono(10, .semibold)).foregroundStyle(Theme.accentHot)
-                    .help("Restore the default look")
+                    .help("Snap this photo back to your default look (set it under Advanced controls ▸ Save as default).")
             }
 
             // The one slider most people ever touch: blend the signature look from
@@ -410,23 +410,33 @@ struct ContentView: View {
             .buttonStyle(.plain)
 
             if showAdvancedLook {
-                HStack {
+                HStack(alignment: .top) {
                     Toggle("AUTO", isOn: $model.bloom.autoAdapt)
                         .toggleStyle(.switch)
                         .font(Theme.mono(10, .semibold))
                         .foregroundStyle(Theme.stoneDim)
                         .help("Auto-adjusts the look for each photo based on how bright it is. Off = your sliders apply exactly as set.")
                     Spacer()
-                    if model.hasCustomDefault {
-                        Button("Restore app default") { model.restoreBuiltInDefault() }
-                            .buttonStyle(.plain)
-                            .font(Theme.mono(10, .semibold)).foregroundStyle(Theme.gold)
-                            .help("Restore the look Gainmap originally shipped with, clearing the default you saved. (Reset just returns to your current saved default.)")
-                    } else {
-                        Button("Save as default") { model.setSignatureFromCurrent() }
-                            .buttonStyle(.plain)
-                            .font(Theme.mono(10, .semibold)).foregroundStyle(Theme.gold)
-                            .help("Save the current look as your default — it becomes the 100% Intensity preset and what Reset returns to (kept across launches).")
+                    // The "default" the top "Reset" snaps back to. Caption makes that
+                    // link explicit (the two controls live in different sections).
+                    VStack(alignment: .trailing, spacing: 2) {
+                        if model.hasCustomDefault {
+                            Button("Restore app default") { model.restoreBuiltInDefault() }
+                                .buttonStyle(.plain)
+                                .font(Theme.mono(10, .semibold)).foregroundStyle(Theme.gold)
+                                .help("Replace your saved default with the look Gainmap originally shipped with. “Reset” will then snap to that.")
+                        } else {
+                            Button("Save as default") { model.setSignatureFromCurrent() }
+                                .buttonStyle(.plain)
+                                .font(Theme.mono(10, .semibold)).foregroundStyle(Theme.gold)
+                                .help("Make the current look your default — the 100% Intensity preset and what “Reset” snaps back to (kept across launches).")
+                        }
+                        // "Reset" tinted to match the actual Reset button (accentHot)
+                        // so the link reads at a glance; arrow points up at the button.
+                        (Text("what ").foregroundStyle(Theme.stoneDim)
+                         + Text("“Reset”").foregroundStyle(Theme.accentHot)
+                         + Text(" snaps to ↑").foregroundStyle(Theme.stoneDim))
+                            .font(Theme.mono(8.5))
                     }
                 }
                 HStack {
