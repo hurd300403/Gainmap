@@ -53,8 +53,9 @@ targets:
       base:
         PRODUCT_NAME: Gainmap
         PRODUCT_BUNDLE_IDENTIFIER: com.legacylab.gainmap
-        # Sentry DSN injected at build/release time (e.g. xcodebuild SENTRY_DSN=...);
-        # empty default keeps dev builds a silent no-op. Not a secret (ingest-only).
+        # Sentry DSN: empty by default so DEBUG builds are a silent no-op; the real
+        # DSN is set for Release only (below). A DSN is NOT a secret — it's an
+        # ingest-only public key embedded in every shipped client.
         SENTRY_DSN: ""
         # dSYMs so Sentry crash stacks symbolicate (release.sh uploads them).
         DEBUG_INFORMATION_FORMAT: dwarf-with-dsym
@@ -66,6 +67,10 @@ targets:
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         COMBINE_HIDPI_IMAGES: YES
         LD_RUNPATH_SEARCH_PATHS: "@executable_path/../Frameworks"
+      configs:
+        Release:
+          # gainmap project in the sam-hurd-photo Sentry org.
+          SENTRY_DSN: "https://553956a1d0e59a781e1ec7dedeee33ba@o4510926726365184.ingest.us.sentry.io/4511583301795840"
 
   GainmapTests:
     type: bundle.unit-test

@@ -326,7 +326,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.legacylab.gainmap;
 				PRODUCT_NAME = Gainmap;
 				SDKROOT = macosx;
-				SENTRY_DSN = "";
+				SENTRY_DSN = "https://553956a1d0e59a781e1ec7dedeee33ba@o4510926726365184.ingest.us.sentry.io/4511583301795840";
 			};
 			name = Release;
 		};

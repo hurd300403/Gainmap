@@ -4,12 +4,14 @@
 #   1. Gainmap.app  → Gainmap.dmg   (standalone app)
 #   2. the .lrplugin → Lightroom-UltraHDR-mac.zip   (Lightroom plugin)
 #
-# Notarization needs a stored notarytool credential profile. Create one once:
-#   xcrun notarytool store-credentials "gainmap-notary" \
-#       --apple-id "samhurd@gmail.com" --team-id S8HQ5TEYDE \
+# Notarization needs a stored notarytool credential profile. The reusable one is
+# "legacylab-notary" (Apple ID samhurd+apple2@gmail.com, team S8HQ5TEYDE). If it's
+# missing, create it once:
+#   xcrun notarytool store-credentials "legacylab-notary" \
+#       --apple-id "samhurd+apple2@gmail.com" --team-id S8HQ5TEYDE \
 #       --password <app-specific-password>     # from appleid.apple.com
 #
-# Then:  ./scripts/release.sh gainmap-notary
+# Then:  ./scripts/release.sh legacylab-notary
 #
 set -euo pipefail
 PROFILE="${1:?usage: release.sh <notarytool-keychain-profile>}"
@@ -52,6 +54,10 @@ if [ -d "$SPK" ]; then
   done
   codesign --force --options runtime --timestamp --sign "$SIGN_HASH" "$SPK"
 fi
+# Sentry ships as a dynamic xcframework (embedded Sentry.framework); re-sign it with
+# Developer ID + hardened runtime so notarization accepts it.
+SENTRY_FW="$APP/Contents/Frameworks/Sentry.framework"
+[ -d "$SENTRY_FW" ] && codesign --force --options runtime --timestamp --sign "$SIGN_HASH" "$SENTRY_FW"
 codesign --force --options runtime --timestamp --sign "$SIGN_HASH" \
     "$APP/Contents/Resources/Helpers/uhdrtool"
 codesign --force --options runtime --timestamp \
@@ -71,6 +77,25 @@ echo "▸ notarizing + stapling Gainmap.dmg…"
 xcrun notarytool submit "$DMG" --keychain-profile "$PROFILE" --wait
 xcrun stapler staple "$DMG"
 spctl -a -vvv --type install "$DMG" || true
+
+# ---------------------------------------------------------------------------
+# Sentry: upload dSYMs (so crash stacks symbolicate) + create/finalize the
+# release. org/project/token come from ~/.sentryclirc. The release id MUST match
+# what the SDK reports at runtime: bundleId@CFBundleShortVersionString+CFBundleVersion.
+# Non-fatal — never block a release on telemetry plumbing.
+# ---------------------------------------------------------------------------
+if command -v sentry-cli >/dev/null 2>&1; then
+  echo "▸ uploading dSYMs to Sentry…"
+  SHORT="$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$APP/Contents/Info.plist")"
+  BUILD="$(/usr/libexec/PlistBuddy -c 'Print CFBundleVersion' "$APP/Contents/Info.plist")"
+  REL="com.legacylab.gainmap@${SHORT}+${BUILD}"
+  sentry-cli debug-files upload --include-sources "$ARCHIVE/dSYMs" || echo "  (dSYM upload failed — continuing)"
+  sentry-cli releases new "$REL" || true
+  ( cd "$ROOT" && sentry-cli releases set-commits "$REL" --auto ) || true
+  sentry-cli releases finalize "$REL" || true
+else
+  echo "▸ sentry-cli not found — skipping dSYM upload"
+fi
 
 # ---------------------------------------------------------------------------
 # 2. Lightroom plugin → zip → notarize (the bundled binary is what's checked).
