@@ -1,0 +1,19 @@
+# Build artifacts (derived — rebuild from source / XcodeGen)
+build/
+DerivedData/
+*.xcarchive
+*.dmg
+
+# Xcode user state
+**/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+.swiftpm/
+
+# Synthesis temp files
+*.rawf16
+gm-preview-*.jpg
+gm-prev-*.jpg
+gainmap-*.rawf16
+
+# macOS
+.DS_Store

@@ -1,0 +1,83 @@
+# XcodeGen spec for Gainmap (Legacy Lab).
+# Regenerate the .xcodeproj with:  xcodegen generate
+# You normally don't need to — the generated Gainmap.xcodeproj is committed and
+# opens directly in Xcode. Only regenerate after editing this file.
+name: Gainmap
+options:
+  bundleIdPrefix: com.legacylab
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+  groupSortPosition: top
+
+settings:
+  base:
+    DEVELOPMENT_TEAM: S8HQ5TEYDE
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    CODE_SIGN_STYLE: Automatic
+
+targets:
+  Gainmap:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources
+      # Asset catalog is compiled (app icon + accent color).
+      - path: Resources/Assets.xcassets
+        buildPhase: resources
+      # Fonts ship as a folder reference so they stay in Contents/Resources/Fonts/
+      # (matches Info.plist ATSApplicationFontsPath = "Fonts").
+      - path: Resources/Fonts
+        type: folder
+        buildPhase: resources
+      # The uhdrtool helper stays in Contents/Resources/Helpers/ (folder ref).
+      # It is copied in by build-binary.sh before the project is generated.
+      - path: Resources/Helpers
+        type: folder
+        buildPhase: resources
+    settings:
+      base:
+        PRODUCT_NAME: Gainmap
+        PRODUCT_BUNDLE_IDENTIFIER: com.legacylab.gainmap
+        INFOPLIST_FILE: Sources/Support/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Sources/Support/Gainmap.entitlements
+        ENABLE_HARDENED_RUNTIME: YES
+        ENABLE_APP_SANDBOX: NO
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        COMBINE_HIDPI_IMAGES: YES
+        LD_RUNPATH_SEARCH_PATHS: "@executable_path/../Frameworks"
+
+  GainmapTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: Tests/GainmapTests
+    dependencies:
+      - target: Gainmap
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.legacylab.gainmap.tests
+        GENERATE_INFOPLIST_FILE: YES
+
+schemes:
+  Gainmap:
+    build:
+      targets:
+        Gainmap: all
+        GainmapTests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      gatherCoverageData: true
+      targets:
+        - GainmapTests
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release

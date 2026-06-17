@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Gainmap — HDR Pop tuner</title>
+<link href="https://fonts.googleapis.com/css2?family=Zilla+Slab:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#1a1818; --surface:#2c2a2b; --inset:#111010; --accent:#e05a3f; --accent-hot:#f47a5e;
+  --gold:#e8b86d; --gold-deep:#d4a96a; --stone:#dad7ce; --dim:rgba(218,215,206,.45); --line:rgba(218,215,206,.10);
+  --ui:'Inter',sans-serif; --display:'Zilla Slab',serif; --mono:'JetBrains Mono',monospace;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:var(--ui);background:radial-gradient(120% 80% at 50% -10%,#241f1d,#0d0c0b 70%);
+  color:var(--stone);min-height:100vh;display:flex;align-items:center;justify-content:center;padding:40px 20px}
+.wrap{width:920px;max-width:100%}
+.head{display:flex;align-items:center;gap:13px;margin-bottom:8px}
+.head svg{width:40px;height:40px;filter:drop-shadow(0 4px 10px rgba(0,0,0,.5))}
+.head h1{font-family:var(--display);font-weight:600;font-size:24px;color:#fff}
+.head h1 b{color:var(--accent)}
+.sub{color:var(--dim);font-size:13px;margin-bottom:22px;line-height:1.5}
+.sub code{font-family:var(--mono);color:var(--gold-deep)}
+
+.stage{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:8px}
+.pane{background:var(--inset);border:1px solid var(--line);border-radius:14px;overflow:hidden;position:relative}
+.pane .tag{position:absolute;top:11px;left:11px;z-index:2;font-family:var(--mono);font-size:10.5px;font-weight:600;
+  letter-spacing:.1em;padding:5px 9px;border-radius:6px;text-transform:uppercase}
+.pane.sdr .tag{background:rgba(20,18,17,.72);color:var(--stone);border:1px solid rgba(218,215,206,.18)}
+.pane.hdr .tag{background:var(--accent);color:#fff}
+.pane img{display:block;width:100%;height:520px;object-fit:cover}
+.caption{text-align:center;font-size:11px;color:var(--dim);margin:6px 0 20px;font-family:var(--mono);letter-spacing:.04em}
+
+.panel{background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:24px 26px}
+.readout{display:flex;gap:30px;margin-bottom:22px;align-items:flex-end;flex-wrap:wrap}
+.stat .k{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--dim);margin-bottom:4px}
+.stat .v{font-family:var(--mono);font-size:26px;color:var(--gold);font-weight:500;line-height:1}
+.stat .v small{font-size:13px;color:var(--dim)}
+.stat.big .v{color:#fff;font-size:30px}
+.spacer{flex:1}
+.cmp{font-family:var(--mono);font-size:11px;color:var(--dim);text-align:right;line-height:1.6}
+.cmp b{color:var(--stone)}
+
+.sliderrow{display:flex;align-items:center;gap:16px}
+input[type=range]{-webkit-appearance:none;flex:1;height:6px;border-radius:3px;
+  background:linear-gradient(90deg,#5a5550,var(--accent));outline:none}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:24px;height:24px;border-radius:50%;
+  background:radial-gradient(circle at 35% 30%,#fff,var(--accent-hot) 45%,var(--accent));
+  cursor:pointer;box-shadow:0 3px 10px rgba(224,90,63,.6),0 0 0 1px rgba(0,0,0,.3)}
+.ticks{display:flex;justify-content:space-between;margin-top:9px;font-family:var(--mono);font-size:10px;color:var(--dim);letter-spacing:.05em}
+.ticks span{position:relative}
+.ticks .bal{color:var(--gold)}
+
+.label{min-width:118px;text-align:center}
+.label .name{font-family:var(--display);font-size:20px;font-weight:600;color:#fff}
+.label .x{font-family:var(--mono);font-size:12px;color:var(--accent)}
+
+.note{margin-top:20px;background:var(--inset);border:1px solid var(--line);border-radius:11px;padding:14px 16px;
+  font-size:12.5px;line-height:1.65;color:var(--dim)}
+.note b{color:var(--gold-deep)}
+.note .hdrwarn{color:var(--accent);font-weight:600}
+.toggle{display:inline-flex;gap:3px;background:var(--inset);border:1px solid var(--line);border-radius:9px;padding:3px;margin-left:auto}
+.toggle button{border:none;background:none;color:var(--dim);font-family:var(--ui);font-size:11.5px;font-weight:600;
+  padding:7px 14px;border-radius:6px;cursor:pointer}
+.toggle button.on{background:#363334;color:#fff}
+.headrow{display:flex;align-items:center;gap:13px;margin-bottom:8px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="headrow">
+    <svg viewBox="0 0 200 200"><circle cx="100" cy="100" r="95" fill="none" stroke="#e05a3f" stroke-width="10"/><circle cx="100" cy="100" r="85" fill="#fff"/><circle cx="100" cy="100" r="75" fill="#2c2a2b"/><g transform="translate(100,110) scale(.9)"><path d="M-21-2L-30 15Q-32 25-20 30L20 30Q32 25 30 15L21-2Z" fill="#f0e7d6"/><path d="M-15-55L-15-30L-30 15Q-32 25-20 30L20 30Q32 25 30 15L15-30L15-55" fill="none" stroke="#dad7ce" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/><line x1="-18" y1="-55" x2="18" y2="-55" stroke="#dad7ce" stroke-width="2.5" stroke-linecap="round"/><g stroke="#e05a3f" stroke-width="2" fill="none"><path d="M0-18Q11-9 9 0"/><path d="M0-18Q11-9 9 0" transform="rotate(60)"/><path d="M0-18Q11-9 9 0" transform="rotate(120)"/><path d="M0-18Q11-9 9 0" transform="rotate(180)"/><path d="M0-18Q11-9 9 0" transform="rotate(240)"/><path d="M0-18Q11-9 9 0" transform="rotate(300)"/></g><circle r="5" fill="#e05a3f"/></g></svg>
+    <div><h1>HDR Pop <b>tuner</b></h1></div>
+    <div class="toggle" id="cmpToggle">
+      <button data-mode="hdr" class="on">HDR on</button>
+      <button data-mode="sdr">SDR fallback</button>
+      <button data-mode="split">Split</button>
+    </div>
+  </div>
+  <div class="sub">
+    Same photo, same SDR base — only the gain map changes with the slider. These are <b>real UltraHDR JPEGs</b>.
+    <span class="hdrwarn" style="color:#e05a3f">View in Chrome or Safari on an HDR display</span>
+    (MacBook Pro XDR / Pro Display) to see the actual pop; on a standard screen they look identical to SDR — which is exactly the fallback you want.
+  </div>
+
+  <div class="stage" id="stage">
+    <div class="pane hdr" id="paneL"><span class="tag">HDR · gain map</span><img id="imgL" src="hdr-samples/uhdr_200.jpg" alt=""></div>
+    <div class="pane sdr" id="paneR" style="display:none"><span class="tag">SDR fallback (your edit)</span><img id="imgR" src="hdr-samples/sdr.jpg" alt=""></div>
+  </div>
+  <div class="caption" id="caption">HDR rendering — drag the slider, toggle to compare the SDR fallback</div>
+
+  <div class="panel">
+    <div class="readout">
+      <div class="label">
+        <div class="name" id="lblName">Balanced</div>
+        <div class="x" id="lblX">2.0× boost</div>
+      </div>
+      <div class="stat big"><div class="k">Peak boost</div><div class="v"><span id="vBoost">2.00</span><small>×</small></div></div>
+      <div class="stat"><div class="k">Headroom</div><div class="v"><span id="vStops">1.00</span><small> stops</small></div></div>
+      <div class="stat"><div class="k">Target peak</div><div class="v"><span id="vNits">406</span><small> nits</small></div></div>
+      <div class="spacer"></div>
+      <div class="cmp">SDR fallback: <b>identical to your edit</b><br>knee starts at <b>~55% luma</b></div>
+    </div>
+
+    <div class="sliderrow">
+      <input type="range" id="slider" min="0" max="7" step="1" value="3">
+    </div>
+    <div class="ticks">
+      <span>1.25×</span><span>1.5×</span><span>1.75×</span><span class="bal">2.0× ·Balanced</span>
+      <span>2.5×</span><span>3×</span><span>3.5×</span><span>4×</span>
+    </div>
+
+    <div class="note">
+      <b>How to read this:</b> the slider is the <b>max highlight boost</b>. Midtones and shadows stay put;
+      only highlights above the knee ramp up. <b>2.0× (Balanced)</b> is the proposed default.
+      Tip for your exports: pull Highlights/Whites back slightly in Lightroom so the brightest spots aren't pure-white —
+      the pop has more room and looks more natural.
+    </div>
+  </div>
+</div>
+
+<script>
+const LEVELS = [
+  {tag:'125', b:1.25, name:'Whisper'},
+  {tag:'150', b:1.50, name:'Subtle'},
+  {tag:'175', b:1.75, name:'Soft'},
+  {tag:'200', b:2.00, name:'Balanced'},
+  {tag:'250', b:2.50, name:'Punchy'},
+  {tag:'300', b:3.00, name:'Bold'},
+  {tag:'350', b:3.50, name:'Strong'},
+  {tag:'400', b:4.00, name:'Max'},
+];
+const $ = id => document.getElementById(id);
+let mode = 'hdr';
+
+function nits(b){ return Math.round(Math.min(10000, Math.max(203, 203*b))); }
+function stops(b){ return (Math.log(b)/Math.log(2)); }
+
+function render(){
+  const i = +$('slider').value, L = LEVELS[i];
+  const src = `hdr-samples/uhdr_${L.tag}.jpg`;
+  $('imgL').src = (mode === 'sdr') ? 'hdr-samples/sdr.jpg' : src;
+  $('imgR').src = (mode === 'split') ? 'hdr-samples/sdr.jpg' : 'hdr-samples/sdr.jpg';
+  $('paneR').style.display = (mode === 'split') ? 'block' : 'none';
+  $('stage').style.gridTemplateColumns = (mode === 'split') ? '1fr 1fr' : '1fr';
+  $('paneL').querySelector('.tag').textContent = (mode==='sdr') ? 'SDR fallback (your edit)' : 'HDR · gain map';
+  $('paneL').className = 'pane ' + (mode==='sdr' ? 'sdr' : 'hdr');
+  $('lblName').textContent = L.name;
+  $('lblX').textContent = L.b.toFixed(2).replace(/0$/,'') + '× boost';
+  $('vBoost').textContent = L.b.toFixed(2);
+  $('vStops').textContent = stops(L.b).toFixed(2);
+  $('vNits').textContent = nits(L.b);
+  $('caption').textContent = (mode==='split')
+    ? 'Left: HDR rendering · Right: SDR fallback (what non-HDR screens show)'
+    : (mode==='sdr' ? 'SDR fallback — what every non-HDR screen shows (identical to your edit)'
+                    : 'HDR rendering — drag the slider, toggle to compare the SDR fallback');
+}
+$('slider').addEventListener('input', render);
+document.querySelectorAll('#cmpToggle button').forEach(btn=>{
+  btn.onclick = () => {
+    document.querySelectorAll('#cmpToggle button').forEach(b=>b.classList.remove('on'));
+    btn.classList.add('on'); mode = btn.dataset.mode; render();
+  };
+});
+render();
+</script>
+</body>
+</html>

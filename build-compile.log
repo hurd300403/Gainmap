@@ -1,0 +1,267 @@
+[  1%] Building CXX object _deps/libultrahdr-build/CMakeFiles/image_io.dir/third_party/image_io/src/base/byte_buffer.cc.o
+[  3%] Building CXX object _deps/libultrahdr-build/CMakeFiles/image_io.dir/third_party/image_io/src/base/byte_pointer_data_destination.cc.o
+[  4%] Building CXX object _deps/libultrahdr-build/CMakeFiles/image_io.dir/third_party/image_io/src/base/data_context.cc.o
+[  6%] Building CXX object _deps/libultrahdr-build/CMakeFiles/image_io.dir/third_party/image_io/src/base/data_line_map.cc.o
+[  7%] Building CXX object _deps/libultrahdr-build/CMakeFiles/image_io.dir/third_party/image_io/src/base/data_range_tracking_destination.cc.o
+[  9%] Building CXX object _deps/libultrahdr-build/CMakeFiles/image_io.dir/third_party/image_io/src/base/data_scanner.cc.o
+[ 11%] Building CXX object _deps/libultrahdr-build/CMakeFiles/image_io.dir/third_party/image_io/src/base/data_segment.cc.o
+[ 12%] Building CXX object _deps/libultrahdr-build/CMakeFiles/image_io.dir/third_party/image_io/src/base/data_segment_data_source.cc.o
+[ 14%] Building CXX object _deps/libultrahdr-build/CMakeFiles/image_io.dir/third_party/image_io/src/base/istream_ref_data_source.cc.o
+[ 15%] Building CXX object _deps/libultrahdr-build/CMakeFiles/image_io.dir/third_party/image_io/src/base/message_handler.cc.o
+[ 17%] Building CXX object _deps/libultrahdr-build/CMakeFiles/image_io.dir/third_party/image_io/src/base/message_writer.cc.o
+[ 19%] Building CXX object _deps/libultrahdr-build/CMakeFiles/image_io.dir/third_party/image_io/src/base/ostream_ref_data_destination.cc.o
+[ 20%] Building CXX object _deps/libultrahdr-build/CMakeFiles/image_io.dir/third_party/image_io/src/base/string_ref_data_source.cc.o
+[ 22%] Building CXX object _deps/libultrahdr-build/CMakeFiles/image_io.dir/third_party/image_io/src/extras/base64_decoder_data_destination.cc.o
+[ 23%] Building CXX object _deps/libultrahdr-build/CMakeFiles/image_io.dir/third_party/image_io/src/gcontainer/gcontainer.cc.o
+[ 25%] Building CXX object _deps/libultrahdr-build/CMakeFiles/image_io.dir/third_party/image_io/src/jpeg/jpeg_image_extractor.cc.o
+[ 26%] Building CXX object _deps/libultrahdr-build/CMakeFiles/image_io.dir/third_party/image_io/src/jpeg/jpeg_info_builder.cc.o
+[ 28%] Building CXX object _deps/libultrahdr-build/CMakeFiles/image_io.dir/third_party/image_io/src/jpeg/jpeg_marker.cc.o
+[ 30%] Building CXX object _deps/libultrahdr-build/CMakeFiles/image_io.dir/third_party/image_io/src/jpeg/jpeg_scanner.cc.o
+[ 31%] Building CXX object _deps/libultrahdr-build/CMakeFiles/image_io.dir/third_party/image_io/src/jpeg/jpeg_segment.cc.o
+[ 33%] Building CXX object _deps/libultrahdr-build/CMakeFiles/image_io.dir/third_party/image_io/src/jpeg/jpeg_segment_builder.cc.o
+[ 34%] Building CXX object _deps/libultrahdr-build/CMakeFiles/image_io.dir/third_party/image_io/src/jpeg/jpeg_segment_lister.cc.o
+[ 36%] Building CXX object _deps/libultrahdr-build/CMakeFiles/image_io.dir/third_party/image_io/src/jpeg/jpeg_xmp_data_extractor.cc.o
+[ 38%] Building CXX object _deps/libultrahdr-build/CMakeFiles/image_io.dir/third_party/image_io/src/jpeg/jpeg_xmp_info.cc.o
+[ 39%] Building CXX object _deps/libultrahdr-build/CMakeFiles/image_io.dir/third_party/image_io/src/jpeg/jpeg_xmp_info_builder.cc.o
+[ 41%] Building CXX object _deps/libultrahdr-build/CMakeFiles/image_io.dir/third_party/image_io/src/modp_b64/modp_b64.cc.o
+[ 42%] Building CXX object _deps/libultrahdr-build/CMakeFiles/image_io.dir/third_party/image_io/src/utils/file_utils.cc.o
+[ 44%] Building CXX object _deps/libultrahdr-build/CMakeFiles/image_io.dir/third_party/image_io/src/xml/xml_attribute_rule.cc.o
+[ 46%] Building CXX object _deps/libultrahdr-build/CMakeFiles/image_io.dir/third_party/image_io/src/xml/xml_cdata_and_comment_rules.cc.o
+[ 47%] Building CXX object _deps/libultrahdr-build/CMakeFiles/image_io.dir/third_party/image_io/src/xml/xml_element_rules.cc.o
+[ 49%] Building CXX object _deps/libultrahdr-build/CMakeFiles/image_io.dir/third_party/image_io/src/xml/xml_handler.cc.o
+[ 50%] Building CXX object _deps/libultrahdr-build/CMakeFiles/image_io.dir/third_party/image_io/src/xml/xml_pi_rule.cc.o
+[ 52%] Building CXX object _deps/libultrahdr-build/CMakeFiles/image_io.dir/third_party/image_io/src/xml/xml_reader.cc.o
+[ 53%] Building CXX object _deps/libultrahdr-build/CMakeFiles/image_io.dir/third_party/image_io/src/xml/xml_rule.cc.o
+[ 55%] Building CXX object _deps/libultrahdr-build/CMakeFiles/image_io.dir/third_party/image_io/src/xml/xml_token_context.cc.o
+[ 57%] Building CXX object _deps/libultrahdr-build/CMakeFiles/image_io.dir/third_party/image_io/src/xml/xml_writer.cc.o
+[ 58%] Linking CXX static library libimage_io.a
+[ 58%] Built target image_io
+[ 60%] Creating directories for 'turbojpeg'
+[ 61%] Performing download step (git clone) for 'turbojpeg'
+Cloning into 'turbojpeg'...
+HEAD is now at 20ade4de Build: Fix float test errors with Xcode 14.2/Arm
+[ 63%] Performing update step for 'turbojpeg'
+-- Already at requested tag: 3.1.0
+[ 65%] No patch step for 'turbojpeg'
+[ 66%] Performing configure step for 'turbojpeg'
+-- The C compiler identification is AppleClang 21.0.0.21000101
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Check for working C compiler: /usr/bin/cc - skipped
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- CMAKE_BUILD_TYPE = Release
+-- VERSION = 3.1.0, BUILD = 20260616
+-- 64-bit build (arm64)
+-- CMAKE_INSTALL_PREFIX = /opt/libjpeg-turbo
+-- CMAKE_INSTALL_BINDIR = bin (/opt/libjpeg-turbo/bin)
+-- CMAKE_INSTALL_DATAROOTDIR =  (/opt/libjpeg-turbo)
+-- CMAKE_INSTALL_DOCDIR = doc (/opt/libjpeg-turbo/doc)
+-- CMAKE_INSTALL_INCLUDEDIR = include (/opt/libjpeg-turbo/include)
+-- CMAKE_INSTALL_LIBDIR = lib (/opt/libjpeg-turbo/lib)
+-- CMAKE_INSTALL_MANDIR = man (/opt/libjpeg-turbo/man)
+-- Shared libraries disabled (ENABLE_SHARED = 0)
+-- Static libraries enabled (ENABLE_STATIC = 1)
+-- Arithmetic decoding support enabled (WITH_ARITH_DEC = 1)
+-- Arithmetic encoding support enabled (WITH_ARITH_ENC = 1)
+-- TurboJPEG API library enabled (WITH_TURBOJPEG = 1)
+-- TurboJPEG Java wrapper disabled (WITH_JAVA = 0)
+-- Emulating libjpeg API/ABI v6.2 (WITH_JPEG7 = 0, WITH_JPEG8 = 0)
+-- libjpeg API shared library version = 62.4.0
+-- Compiler flags =  -DUHDR_ENABLE_INTRINSICS -DUHDR_WRITE_ISO -ffunction-sections -fdata-sections -fomit-frame-pointer -ffp-contract=fast -march=armv8-a -fno-lax-vector-conversions -O3 -DNDEBUG
+-- Linker flags =  
+-- Looking for sys/types.h
+-- Looking for sys/types.h - found
+-- Looking for stdint.h
+-- Looking for stdint.h - found
+-- Looking for stddef.h
+-- Looking for stddef.h - found
+-- Check size of size_t
+-- Check size of size_t - done
+-- Check size of unsigned long
+-- Check size of unsigned long - done
+-- Performing Test HAVE_BUILTIN_CTZL
+-- Performing Test HAVE_BUILTIN_CTZL - Success
+-- Performing Test RIGHT_SHIFT_IS_UNSIGNED
+-- Performing Test RIGHT_SHIFT_IS_UNSIGNED - Failed
+-- Performing Test HIDDEN_WORKS
+-- Performing Test HIDDEN_WORKS - Success
+-- HIDDEN = __attribute__((visibility("hidden")))
+-- Performing Test INLINE_WORKS
+-- Performing Test INLINE_WORKS - Success
+-- INLINE = __inline__ __attribute__((always_inline)) (FORCE_INLINE = 1)
+-- Performing Test HAVE_THREAD_LOCAL
+-- Performing Test HAVE_THREAD_LOCAL - Success
+-- THREAD_LOCAL = __thread
+-- CMAKE_EXECUTABLE_SUFFIX = 
+-- Performing Test HAVE_VLD1_S16_X3
+-- Performing Test HAVE_VLD1_S16_X3 - Success
+-- Performing Test HAVE_VLD1_U16_X2
+-- Performing Test HAVE_VLD1_U16_X2 - Success
+-- Performing Test HAVE_VLD1Q_U8_X4
+-- Performing Test HAVE_VLD1Q_U8_X4 - Success
+-- Use full Neon SIMD intrinsics implementation (NEON_INTRINSICS = ON)
+-- SIMD extensions: arm64 (WITH_SIMD = 1)
+-- FLOATTEST8 = fp-contract
+-- FLOATTEST12 = fp-contract
+-- Configuring done (2.8s)
+-- Generating done (0.5s)
+CMake Warning:
+  Manually-specified variables were not used by the project:
+
+    CMAKE_CXX_COMPILER
+    CMAKE_CXX_FLAGS
+    CMAKE_CXX_FLAGS_DEBUG
+    CMAKE_CXX_FLAGS_MINSIZEREL
+    CMAKE_CXX_FLAGS_RELEASE
+    CMAKE_CXX_FLAGS_RELWITHDEBINFO
+
+
+-- Build files have been written to: /Users/iamthesam/sdrhdr/build/_deps/libultrahdr-build/turbojpeg/src/turbojpeg-build
+[ 68%] Performing build step for 'turbojpeg'
+[  2%] Building C object CMakeFiles/jpeg16-static.dir/src/jcapistd.c.o
+[  2%] Building C object CMakeFiles/jpeg16-static.dir/src/jccolor.c.o
+[  2%] Building C object CMakeFiles/jpeg16-static.dir/src/jcdiffct.c.o
+[  4%] Building C object CMakeFiles/jpeg16-static.dir/src/jclossls.c.o
+[  4%] Building C object CMakeFiles/jpeg16-static.dir/src/jcmainct.c.o
+[  6%] Building C object CMakeFiles/jpeg16-static.dir/src/jcprepct.c.o
+[  6%] Building C object CMakeFiles/jpeg16-static.dir/src/jcsample.c.o
+[  8%] Building C object CMakeFiles/jpeg16-static.dir/src/jdapistd.c.o
+[  8%] Building C object CMakeFiles/jpeg16-static.dir/src/jdcolor.c.o
+[  8%] Building C object CMakeFiles/jpeg16-static.dir/src/jddiffct.c.o
+[ 10%] Building C object CMakeFiles/jpeg16-static.dir/src/jdlossls.c.o
+[ 10%] Building C object CMakeFiles/jpeg16-static.dir/src/jdmainct.c.o
+[ 12%] Building C object CMakeFiles/jpeg16-static.dir/src/jdpostct.c.o
+[ 12%] Building C object CMakeFiles/jpeg16-static.dir/src/jdsample.c.o
+[ 12%] Building C object CMakeFiles/jpeg16-static.dir/src/jutils.c.o
+[ 12%] Built target jpeg16-static
+[ 12%] Building C object simd/CMakeFiles/simd.dir/arm/jcgray-neon.c.o
+[ 14%] Building C object simd/CMakeFiles/simd.dir/arm/jcphuff-neon.c.o
+[ 14%] Building C object simd/CMakeFiles/simd.dir/arm/jcsample-neon.c.o
+[ 14%] Building C object simd/CMakeFiles/simd.dir/arm/jdmerge-neon.c.o
+[ 16%] Building C object simd/CMakeFiles/simd.dir/arm/jdsample-neon.c.o
+[ 16%] Building C object simd/CMakeFiles/simd.dir/arm/jfdctfst-neon.c.o
+[ 18%] Building C object simd/CMakeFiles/simd.dir/arm/jidctred-neon.c.o
+[ 18%] Building C object simd/CMakeFiles/simd.dir/arm/jquanti-neon.c.o
+[ 18%] Building C object simd/CMakeFiles/simd.dir/arm/jccolor-neon.c.o
+[ 20%] Building C object simd/CMakeFiles/simd.dir/arm/jidctint-neon.c.o
+[ 20%] Building C object simd/CMakeFiles/simd.dir/arm/jidctfst-neon.c.o
+[ 22%] Building C object simd/CMakeFiles/simd.dir/arm/aarch64/jchuff-neon.c.o
+[ 22%] Building C object simd/CMakeFiles/simd.dir/arm/jdcolor-neon.c.o
+[ 25%] Building C object simd/CMakeFiles/simd.dir/arm/jfdctint-neon.c.o
+[ 25%] Building C object simd/CMakeFiles/simd.dir/arm/aarch64/jsimd.c.o
+[ 25%] Built target simd
+[ 25%] Building C object CMakeFiles/jpeg12-static.dir/src/jcapistd.c.o
+[ 25%] Building C object CMakeFiles/jpeg12-static.dir/src/jccolor.c.o
+[ 27%] Building C object CMakeFiles/jpeg12-static.dir/src/jcdiffct.c.o
+[ 27%] Building C object CMakeFiles/jpeg12-static.dir/src/jclossls.c.o
+[ 29%] Building C object CMakeFiles/jpeg12-static.dir/src/jcmainct.c.o
+[ 29%] Building C object CMakeFiles/jpeg12-static.dir/src/jcprepct.c.o
+[ 29%] Building C object CMakeFiles/jpeg12-static.dir/src/jcsample.c.o
+[ 31%] Building C object CMakeFiles/jpeg12-static.dir/src/jdapistd.c.o
+[ 31%] Building C object CMakeFiles/jpeg12-static.dir/src/jdcolor.c.o
+[ 33%] Building C object CMakeFiles/jpeg12-static.dir/src/jddiffct.c.o
+[ 33%] Building C object CMakeFiles/jpeg12-static.dir/src/jdlossls.c.o
+[ 35%] Building C object CMakeFiles/jpeg12-static.dir/src/jdmainct.c.o
+[ 35%] Building C object CMakeFiles/jpeg12-static.dir/src/jdpostct.c.o
+[ 35%] Building C object CMakeFiles/jpeg12-static.dir/src/jdsample.c.o
+[ 37%] Building C object CMakeFiles/jpeg12-static.dir/src/jutils.c.o
+[ 37%] Building C object CMakeFiles/jpeg12-static.dir/src/jccoefct.c.o
+[ 39%] Building C object CMakeFiles/jpeg12-static.dir/src/jcdctmgr.c.o
+[ 39%] Building C object CMakeFiles/jpeg12-static.dir/src/jdcoefct.c.o
+[ 39%] Building C object CMakeFiles/jpeg12-static.dir/src/jddctmgr.c.o
+[ 41%] Building C object CMakeFiles/jpeg12-static.dir/src/jdmerge.c.o
+[ 41%] Building C object CMakeFiles/jpeg12-static.dir/src/jfdctfst.c.o
+[ 43%] Building C object CMakeFiles/jpeg12-static.dir/src/jfdctint.c.o
+[ 43%] Building C object CMakeFiles/jpeg12-static.dir/src/jidctflt.c.o
+[ 45%] Building C object CMakeFiles/jpeg12-static.dir/src/jidctfst.c.o
+[ 45%] Building C object CMakeFiles/jpeg12-static.dir/src/jidctint.c.o
+[ 45%] Building C object CMakeFiles/jpeg12-static.dir/src/jidctred.c.o
+[ 47%] Building C object CMakeFiles/jpeg12-static.dir/src/jquant1.c.o
+[ 47%] Building C object CMakeFiles/jpeg12-static.dir/src/jquant2.c.o
+[ 47%] Built target jpeg12-static
+[ 47%] Building C object CMakeFiles/jpeg-static.dir/src/jcapistd.c.o
+[ 50%] Building C object CMakeFiles/jpeg-static.dir/src/jccolor.c.o
+[ 50%] Building C object CMakeFiles/jpeg-static.dir/src/jcdiffct.c.o
+[ 52%] Building C object CMakeFiles/jpeg-static.dir/src/jclossls.c.o
+[ 52%] Building C object CMakeFiles/jpeg-static.dir/src/jcmainct.c.o
+[ 52%] Building C object CMakeFiles/jpeg-static.dir/src/jcprepct.c.o
+[ 54%] Building C object CMakeFiles/jpeg-static.dir/src/jcsample.c.o
+[ 54%] Building C object CMakeFiles/jpeg-static.dir/src/jdapistd.c.o
+[ 56%] Building C object CMakeFiles/jpeg-static.dir/src/jdcolor.c.o
+[ 56%] Building C object CMakeFiles/jpeg-static.dir/src/jddiffct.c.o
+[ 58%] Building C object CMakeFiles/jpeg-static.dir/src/jdlossls.c.o
+[ 58%] Building C object CMakeFiles/jpeg-static.dir/src/jdmainct.c.o
+[ 58%] Building C object CMakeFiles/jpeg-static.dir/src/jdpostct.c.o
+[ 60%] Building C object CMakeFiles/jpeg-static.dir/src/jdsample.c.o
+[ 60%] Building C object CMakeFiles/jpeg-static.dir/src/jutils.c.o
+[ 62%] Building C object CMakeFiles/jpeg-static.dir/src/jccoefct.c.o
+[ 62%] Building C object CMakeFiles/jpeg-static.dir/src/jcdctmgr.c.o
+[ 62%] Building C object CMakeFiles/jpeg-static.dir/src/jdcoefct.c.o
+[ 64%] Building C object CMakeFiles/jpeg-static.dir/src/jddctmgr.c.o
+[ 64%] Building C object CMakeFiles/jpeg-static.dir/src/jdmerge.c.o
+[ 66%] Building C object CMakeFiles/jpeg-static.dir/src/jfdctfst.c.o
+[ 66%] Building C object CMakeFiles/jpeg-static.dir/src/jfdctint.c.o
+[ 68%] Building C object CMakeFiles/jpeg-static.dir/src/jidctflt.c.o
+[ 68%] Building C object CMakeFiles/jpeg-static.dir/src/jidctfst.c.o
+[ 68%] Building C object CMakeFiles/jpeg-static.dir/src/jidctint.c.o
+[ 70%] Building C object CMakeFiles/jpeg-static.dir/src/jidctred.c.o
+[ 70%] Building C object CMakeFiles/jpeg-static.dir/src/jquant1.c.o
+[ 72%] Building C object CMakeFiles/jpeg-static.dir/src/jquant2.c.o
+[ 72%] Building C object CMakeFiles/jpeg-static.dir/src/jcapimin.c.o
+[ 72%] Building C object CMakeFiles/jpeg-static.dir/src/jchuff.c.o
+[ 75%] Building C object CMakeFiles/jpeg-static.dir/src/jcicc.c.o
+[ 75%] Building C object CMakeFiles/jpeg-static.dir/src/jcinit.c.o
+[ 77%] Building C object CMakeFiles/jpeg-static.dir/src/jclhuff.c.o
+[ 77%] Building C object CMakeFiles/jpeg-static.dir/src/jcmarker.c.o
+[ 79%] Building C object CMakeFiles/jpeg-static.dir/src/jcmaster.c.o
+[ 79%] Building C object CMakeFiles/jpeg-static.dir/src/jcomapi.c.o
+[ 79%] Building C object CMakeFiles/jpeg-static.dir/src/jcparam.c.o
+[ 81%] Building C object CMakeFiles/jpeg-static.dir/src/jcphuff.c.o
+[ 81%] Building C object CMakeFiles/jpeg-static.dir/src/jctrans.c.o
+[ 83%] Building C object CMakeFiles/jpeg-static.dir/src/jdapimin.c.o
+[ 83%] Building C object CMakeFiles/jpeg-static.dir/src/jdatadst.c.o
+[ 83%] Building C object CMakeFiles/jpeg-static.dir/src/jdatasrc.c.o
+[ 85%] Building C object CMakeFiles/jpeg-static.dir/src/jdhuff.c.o
+[ 85%] Building C object CMakeFiles/jpeg-static.dir/src/jdicc.c.o
+[ 87%] Building C object CMakeFiles/jpeg-static.dir/src/jdinput.c.o
+[ 87%] Building C object CMakeFiles/jpeg-static.dir/src/jdlhuff.c.o
+[ 89%] Building C object CMakeFiles/jpeg-static.dir/src/jdmarker.c.o
+[ 89%] Building C object CMakeFiles/jpeg-static.dir/src/jdmaster.c.o
+[ 89%] Building C object CMakeFiles/jpeg-static.dir/src/jdphuff.c.o
+[ 91%] Building C object CMakeFiles/jpeg-static.dir/src/jdtrans.c.o
+[ 91%] Building C object CMakeFiles/jpeg-static.dir/src/jerror.c.o
+[ 93%] Building C object CMakeFiles/jpeg-static.dir/src/jfdctflt.c.o
+[ 93%] Building C object CMakeFiles/jpeg-static.dir/src/jmemmgr.c.o
+[ 93%] Building C object CMakeFiles/jpeg-static.dir/src/jmemnobs.c.o
+[ 95%] Building C object CMakeFiles/jpeg-static.dir/src/jpeg_nbits.c.o
+[ 95%] Building C object CMakeFiles/jpeg-static.dir/src/jaricom.c.o
+[ 97%] Building C object CMakeFiles/jpeg-static.dir/src/jcarith.c.o
+[ 97%] Building C object CMakeFiles/jpeg-static.dir/src/jdarith.c.o
+[100%] Linking C static library libjpeg.a
+[100%] Built target jpeg-static
+[ 69%] No install step for 'turbojpeg'
+[ 71%] Completed 'turbojpeg'
+[ 71%] Built target turbojpeg
+[ 73%] Building CXX object _deps/libultrahdr-build/CMakeFiles/core.dir/lib/src/editorhelper.cpp.o
+[ 74%] Building CXX object _deps/libultrahdr-build/CMakeFiles/core.dir/lib/src/gainmapmath.cpp.o
+[ 76%] Building CXX object _deps/libultrahdr-build/CMakeFiles/core.dir/lib/src/gainmapmetadata.cpp.o
+[ 77%] Building CXX object _deps/libultrahdr-build/CMakeFiles/core.dir/lib/src/icc.cpp.o
+[ 79%] Building CXX object _deps/libultrahdr-build/CMakeFiles/core.dir/lib/src/jpegdecoderhelper.cpp.o
+[ 80%] Building CXX object _deps/libultrahdr-build/CMakeFiles/core.dir/lib/src/jpegencoderhelper.cpp.o
+[ 82%] Building CXX object _deps/libultrahdr-build/CMakeFiles/core.dir/lib/src/jpegr.cpp.o
+[ 84%] Building CXX object _deps/libultrahdr-build/CMakeFiles/core.dir/lib/src/jpegrutils.cpp.o
+[ 85%] Building CXX object _deps/libultrahdr-build/CMakeFiles/core.dir/lib/src/multipictureformat.cpp.o
+[ 87%] Building CXX object _deps/libultrahdr-build/CMakeFiles/core.dir/lib/src/ultrahdr_api.cpp.o
+[ 88%] Building CXX object _deps/libultrahdr-build/CMakeFiles/core.dir/lib/src/dsp/arm/editorhelper_neon.cpp.o
+[ 90%] Building CXX object _deps/libultrahdr-build/CMakeFiles/core.dir/lib/src/dsp/arm/gainmapmath_neon.cpp.o
+[ 92%] Linking CXX static library libcore.a
+[ 92%] Built target core
+[ 93%] Linking CXX static library libuhdr.a
+[ 93%] Built target uhdr
+[ 95%] Building CXX object CMakeFiles/uhdrtool.dir/src/main.cpp.o
+[ 96%] Building CXX object CMakeFiles/uhdrtool.dir/src/tiff_reader.cpp.o
+[ 98%] Building CXX object CMakeFiles/uhdrtool.dir/src/encoder.cpp.o
+[100%] Linking CXX executable uhdrtool
+Copying uhdrtool into the .lrplugin bundle (/Users/iamthesam/sdrhdr/upstream/lua/lightroom-hdr.lrplugin/bin/mac)
+[100%] Built target uhdrtool

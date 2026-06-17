@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <!-- glossy light-gray squircle frame (Legacy Lab family) -->
+    <linearGradient id="frame" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%"  stop-color="#f4f4f3"/>
+      <stop offset="48%" stop-color="#e2e1de"/>
+      <stop offset="52%" stop-color="#d6d4d0"/>
+      <stop offset="100%" stop-color="#bdbab4"/>
+    </linearGradient>
+    <radialGradient id="sheen" cx="50%" cy="32%" r="62%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity=".55"/>
+      <stop offset="60%" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+    <!-- HDR luminance liquid -->
+    <linearGradient id="lum" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0%" stop-color="#bdb6a6"/>
+      <stop offset="55%" stop-color="#f4e9d6"/>
+      <stop offset="100%" stop-color="#ffffff"/>
+    </linearGradient>
+    <radialGradient id="bloom" cx="50%" cy="38%" r="55%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity=".9"/>
+      <stop offset="100%" stop-color="#e8b86d" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="ds" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="14" stdDeviation="22" flood-color="#000000" flood-opacity="0.4"/>
+    </filter>
+  </defs>
+
+  <!-- frame -->
+  <rect x="0" y="0" width="1024" height="1024" rx="232" ry="232" fill="url(#frame)"/>
+  <rect x="0" y="0" width="1024" height="1024" rx="232" ry="232" fill="url(#sheen)"/>
+  <rect x="8" y="8" width="1008" height="1008" rx="226" ry="226" fill="none" stroke="#ffffff" stroke-opacity="0.5" stroke-width="3"/>
+
+  <!-- emblem (authored in the 200-space, centered & scaled) -->
+  <g transform="translate(512,512) scale(2.62) translate(-100,-100)" filter="url(#ds)">
+    <circle cx="100" cy="100" r="95" fill="none" stroke="#e05a3f" stroke-width="10"/>
+    <circle cx="100" cy="100" r="85" fill="#fff"/>
+    <circle cx="100" cy="100" r="75" fill="#2c2a2b"/>
+    <g transform="translate(100,110) scale(.9)">
+      <path d="M-21 -2 L-30 15 Q-32 25 -20 30 L20 30 Q32 25 30 15 L21 -2 Z" fill="url(#lum)"/>
+      <ellipse cx="0" cy="-6" rx="22" ry="6" fill="url(#bloom)"/>
+      <path d="M-15 -55 L-15 -30 L-30 15 Q-32 25 -20 30 L20 30 Q32 25 30 15 L15 -30 L15 -55"
+            fill="none" stroke="#dad7ce" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+      <line x1="-18" y1="-55" x2="18" y2="-55" stroke="#dad7ce" stroke-width="2.5" stroke-linecap="round"/>
+      <g stroke="#e05a3f" stroke-width="2" fill="none">
+        <path d="M0-18Q11-9 9 0"/>
+        <path d="M0-18Q11-9 9 0" transform="rotate(60)"/>
+        <path d="M0-18Q11-9 9 0" transform="rotate(120)"/>
+        <path d="M0-18Q11-9 9 0" transform="rotate(180)"/>
+        <path d="M0-18Q11-9 9 0" transform="rotate(240)"/>
+        <path d="M0-18Q11-9 9 0" transform="rotate(300)"/>
+      </g>
+      <circle r="5" fill="#e05a3f"/>
+    </g>
+  </g>
+</svg>

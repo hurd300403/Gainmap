@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Direct (Developer ID) distribution, not the Mac App Store: App Sandbox
+         is off so the app can read user-chosen files and spawn the bundled,
+         co-signed uhdrtool helper freely. Hardened Runtime stays ON (set in the
+         build settings) for notarization. -->
+    <key>com.apple.security.app-sandbox</key>
+    <false/>
+</dict>
+</plist>
