@@ -155,6 +155,46 @@ final class BatchModelTests: XCTestCase {
         return Float(sign) * Float(1024 + frac) / 1024 * pow(2, Float(exp - 15))
     }
 
+    // MARK: Preview-headroom simulation
+
+    func testPreviewHeadroomCapMapping() {
+        XCTAssertNil(PreviewHeadroom.full.cap)
+        XCTAssertEqual(PreviewHeadroom.x4.cap, 4.0)
+        XCTAssertEqual(PreviewHeadroom.x2.cap, 2.0)
+        XCTAssertEqual(PreviewHeadroom.x1.cap, 1.0)
+    }
+
+    /// The clamp the preview applies to simulate a lower-headroom display must
+    /// actually limit extended-linear values above the ceiling (and leave values
+    /// below it untouched). This guards the "Preview at headroom" mechanic.
+    func testColorClampLimitsExtendedValues() {
+        let space = CGColorSpace(name: CGColorSpace.extendedLinearSRGB)!
+        let ctx = CIContext(options: [.workingColorSpace: space])
+
+        func sample(_ v: CGFloat, cap: Double?) -> CGFloat {
+            var img = CIImage(color: CIColor(red: v, green: v, blue: v,
+                                             colorSpace: space)!)
+                .cropped(to: CGRect(x: 0, y: 0, width: 1, height: 1))
+            if let cap {
+                img = img.applyingFilter("CIColorClamp", parameters: [
+                    "inputMinComponents": CIVector(x: 0, y: 0, z: 0, w: 0),
+                    "inputMaxComponents": CIVector(x: cap, y: cap, z: cap, w: 1),
+                ])
+            }
+            var px: [Float] = [0, 0, 0, 0]
+            ctx.render(img, toBitmap: &px, rowBytes: 16, bounds: img.extent,
+                       format: .RGBAf, colorSpace: space)
+            return CGFloat(px[0])
+        }
+
+        // A 4.5× highlight clamps to the 2.0 ceiling…
+        XCTAssertEqual(sample(4.5, cap: 2.0), 2.0, accuracy: 0.02)
+        // …while a value already under the ceiling is left alone.
+        XCTAssertEqual(sample(1.3, cap: 2.0), 1.3, accuracy: 0.02)
+        // No cap → the extended value passes through unchanged.
+        XCTAssertEqual(sample(4.5, cap: nil), 4.5, accuracy: 0.05)
+    }
+
     /// A horizontal black→white gradient JPEG, so highlights exist above the knee.
     private func makeGradientJPEG(w: Int, h: Int) throws -> URL {
         let cs = CGColorSpace(name: CGColorSpace.sRGB)!

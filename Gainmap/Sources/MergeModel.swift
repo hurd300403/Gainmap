@@ -15,6 +15,31 @@
 
 import SwiftUI
 
+/// Simulated viewer-display headroom for the preview. Clamps the EDR to a chosen
+/// ceiling so you can check how the HDR pop survives on displays with less
+/// headroom than yours (phones/laptops ≈ 2–4×). Preview-only.
+enum PreviewHeadroom: String, CaseIterable, Identifiable {
+    case full, x4, x2, x1
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .full: return "Full"
+        case .x4:   return "4×"
+        case .x2:   return "2×"
+        case .x1:   return "1×"
+        }
+    }
+    /// Clamp ceiling in extended-linear stops, or nil for the display's full range.
+    var cap: Double? {
+        switch self {
+        case .full: return nil
+        case .x4:   return 4.0
+        case .x2:   return 2.0
+        case .x1:   return 1.0
+        }
+    }
+}
+
 @MainActor
 final class MergeModel: ObservableObject {
 
@@ -150,13 +175,13 @@ final class MergeModel: ObservableObject {
         didSet { UserDefaults.standard.set(bakeGlowIntoSDR, forKey: "gainmap.bakeGlowIntoSDR") }
     }
 
-    /// When true, the live EDR preview is clamped to the display's *calibrated*
-    /// headroom ceiling, so the look you tune matches what a normal-brightness /
-    /// color-accurate viewer sees — even while you're on a boosted display
-    /// (Vivid / BetterDisplay) that would otherwise render the pop overblown.
-    /// Preview-only: the exported gain map's per-image K/L are unchanged.
-    @Published var limitToCalibrated: Bool = UserDefaults.standard.object(forKey: "gainmap.limitToCalibrated") as? Bool ?? false {
-        didSet { UserDefaults.standard.set(limitToCalibrated, forKey: "gainmap.limitToCalibrated") }
+    /// Simulate a viewer's display headroom in the preview: clamp the EDR to a
+    /// chosen ceiling so you can check how the HDR pop holds up on displays with
+    /// less headroom than yours. Preview-only — the exported gain map adapts to
+    /// each viewer's display on its own (ISO 21496-1).
+    @Published var previewHeadroom: PreviewHeadroom =
+        PreviewHeadroom(rawValue: UserDefaults.standard.string(forKey: "gainmap.previewHeadroom") ?? "") ?? .full {
+        didSet { UserDefaults.standard.set(previewHeadroom.rawValue, forKey: "gainmap.previewHeadroom") }
     }
 
     // MARK: Shared status (advanced phase + per-merge spinner)

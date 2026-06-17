@@ -19,11 +19,9 @@ struct ContentView: View {
     @State private var showAdvancedLook = false
     @State private var window: NSWindow?
 
-    /// Headroom ceiling to clamp the preview to (calibrated-display simulation),
-    /// or nil when the user hasn't asked to limit it.
-    private var previewCap: Double? {
-        model.limitToCalibrated ? display.calibratedCeiling : nil
-    }
+    /// Headroom ceiling to clamp the preview to (simulated viewer display), or nil
+    /// for the display's full range.
+    private var previewCap: Double? { model.previewHeadroom.cap }
 
     var body: some View {
         ZStack {
@@ -419,28 +417,22 @@ struct ContentView: View {
                     Text(model.bakeGlowIntoSDR ? "visible everywhere" : "pixel-identical SDR")
                         .font(Theme.mono(9)).foregroundStyle(Theme.stoneFaint)
                 }
-                HStack {
-                    Toggle("LIMIT TO CALIBRATED", isOn: $model.limitToCalibrated)
-                        .toggleStyle(.switch)
-                        .font(Theme.mono(10, .semibold))
-                        .foregroundStyle(Theme.stoneDim)
-                        .help("Clamps this preview to your display's calibrated HDR headroom, so the look you tune matches what a normal-brightness viewer sees — even while you're on a boosted display. Preview only: the exported file's HDR is unchanged.")
-                    InfoButton(title: "LIMIT TO CALIBRATED",
-                               text: "Boosting a display past its calibration (Vivid, BetterDisplay, 1000–1600 nit hacks) makes the HDR pop look blown-out and oversaturated — brighter than anyone on a normal screen will see. Turn this on to clamp the preview to the calibrated headroom so you tune the true look. This only affects what you see here; the exported gain map is identical either way.")
-                    Spacer()
-                    Text(display.isBoosted
-                         ? String(format: "boosted %.1f× · cal %.1f×", display.current, display.calibratedCeiling)
-                         : String(format: "display %.1f×", display.current))
-                        .font(Theme.mono(9))
-                        .foregroundStyle(display.isBoosted ? Theme.warn : Theme.stoneFaint)
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 4) {
+                        Text("PREVIEW AT").font(Theme.mono(10, .semibold)).tracking(1)
+                            .foregroundStyle(Theme.stoneDim)
+                        InfoButton(title: "PREVIEW AT HEADROOM",
+                                   text: "Simulate a viewer's display so you can check how the HDR pop holds up where there's less headroom than yours. Full = your display's full range. 4× / 2× ≈ a typical HDR phone or laptop. 1× = no HDR headroom (highlights clip — roughly what non-HDR screens show; press & hold the preview for the true SDR fallback). Preview only — the exported file adapts to each viewer's display on its own. Tip: for the most representative tuning, turn OFF any display-boost tool (Vivid / BetterDisplay) and use your Mac's native HDR.")
+                        Spacer()
+                        Text(String(format: "your display: %.1f×", display.current))
+                            .font(Theme.mono(9)).foregroundStyle(Theme.stoneFaint)
+                    }
+                    HeadroomSegments(selection: $model.previewHeadroom)
                 }
                 sliderRow("GLOW", $model.bloom.glow, 0...1.5, fmt: "%.2f", "none", "bright",
                           help: "How much the bright areas bloom and spill light. Higher = brighter, dreamier highlights.")
                 sliderRow("HEADROOM", $model.bloom.headroom, 1...3, fmt: "%.1f×", "natural", "intense",
-                          help: "How far the bright tones climb on HDR screens. Higher makes highlights glow harder on HDR-capable displays (little effect on regular screens or the SDR fallback).",
-                          warn: display.isBoosted,
-                          warnTitle: "DISPLAY BOOSTED",
-                          warnText: String(format: "This display is running at %.1f× headroom — past its calibrated %.1f× (e.g. Vivid / BetterDisplay). HDR will look more blown-out and saturated here than on a normal screen. Turn on “Limit to calibrated” below to preview the true look.", display.current, display.calibratedCeiling))
+                          help: "How far the bright tones climb on HDR screens. Higher makes highlights glow harder on HDR-capable displays (little effect on regular screens or the SDR fallback).")
                 sliderRow("THRESHOLD", $model.bloom.threshold, 0.3...0.95, fmt: "%.0f%%", "everything", "specular", scale: 100,
                           help: "Which areas get the HDR treatment. Left = most of the image brightens; right = only the very brightest spots, like the sun or shiny reflections.")
                 sliderRow("SPREAD", $model.bloom.spread, 0.002...0.025, fmt: "%.1f%%", "tight", "wide", scale: 100,
@@ -468,15 +460,14 @@ struct ContentView: View {
 
     private func sliderRow(_ title: String, _ value: Binding<Double>, _ range: ClosedRange<Double>,
                            fmt: String, _ left: String, _ right: String, scale: Double = 1,
-                           help: String = "", warn: Bool = false, warnTitle: String = "", warnText: String = "") -> some View {
+                           help: String = "") -> some View {
         HStack(spacing: 10) {
             HStack(spacing: 4) {
                 Text(title).font(Theme.mono(10, .semibold)).tracking(1)
                     .foregroundStyle(Theme.stoneDim).lineLimit(1)
                 if !help.isEmpty { InfoButton(title: title, text: help) }
-                if warn { WarnButton(title: warnTitle, text: warnText) }
             }
-            .frame(width: 124, alignment: .leading)
+            .frame(width: 108, alignment: .leading)
             VStack(spacing: 2) {
                 Slider(value: value, in: range).tint(Theme.accent)
                 HStack { Text(left); Spacer(); Text(right) }
@@ -664,37 +655,31 @@ struct InfoButton: View {
     }
 }
 
-// MARK: - Warning button (boost / overblow alert)
+// MARK: - Preview-headroom segmented control
 
-/// An amber ⚠️ that pulses gently to draw the eye, with a click-for-detail popover.
-struct WarnButton: View {
-    let title: String
-    let text: String
-    @State private var show = false
-    @State private var pulse = false
+/// Segmented selector for the simulated viewer display headroom (Full / 4× / 2× / 1×).
+struct HeadroomSegments: View {
+    @Binding var selection: PreviewHeadroom
+
     var body: some View {
-        Button { show.toggle() } label: {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .font(.system(size: 10))
-                .foregroundStyle(Theme.warn)
-                .opacity(pulse ? 0.55 : 1)
-        }
-        .buttonStyle(.plain)
-        .help(text)
-        .onAppear {
-            withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) { pulse = true }
-        }
-        .popover(isPresented: $show, arrowEdge: .bottom) {
-            VStack(alignment: .leading, spacing: 6) {
-                Label(title, systemImage: "exclamationmark.triangle.fill")
-                    .font(Theme.mono(10, .semibold)).tracking(1).foregroundStyle(Theme.warn)
-                Text(text).font(Theme.ui(12.5)).foregroundStyle(Theme.stone)
-                    .fixedSize(horizontal: false, vertical: true)
+        HStack(spacing: 0) {
+            ForEach(PreviewHeadroom.allCases) { h in
+                let on = h == selection
+                Button(action: { selection = h }) {
+                    Text(h.label)
+                        .font(Theme.ui(11.5, .medium))
+                        .foregroundStyle(on ? .white : Theme.stoneDim)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 6)
+                        .background(on ? Theme.surfaceHi : .clear,
+                                    in: RoundedRectangle(cornerRadius: 6))
+                }
+                .buttonStyle(.plain)
             }
-            .padding(14)
-            .frame(width: 280)
-            .background(Theme.surface)
         }
+        .padding(3)
+        .background(Theme.inset, in: RoundedRectangle(cornerRadius: 9))
+        .overlay(RoundedRectangle(cornerRadius: 9).stroke(Theme.line, lineWidth: 1))
     }
 }
 
