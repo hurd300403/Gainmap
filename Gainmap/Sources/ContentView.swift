@@ -30,8 +30,8 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 0) {
                     header
                         .padding(.horizontal, 38)
-                        .padding(.top, 22)
-                        .padding(.bottom, 14)
+                        .padding(.top, 18)
+                        .padding(.bottom, 16)
 
                     if model.mode == .advanced && model.phase == .done {
                         ResultCard(model: model).padding(.horizontal, 38)
@@ -45,6 +45,14 @@ struct ContentView: View {
             }
             // Drop SDR JPEGs anywhere in the window (auto mode) to add to the queue.
             .onDrop(of: [.fileURL], isTargeted: nil, perform: handleWindowDrop)
+            // Pin the Save/Prev/Next bar to the bottom so it's ALWAYS reachable —
+            // no matter how tall the slider stack gets, it can't scroll off. The
+            // ScrollView content insets above it automatically.
+            .safeAreaInset(edge: .bottom, spacing: 0) { pinnedActionBar }
+            // Reclaim the ~28pt the hidden title bar reserves as top safe area, so
+            // the (right-justified) header rides right up to the window edge. Safe
+            // because the macOS traffic lights live top-LEFT, where we keep empty.
+            .ignoresSafeArea(.container, edges: .top)
         }
         .frame(minWidth: 900, minHeight: 620)
         .background(WindowAccessor { window = $0 })
@@ -104,11 +112,11 @@ struct ContentView: View {
     // MARK: Header
 
     private var header: some View {
+        // Right-justified so the branding clears the macOS traffic-light buttons in
+        // the top-left, letting the content ride higher in the window.
         HStack(spacing: 16) {
-            GainmapEmblem()
-                .frame(width: 54, height: 54)
-                .shadow(color: .black.opacity(0.5), radius: 7, y: 4)
-            VStack(alignment: .leading, spacing: 2) {
+            Spacer()
+            VStack(alignment: .trailing, spacing: 2) {
                 (Text("Gain").foregroundStyle(Color.white)
                  + Text("map").foregroundStyle(Theme.accent))
                     .font(Theme.display(30, .semibold))
@@ -116,7 +124,9 @@ struct ContentView: View {
                     .font(Theme.ui(12.5))
                     .foregroundStyle(Theme.stoneDim)
             }
-            Spacer()
+            GainmapEmblem()
+                .frame(width: 54, height: 54)
+                .shadow(color: .black.opacity(0.5), radius: 7, y: 4)
         }
     }
 
@@ -167,8 +177,7 @@ struct ContentView: View {
                 BatchFilmstrip(model: model)
                 bloomControls.padding(.top, 14)
                 if !model.items.isEmpty {
-                    queueBar.padding(.top, 20)
-                    autoResultStrip
+                    autoResultStrip   // queue Save/Prev/Next is pinned to the window bottom (see pinnedActionBar)
                 }
             }
             .frame(width: 408)
@@ -209,6 +218,19 @@ struct ContentView: View {
     }
 
     // MARK: Queue navigation + save bar (auto mode)
+
+    /// The Save/Prev/Next bar, pinned to the bottom of the window (auto mode) so
+    /// the slider stack can never push it off-screen.
+    @ViewBuilder private var pinnedActionBar: some View {
+        if model.mode == .auto, !model.items.isEmpty {
+            queueBar
+                .padding(.horizontal, 38)
+                .padding(.top, 12)
+                .padding(.bottom, 16)
+                .background(alignment: .top) { Rectangle().fill(Theme.line).frame(height: 1) }
+                .background(Theme.inset.opacity(0.97))
+        }
+    }
 
     private var queueBar: some View {
         VStack(spacing: 12) {
