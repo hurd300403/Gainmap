@@ -37,7 +37,21 @@ APP="$DIST/Gainmap.app"
 rm -rf "$APP"
 cp -R "$ARCHIVE/Products/Applications/Gainmap.app" "$APP"
 
-echo "▸ re-signing nested helper + app (deep, hardened runtime)…"
+echo "▸ re-signing nested helpers + app (inside-out, hardened runtime, secure timestamp)…"
+# Sparkle ships nested executables (Updater.app, Autoupdate, XPC services) that
+# Xcode's archive signing does NOT re-sign with Developer ID — notarization hard-
+# rejects them otherwise. Sign them inside-out BEFORE the outer app. (No custom
+# entitlements: the app is non-sandboxed, so Sparkle uses its direct install path.)
+SPK="$APP/Contents/Frameworks/Sparkle.framework"
+if [ -d "$SPK" ]; then
+  SPKV="$SPK/Versions/Current"
+  for c in "XPCServices/Downloader.xpc" "XPCServices/Installer.xpc" \
+           "Updater.app" "Autoupdate"; do
+    [ -e "$SPKV/$c" ] && codesign --force --options runtime --timestamp \
+        --sign "$SIGN_HASH" "$SPKV/$c"
+  done
+  codesign --force --options runtime --timestamp --sign "$SIGN_HASH" "$SPK"
+fi
 codesign --force --options runtime --timestamp --sign "$SIGN_HASH" \
     "$APP/Contents/Resources/Helpers/uhdrtool"
 codesign --force --options runtime --timestamp \
