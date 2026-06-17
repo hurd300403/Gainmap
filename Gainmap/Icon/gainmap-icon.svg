@@ -32,7 +32,7 @@
   <rect x="8" y="8" width="1008" height="1008" rx="226" ry="226" fill="none" stroke="#ffffff" stroke-opacity="0.5" stroke-width="3"/>
 
   <!-- emblem (authored in the 200-space, centered & scaled) -->
-  <g transform="translate(512,512) scale(2.62) translate(-100,-100)" filter="url(#ds)">
+  <g transform="translate(512,512) scale(3.6) translate(-100,-100)" filter="url(#ds)">
     <circle cx="100" cy="100" r="95" fill="none" stroke="#e05a3f" stroke-width="10"/>
     <circle cx="100" cy="100" r="85" fill="#fff"/>
     <circle cx="100" cy="100" r="75" fill="#2c2a2b"/>
