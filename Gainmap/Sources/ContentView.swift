@@ -35,8 +35,8 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 0) {
                     header
                         .padding(.horizontal, 38)
-                        .padding(.top, 30)
-                        .padding(.bottom, 26)
+                        .padding(.top, 22)
+                        .padding(.bottom, 14)
 
                     if model.mode == .advanced && model.phase == .done {
                         ResultCard(model: model).padding(.horizontal, 38)
@@ -129,7 +129,7 @@ struct ContentView: View {
 
     private var benchSection: some View {
         VStack(spacing: 0) {
-            modePicker.padding(.bottom, 16)
+            modePicker.padding(.bottom, 12)
 
             if model.mode == .auto {
                 autoSection
