@@ -17,6 +17,7 @@
 		60EA7D057B6168CFBF6D7F2F /* UHDRRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 225C763D26EF9A9720F8337F /* UHDRRunner.swift */; };
 		69BF82E9BA59EACA67AB1B20 /* BatchModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5FEC26F2307BEA92EE39C410 /* BatchModelTests.swift */; };
 		6A6F79B0971C31E6689D43F8 /* Helpers in Resources */ = {isa = PBXBuildFile; fileRef = 1D20FCF2B3E0444FD5E141B7 /* Helpers */; };
+		9E705A906F9317DE213575F8 /* DisplayMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5846EA7EB0BD4E278B48C73 /* DisplayMonitor.swift */; };
 		9F1BC1DA42368B4EF2C416B6 /* MergeModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = C7EB50D266DFADDDDC930DD3 /* MergeModel.swift */; };
 		A7B50B61F55AB544BE4DFEED /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = 8A46E4F2749932129E2112D8 /* Sparkle */; };
 		BE6933202C495B9BD3438852 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 115EE894AA68D0BAE6052326 /* Assets.xcassets */; };
@@ -50,6 +51,7 @@
 		5FEC26F2307BEA92EE39C410 /* BatchModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BatchModelTests.swift; sourceTree = "<group>"; };
 		66FFF98E8C73C09D243819DA /* Emblem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Emblem.swift; sourceTree = "<group>"; };
 		A2688668BEE2150854C41AE1 /* GainmapApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GainmapApp.swift; sourceTree = "<group>"; };
+		A5846EA7EB0BD4E278B48C73 /* DisplayMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DisplayMonitor.swift; sourceTree = "<group>"; };
 		BCF67B3800BE36F48ED1E2CA /* UHDRRunnerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UHDRRunnerTests.swift; sourceTree = "<group>"; };
 		C5A66B7B4B9CD1080533B9DB /* DropWell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DropWell.swift; sourceTree = "<group>"; };
 		C7EB50D266DFADDDDC930DD3 /* MergeModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MergeModel.swift; sourceTree = "<group>"; };
@@ -97,6 +99,7 @@
 				4A6CBFF136CE494EDDBBFA1A /* BatchFilmstrip.swift */,
 				2CB4790B5DCD848E014661A6 /* BloomPreview.swift */,
 				419AA343FB617E9A173D012E /* ContentView.swift */,
+				A5846EA7EB0BD4E278B48C73 /* DisplayMonitor.swift */,
 				C5A66B7B4B9CD1080533B9DB /* DropWell.swift */,
 				66FFF98E8C73C09D243819DA /* Emblem.swift */,
 				A2688668BEE2150854C41AE1 /* GainmapApp.swift */,
@@ -259,6 +262,7 @@
 				E0EA960FDCD3691152C3646D /* BatchFilmstrip.swift in Sources */,
 				076774F4675DBBFAA6350A60 /* BloomPreview.swift in Sources */,
 				0833B119882DA5F154EAB002 /* ContentView.swift in Sources */,
+				9E705A906F9317DE213575F8 /* DisplayMonitor.swift in Sources */,
 				4AA15C3398E062D0D7D50A4A /* DropWell.swift in Sources */,
 				494A91F9EDCC99861238AC58 /* Emblem.swift in Sources */,
 				19EE4E5FB5D803FE2872EE10 /* GainmapApp.swift in Sources */,

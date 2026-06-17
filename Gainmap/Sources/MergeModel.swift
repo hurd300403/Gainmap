@@ -150,6 +150,15 @@ final class MergeModel: ObservableObject {
         didSet { UserDefaults.standard.set(bakeGlowIntoSDR, forKey: "gainmap.bakeGlowIntoSDR") }
     }
 
+    /// When true, the live EDR preview is clamped to the display's *calibrated*
+    /// headroom ceiling, so the look you tune matches what a normal-brightness /
+    /// color-accurate viewer sees — even while you're on a boosted display
+    /// (Vivid / BetterDisplay) that would otherwise render the pop overblown.
+    /// Preview-only: the exported gain map's per-image K/L are unchanged.
+    @Published var limitToCalibrated: Bool = UserDefaults.standard.object(forKey: "gainmap.limitToCalibrated") as? Bool ?? false {
+        didSet { UserDefaults.standard.set(limitToCalibrated, forKey: "gainmap.limitToCalibrated") }
+    }
+
     // MARK: Shared status (advanced phase + per-merge spinner)
 
     @Published var phase: Phase = .idle

@@ -26,6 +26,10 @@ final class EDRMetalNSView: NSView {
     private let edrSpace = CGColorSpace(name: CGColorSpace.extendedLinearSRGB)!
 
     var ciImage: CIImage? { didSet { render() } }
+    /// When set, extended (linear) pixel values are clamped to this ceiling before
+    /// display — simulates a calibrated display's headroom so a boosted screen
+    /// doesn't render the HDR pop overblown. nil = no clamp (show the full range).
+    var cap: Double? { didSet { if cap != oldValue { render() } } }
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -70,11 +74,23 @@ final class EDRMetalNSView: NSView {
         guard ds.width > 1, let drawable = metalLayer.nextDrawable(),
               let cb = queue.makeCommandBuffer() else { return }
 
+        // Clamp extended (linear) values to the calibrated headroom ceiling when
+        // asked, so a boosted display doesn't render the HDR pop overblown.
+        let source: CIImage
+        if let cap, cap > 1.0 {
+            source = ciImage.applyingFilter("CIColorClamp", parameters: [
+                "inputMinComponents": CIVector(x: 0, y: 0, z: 0, w: 0),
+                "inputMaxComponents": CIVector(x: cap, y: cap, z: cap, w: 1),
+            ])
+        } else {
+            source = ciImage
+        }
+
         // Aspect-FIT the image into the drawable (show the whole frame in its
         // native aspect, never cropped), composited over black for the letterbox.
-        let ext = ciImage.extent
+        let ext = source.extent
         let scale = min(ds.width / ext.width, ds.height / ext.height)
-        let scaled = ciImage.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        let scaled = source.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
         let sExt = scaled.extent
         let positioned = scaled.transformed(by: CGAffineTransform(
             translationX: (ds.width - sExt.width) / 2 - sExt.minX,
@@ -91,13 +107,17 @@ final class EDRMetalNSView: NSView {
 
 struct EDRMetalView: NSViewRepresentable {
     let image: CIImage?
+    var cap: Double? = nil
     func makeNSView(context: Context) -> EDRMetalNSView {
         let v = EDRMetalNSView()
         v.setContentHuggingPriority(.defaultLow, for: .horizontal)
         v.setContentHuggingPriority(.defaultLow, for: .vertical)
         return v
     }
-    func updateNSView(_ v: EDRMetalNSView, context: Context) { v.ciImage = image }
+    func updateNSView(_ v: EDRMetalNSView, context: Context) {
+        v.cap = cap
+        v.ciImage = image
+    }
 }
 
 // MARK: - Debounced renderer (runs the REAL export, small, then decodes it)
@@ -282,6 +302,9 @@ struct HDRPreviewPane: View {
     /// Bake the soft bloom into the SDR base (vs HDR-only glow) — affects the
     /// settled render so the preview reflects the chosen export mode.
     var bake: Bool = true
+    /// Clamp the displayed EDR to this headroom ceiling (calibrated-display
+    /// simulation). nil = show the display's full range.
+    var cap: Double? = nil
     /// Inline height (ignored when `expanded`, which fills the docked column).
     var height: CGFloat = 203
     /// Docked-to-side mode: taller, fills available height, collapse icon.
@@ -303,7 +326,9 @@ struct HDRPreviewPane: View {
         ZStack {
             Color.black
             if let shown {
-                EDRMetalView(image: shown)
+                // Don't clamp while peeking the SDR original — it has no extended
+                // range to limit, and clamping would be a no-op anyway.
+                EDRMetalView(image: shown, cap: showingOriginal ? nil : cap)
             } else {
                 LinearGradient(colors: [Theme.surface, Theme.surfaceHi], startPoint: .top, endPoint: .bottom)
                 VStack(spacing: 8) {

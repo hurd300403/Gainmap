@@ -24,6 +24,8 @@ enum Theme {
     static let accentHot = Color(hex: 0xF47A5E)
     static let gold      = Color(hex: 0xE8B86D)
     static let goldDeep  = Color(hex: 0xD4A96A)
+    static let info      = Color(hex: 0xF0A878)   // light orange — info ⓘ glyphs (legible on dark)
+    static let warn      = Color(hex: 0xF0A03C)   // amber — boost/overblow warnings
     static let stone     = Color(hex: 0xDAD7CE)
     static let stoneDim  = Color(hex: 0xDAD7CE).opacity(0.45)
     static let stoneFaint = Color(hex: 0xDAD7CE).opacity(0.16)
