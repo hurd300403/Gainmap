@@ -155,44 +155,42 @@ final class BatchModelTests: XCTestCase {
         return Float(sign) * Float(1024 + frac) / 1024 * pow(2, Float(exp - 15))
     }
 
-    // MARK: Preview-headroom simulation
+    // MARK: Non-HDR-screen (SDR fallback) preview
 
-    func testPreviewHeadroomCapMapping() {
-        XCTAssertNil(PreviewHeadroom.full.cap)
-        XCTAssertEqual(PreviewHeadroom.x4.cap, 4.0)
-        XCTAssertEqual(PreviewHeadroom.x2.cap, 2.0)
-        XCTAssertEqual(PreviewHeadroom.x1.cap, 1.0)
-    }
-
-    /// The clamp the preview applies to simulate a lower-headroom display must
-    /// actually limit extended-linear values above the ceiling (and leave values
-    /// below it untouched). This guards the "Preview at headroom" mechanic.
-    func testColorClampLimitsExtendedValues() {
+    /// The SDR fallback the preview shows must land in SDR range (≤ ~1.0) — that's
+    /// what guarantees it looks different from the HDR pop on ANY display, unlike
+    /// the old headroom clamp which no-op'd above the panel's headroom. Renders a
+    /// real bloom (extended values up to ~peak·headroom) through sdrFallbackCIImage
+    /// and confirms the shoulder pulls the peak back into SDR.
+    func testSDRFallbackLandsInSDRRange() throws {
         let space = CGColorSpace(name: CGColorSpace.extendedLinearSRGB)!
         let ctx = CIContext(options: [.workingColorSpace: space])
+        let base = CIImage(contentsOf: try makeGradientJPEG(w: 64, h: 8))!
 
-        func sample(_ v: CGFloat, cap: Double?) -> CGFloat {
-            var img = CIImage(color: CIColor(red: v, green: v, blue: v,
-                                             colorSpace: space)!)
-                .cropped(to: CGRect(x: 0, y: 0, width: 1, height: 1))
-            if let cap {
-                img = img.applyingFilter("CIColorClamp", parameters: [
-                    "inputMinComponents": CIVector(x: 0, y: 0, z: 0, w: 0),
-                    "inputMaxComponents": CIVector(x: cap, y: cap, z: cap, w: 1),
-                ])
-            }
-            var px: [Float] = [0, 0, 0, 0]
-            ctx.render(img, toBitmap: &px, rowBytes: 16, bounds: img.extent,
+        func maxChannel(_ img: CIImage) -> Float {
+            let w = Int(img.extent.width), h = Int(img.extent.height)
+            var px = [Float](repeating: 0, count: w * h * 4)
+            ctx.render(img, toBitmap: &px, rowBytes: w * 16, bounds: img.extent,
                        format: .RGBAf, colorSpace: space)
-            return CGFloat(px[0])
+            return stride(from: 0, to: px.count, by: 4).reduce(Float(0)) {
+                max($0, max(px[$1], max(px[$1 + 1], px[$1 + 2])))
+            }
         }
 
-        // A 4.5× highlight clamps to the 2.0 ceiling…
-        XCTAssertEqual(sample(4.5, cap: 2.0), 2.0, accuracy: 0.02)
-        // …while a value already under the ceiling is left alone.
-        XCTAssertEqual(sample(1.3, cap: 2.0), 1.3, accuracy: 0.02)
-        // No cap → the extended value passes through unchanged.
-        XCTAssertEqual(sample(4.5, cap: nil), 4.5, accuracy: 0.05)
+        var p = AutoHDR.BloomParams()
+        p.glow = 1.5; p.headroom = 1.5     // a strong look → bloom peaks well above 1.0
+
+        // The raw HDR bloom exceeds SDR white…
+        let bloom = try XCTUnwrap(AutoHDR.bloomCIImage(base: base, params: p))
+        XCTAssertGreaterThan(maxChannel(bloom), 1.05, "bloom proxy should exceed SDR white")
+
+        // …but the baked SDR fallback is shouldered back into SDR range.
+        let baked = try XCTUnwrap(AutoHDR.sdrFallbackCIImage(base: base, params: p, bake: true))
+        XCTAssertLessThanOrEqual(maxChannel(baked), 1.02, "baked SDR fallback must stay ≤ ~1.0")
+
+        // With bake OFF the fallback is the untouched base (also SDR).
+        let plain = try XCTUnwrap(AutoHDR.sdrFallbackCIImage(base: base, params: p, bake: false))
+        XCTAssertLessThanOrEqual(maxChannel(plain), 1.02, "un-baked fallback is the SDR base")
     }
 
     /// A horizontal black→white gradient JPEG, so highlights exist above the knee.

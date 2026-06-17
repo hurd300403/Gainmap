@@ -14,14 +14,9 @@ import UniformTypeIdentifiers
 
 struct ContentView: View {
     @StateObject private var model = MergeModel()
-    @StateObject private var display = DisplayMonitor()
     @State private var showSettings = false
     @State private var showAdvancedLook = false
     @State private var window: NSWindow?
-
-    /// Headroom ceiling to clamp the preview to (simulated viewer display), or nil
-    /// for the display's full range.
-    private var previewCap: Double? { model.previewHeadroom.cap }
 
     var body: some View {
         ZStack {
@@ -160,7 +155,7 @@ struct ContentView: View {
             VStack(spacing: 10) {
                 HDRPreviewPane(sdrURL: model.sdrURL, params: model.bloom,
                                cgamut: model.cgamut, sgamut: model.sgamut, bake: model.bakeGlowIntoSDR,
-                               cap: previewCap,
+                               previewSDR: model.previewSDR,
                                expanded: true,
                                onRequestAdd: model.items.isEmpty ? { addPhotos() } : nil)
                 Text(model.items.isEmpty ? "click the preview or drop SDR JPEGs anywhere to begin"
@@ -417,17 +412,17 @@ struct ContentView: View {
                     Text(model.bakeGlowIntoSDR ? "visible everywhere" : "pixel-identical SDR")
                         .font(Theme.mono(9)).foregroundStyle(Theme.stoneFaint)
                 }
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack(spacing: 4) {
-                        Text("PREVIEW AT").font(Theme.mono(10, .semibold)).tracking(1)
-                            .foregroundStyle(Theme.stoneDim)
-                        InfoButton(title: "PREVIEW AT HEADROOM",
-                                   text: "Simulate a viewer's display so you can check how the HDR pop holds up where there's less headroom than yours. Full = your display's full range. 4× / 2× ≈ a typical HDR phone or laptop. 1× = no HDR headroom (highlights clip — roughly what non-HDR screens show; press & hold the preview for the true SDR fallback). Preview only — the exported file adapts to each viewer's display on its own. Tip: for the most representative tuning, turn OFF any display-boost tool (Vivid / BetterDisplay) and use your Mac's native HDR.")
-                        Spacer()
-                        Text(String(format: "your display: %.1f×", display.current))
-                            .font(Theme.mono(9)).foregroundStyle(Theme.stoneFaint)
-                    }
-                    HeadroomSegments(selection: $model.previewHeadroom)
+                HStack {
+                    Toggle("PREVIEW ON A NON-HDR SCREEN", isOn: $model.previewSDR)
+                        .toggleStyle(.switch)
+                        .font(Theme.mono(10, .semibold))
+                        .foregroundStyle(Theme.stoneDim)
+                        .help("Shows the SDR fallback your export ships — what viewers on a non-HDR screen (or an app that ignores the gain map) actually see. The HDR pop rolls all the way down to the plain photo. Preview only; the exported file is unchanged.")
+                    InfoButton(title: "PREVIEW ON A NON-HDR SCREEN",
+                               text: "Your gain-map JPEG carries two looks: the HDR pop for capable screens, and a plain SDR version for everything else. Flip this on to see that SDR fallback — a quick gut-check that the photo still looks good with no HDR at all. (This differs from press-and-hold, which shows your untouched original; with GLOW IN SDR on, the fallback includes the baked-in soft glow.) Preview only — the exported file adapts to each viewer's display automatically.")
+                    Spacer()
+                    Text(model.previewSDR ? "SDR fallback" : "live HDR")
+                        .font(Theme.mono(9)).foregroundStyle(Theme.stoneFaint)
                 }
                 sliderRow("GLOW", $model.bloom.glow, 0...1.5, fmt: "%.2f", "none", "bright",
                           help: "How much the bright areas bloom and spill light. Higher = brighter, dreamier highlights.")
@@ -652,34 +647,6 @@ struct InfoButton: View {
             .frame(width: 260)
             .background(Theme.surface)
         }
-    }
-}
-
-// MARK: - Preview-headroom segmented control
-
-/// Segmented selector for the simulated viewer display headroom (Full / 4× / 2× / 1×).
-struct HeadroomSegments: View {
-    @Binding var selection: PreviewHeadroom
-
-    var body: some View {
-        HStack(spacing: 0) {
-            ForEach(PreviewHeadroom.allCases) { h in
-                let on = h == selection
-                Button(action: { selection = h }) {
-                    Text(h.label)
-                        .font(Theme.ui(11.5, .medium))
-                        .foregroundStyle(on ? .white : Theme.stoneDim)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 6)
-                        .background(on ? Theme.surfaceHi : .clear,
-                                    in: RoundedRectangle(cornerRadius: 6))
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .padding(3)
-        .background(Theme.inset, in: RoundedRectangle(cornerRadius: 9))
-        .overlay(RoundedRectangle(cornerRadius: 9).stroke(Theme.line, lineWidth: 1))
     }
 }
 

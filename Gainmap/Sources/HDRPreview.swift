@@ -26,10 +26,6 @@ final class EDRMetalNSView: NSView {
     private let edrSpace = CGColorSpace(name: CGColorSpace.extendedLinearSRGB)!
 
     var ciImage: CIImage? { didSet { render() } }
-    /// When set, extended (linear) pixel values are clamped to this ceiling before
-    /// display — simulates a calibrated display's headroom so a boosted screen
-    /// doesn't render the HDR pop overblown. nil = no clamp (show the full range).
-    var cap: Double? { didSet { if cap != oldValue { render() } } }
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -74,23 +70,11 @@ final class EDRMetalNSView: NSView {
         guard ds.width > 1, let drawable = metalLayer.nextDrawable(),
               let cb = queue.makeCommandBuffer() else { return }
 
-        // Clamp extended (linear) values to the calibrated headroom ceiling when
-        // asked, so a boosted display doesn't render the HDR pop overblown.
-        let source: CIImage
-        if let cap, cap > 1.0 {
-            source = ciImage.applyingFilter("CIColorClamp", parameters: [
-                "inputMinComponents": CIVector(x: 0, y: 0, z: 0, w: 0),
-                "inputMaxComponents": CIVector(x: cap, y: cap, z: cap, w: 1),
-            ])
-        } else {
-            source = ciImage
-        }
-
         // Aspect-FIT the image into the drawable (show the whole frame in its
         // native aspect, never cropped), composited over black for the letterbox.
-        let ext = source.extent
+        let ext = ciImage.extent
         let scale = min(ds.width / ext.width, ds.height / ext.height)
-        let scaled = source.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        let scaled = ciImage.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
         let sExt = scaled.extent
         let positioned = scaled.transformed(by: CGAffineTransform(
             translationX: (ds.width - sExt.width) / 2 - sExt.minX,
@@ -107,17 +91,13 @@ final class EDRMetalNSView: NSView {
 
 struct EDRMetalView: NSViewRepresentable {
     let image: CIImage?
-    var cap: Double? = nil
     func makeNSView(context: Context) -> EDRMetalNSView {
         let v = EDRMetalNSView()
         v.setContentHuggingPriority(.defaultLow, for: .horizontal)
         v.setContentHuggingPriority(.defaultLow, for: .vertical)
         return v
     }
-    func updateNSView(_ v: EDRMetalNSView, context: Context) {
-        v.cap = cap
-        v.ciImage = image
-    }
+    func updateNSView(_ v: EDRMetalNSView, context: Context) { v.ciImage = image }
 }
 
 // MARK: - Debounced renderer (runs the REAL export, small, then decodes it)
@@ -144,6 +124,7 @@ final class PreviewRenderer: ObservableObject {
     private var curCgamut: Gamut = .rec709
     private var curSgamut: Gamut = .rec709
     private var curBake = true
+    private var curPreviewSDR = false
 
     /// Two-stage preview for real-time scrubbing:
     ///   • PROXY — render `bloomCIImage` (the same linear-HDR the export encodes)
@@ -156,10 +137,12 @@ final class PreviewRenderer: ObservableObject {
     /// layer (AUTO) is resolved up-front from cached scene stats and baked in, so
     /// the live proxy can't show a stronger look than the file actually saves.
     func request(sdr: URL?, params: AutoHDR.BloomParams,
-                 cgamut: Gamut = .rec709, sgamut: Gamut = .rec709, bake: Bool = true) {
+                 cgamut: Gamut = .rec709, sgamut: Gamut = .rec709, bake: Bool = true,
+                 previewSDR: Bool = false) {
         // Stash the latest inputs so a base-load that finishes later renders with
         // CURRENT params/gamut, not whatever they were when the load kicked off.
         curParams = params; curCgamut = cgamut; curSgamut = sgamut; curBake = bake
+        curPreviewSDR = previewSDR
         generation &+= 1
         guard let sdr else {
             loadTask?.cancel(); accurateTask?.cancel()
@@ -200,6 +183,17 @@ final class PreviewRenderer: ObservableObject {
     private func renderCurrent() {
         guard let sdr = baseURL else { return }
         let eff = effective(curParams)
+        // "Preview on a non-HDR screen": show the SDR fallback the export ships
+        // (values ≤ 1.0, plain SDR on any display). It's derived from the proxy,
+        // so no gain-map export is needed — skip the accurate pass entirely.
+        if curPreviewSDR {
+            accurateTask?.cancel()
+            rendering = false
+            if let base = baseImage {
+                image = AutoHDR.sdrFallbackCIImage(base: base, params: eff, bake: curBake) ?? base
+            }
+            return
+        }
         renderProxy(params: eff)
         scheduleAccurate(sdr: sdr, params: eff, cgamut: curCgamut, sgamut: curSgamut, bake: curBake, gen: generation)
     }
@@ -302,9 +296,9 @@ struct HDRPreviewPane: View {
     /// Bake the soft bloom into the SDR base (vs HDR-only glow) — affects the
     /// settled render so the preview reflects the chosen export mode.
     var bake: Bool = true
-    /// Clamp the displayed EDR to this headroom ceiling (calibrated-display
-    /// simulation). nil = show the display's full range.
-    var cap: Double? = nil
+    /// Preview the shipped SDR fallback (what a non-HDR screen shows) instead of
+    /// the live HDR. Always visibly different from HDR on any display.
+    var previewSDR: Bool = false
     /// Inline height (ignored when `expanded`, which fills the docked column).
     var height: CGFloat = 203
     /// Docked-to-side mode: taller, fills available height, collapse icon.
@@ -326,9 +320,7 @@ struct HDRPreviewPane: View {
         ZStack {
             Color.black
             if let shown {
-                // Don't clamp while peeking the SDR original — it has no extended
-                // range to limit, and clamping would be a no-op anyway.
-                EDRMetalView(image: shown, cap: showingOriginal ? nil : cap)
+                EDRMetalView(image: shown)
             } else {
                 LinearGradient(colors: [Theme.surface, Theme.surfaceHi], startPoint: .top, endPoint: .bottom)
                 VStack(spacing: 8) {
@@ -376,21 +368,26 @@ struct HDRPreviewPane: View {
         .onChange(of: cgamut) { _, _ in rerender() }
         .onChange(of: sgamut) { _, _ in rerender() }
         .onChange(of: bake) { _, _ in rerender() }
+        .onChange(of: previewSDR) { _, _ in showingOriginal = false; rerender() }
         .onAppear { rerender() }
     }
 
     private func rerender() {
-        renderer.request(sdr: sdrURL, params: params, cgamut: cgamut, sgamut: sgamut, bake: bake)
+        renderer.request(sdr: sdrURL, params: params, cgamut: cgamut, sgamut: sgamut,
+                         bake: bake, previewSDR: previewSDR)
     }
 
-    // The top-left tag flips between the HDR look and the original SDR edit.
+    // The top-left tag: live HDR, the SDR-fallback simulation, or the peeked original.
     private var stateBadge: some View {
-        Text(showingOriginal ? "ORIGINAL · SDR" : "LIVE HDR")
+        let sdrMode = previewSDR && !showingOriginal
+        let label = showingOriginal ? "ORIGINAL · SDR" : (sdrMode ? "NON-HDR SCREEN" : "LIVE HDR")
+        let fg: Color = (showingOriginal || sdrMode) ? Theme.inset : .white
+        let bg: Color = showingOriginal ? Theme.stone : (sdrMode ? Theme.gold : Theme.accent)
+        return Text(label)
             .font(Theme.mono(10, .semibold)).tracking(1.2)
-            .foregroundStyle(showingOriginal ? Theme.inset : .white)
+            .foregroundStyle(fg)
             .padding(.horizontal, 8).padding(.vertical, 4)
-            .background((showingOriginal ? Theme.stone : Theme.accent).opacity(0.92),
-                        in: RoundedRectangle(cornerRadius: 5))
+            .background(bg.opacity(0.92), in: RoundedRectangle(cornerRadius: 5))
             .padding(10)
     }
 

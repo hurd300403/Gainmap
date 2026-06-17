@@ -15,31 +15,6 @@
 
 import SwiftUI
 
-/// Simulated viewer-display headroom for the preview. Clamps the EDR to a chosen
-/// ceiling so you can check how the HDR pop survives on displays with less
-/// headroom than yours (phones/laptops ≈ 2–4×). Preview-only.
-enum PreviewHeadroom: String, CaseIterable, Identifiable {
-    case full, x4, x2, x1
-    var id: String { rawValue }
-    var label: String {
-        switch self {
-        case .full: return "Full"
-        case .x4:   return "4×"
-        case .x2:   return "2×"
-        case .x1:   return "1×"
-        }
-    }
-    /// Clamp ceiling in extended-linear stops, or nil for the display's full range.
-    var cap: Double? {
-        switch self {
-        case .full: return nil
-        case .x4:   return 4.0
-        case .x2:   return 2.0
-        case .x1:   return 1.0
-        }
-    }
-}
-
 @MainActor
 final class MergeModel: ObservableObject {
 
@@ -175,14 +150,11 @@ final class MergeModel: ObservableObject {
         didSet { UserDefaults.standard.set(bakeGlowIntoSDR, forKey: "gainmap.bakeGlowIntoSDR") }
     }
 
-    /// Simulate a viewer's display headroom in the preview: clamp the EDR to a
-    /// chosen ceiling so you can check how the HDR pop holds up on displays with
-    /// less headroom than yours. Preview-only — the exported gain map adapts to
-    /// each viewer's display on its own (ISO 21496-1).
-    @Published var previewHeadroom: PreviewHeadroom =
-        PreviewHeadroom(rawValue: UserDefaults.standard.string(forKey: "gainmap.previewHeadroom") ?? "") ?? .full {
-        didSet { UserDefaults.standard.set(previewHeadroom.rawValue, forKey: "gainmap.previewHeadroom") }
-    }
+    /// Preview the SDR fallback (what a viewer on a non-HDR screen sees) instead
+    /// of the live HDR. Rolls the whole look down to the shipped SDR base, so it's
+    /// visible on any display at any brightness. Preview-only; not persisted (a
+    /// momentary check you wouldn't want sticking across launches).
+    @Published var previewSDR: Bool = false
 
     // MARK: Shared status (advanced phase + per-merge spinner)
 
