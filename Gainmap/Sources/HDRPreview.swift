@@ -292,18 +292,37 @@ struct HDRPreviewPane: View {
     var onRequestAdd: (() -> Void)? = nil
 
     @StateObject private var renderer = PreviewRenderer()
-    @State private var showingOriginal = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
+    // Hold-to-lock state machine: idle → arming (peek + ring filling) → locked.
+    // A quick release during arming is the momentary peek; holding past
+    // `holdDuration` locks to SDR (persists after release); a tap unlocks.
+    private enum HoldState { case idle, arming, locked }
+    @State private var holdState: HoldState = .idle
+    @State private var ringProgress: CGFloat = 0
+    @State private var ringVisible = false           // gated by the grace delay
+    @State private var cursor: CGPoint = .zero
+    @State private var isPressing = false
+    @State private var pressStart: Date?
+    @State private var lockedThisGesture = false     // keeps the locking hold from self-unlocking
+    @State private var holdTask: Task<Void, Never>?
+    @State private var graceTask: Task<Void, Never>?
+
+    private let holdDuration: TimeInterval = 0.8     // press → lock
+    private let graceDelay: TimeInterval = 0.15      // ring stays hidden this long (pure peeks never flash it)
+
+    private var locked: Bool { holdState == .locked }
+    private var showSDR: Bool { holdState == .arming || holdState == .locked }
     // While the original is still loading, fall back to the HDR image so the
     // compare never flashes a previous photo.
-    private var shown: CIImage? { showingOriginal ? (renderer.original ?? renderer.image) : renderer.image }
+    private var shown: CIImage? { showSDR ? (renderer.original ?? renderer.image) : renderer.image }
     private var hasImage: Bool { renderer.image != nil }
 
     var body: some View {
         ZStack {
             Color.black
             if let shown {
-                EDRMetalView(image: shown)
+                EDRMetalView(image: shown).allowsHitTesting(false)
             } else {
                 LinearGradient(colors: [Theme.surface, Theme.surfaceHi], startPoint: .top, endPoint: .bottom)
                 VStack(spacing: 8) {
@@ -326,31 +345,66 @@ struct HDRPreviewPane: View {
         .overlay(alignment: .topLeading) { stateBadge }
         .overlay(alignment: .topTrailing) { controls }
         .overlay(alignment: .bottom) { compareHint }
-        .contentShape(Rectangle())
-        // Press-and-hold to peek the original (SDR); release snaps back to HDR.
-        // Empty state: a tap requests adding a photo.
-        .gesture(
-            DragGesture(minimumDistance: 0)
-                .onChanged { _ in
-                    guard hasImage, !showingOriginal else { return }
-                    withAnimation(.easeOut(duration: 0.1)) { showingOriginal = true }
+        // The hold-to-lock token: an amber padlock ring that fills at the cursor
+        // while arming, then flies to the bottom-right corner and stays there as a
+        // clickable chip while locked. Rendered after clipShape so it floats
+        // unclipped; only hit-testable (to unlock) once locked.
+        .overlay {
+            GeometryReader { geo in
+                if (holdState == .arming && ringVisible) || holdState == .locked {
+                    let corner = CGPoint(x: geo.size.width - 28, y: geo.size.height - 28)
+                    HoldLockRing(progress: ringProgress, locked: locked)
+                        .position(locked ? corner : cursor)
+                        .allowsHitTesting(locked)
+                        .onTapGesture { unlock() }
+                        .help(locked ? "Unlock — back to HDR" : "")
+                        .transition(.scale(scale: 0.6).combined(with: .opacity))
                 }
-                .onEnded { _ in
-                    if hasImage {
-                        withAnimation(.easeOut(duration: 0.1)) { showingOriginal = false }
-                    } else {
-                        onRequestAdd?()
+            }
+        }
+        .coordinateSpace(name: "preview")
+        .contentShape(Rectangle())
+        // Press-and-hold to peek the original (SDR); keep holding to lock it; tap to
+        // unlock. Empty state: a tap requests adding a photo.
+        .gesture(
+            DragGesture(minimumDistance: 0, coordinateSpace: .named("preview"))
+                .onChanged { v in
+                    if !isPressing {
+                        isPressing = true
+                        pressStart = Date()
+                        if holdState == .locked {
+                            lockedThisGesture = false        // a fresh press on a locked preview = unlock intent
+                        } else if holdState == .idle, hasImage {
+                            beginArming(at: v.location)
+                        }
+                    } else if holdState == .arming {
+                        cursor = v.location
                     }
                 }
+                .onEnded { v in
+                    let elapsed = pressStart.map { Date().timeIntervalSince($0) } ?? 0
+                    let dist = hypot(v.translation.width, v.translation.height)
+                    let isTap = elapsed < 0.2 && dist < 6
+                    switch holdState {
+                    case .arming:
+                        cancelArming(); holdState = .idle    // released before lock → momentary peek
+                    case .locked:
+                        if lockedThisGesture { break }       // release of the very hold that locked → keep
+                        if isTap { unlock() }                // a tap → unlock to HDR
+                    case .idle:
+                        if !hasImage, isTap { onRequestAdd?() }
+                    }
+                    isPressing = false
+                }
         )
-        .onChange(of: sdrURL) { _, _ in showingOriginal = false; rerender() }
-        // Editing a slider while viewing the original would otherwise leave a
-        // frozen image and a dead-looking control — flip back to HDR so the change
-        // is visible.
-        .onChange(of: params) { _, _ in showingOriginal = false; rerender() }
-        .onChange(of: cgamut) { _, _ in rerender() }
-        .onChange(of: sgamut) { _, _ in rerender() }
-        .onChange(of: bake) { _, _ in rerender() }
+        .onChange(of: sdrURL) { _, _ in resetHold(); rerender() }
+        // Editing while viewing/locked to the original would leave a frozen,
+        // dead-looking control (the SDR base doesn't change with HDR params) —
+        // auto-unlock back to HDR so the change is visible.
+        .onChange(of: params) { _, _ in resetHold(); rerender() }
+        .onChange(of: cgamut) { _, _ in resetHold(); rerender() }
+        .onChange(of: sgamut) { _, _ in resetHold(); rerender() }
+        .onChange(of: bake) { _, _ in resetHold(); rerender() }
         .onAppear { rerender() }
     }
 
@@ -358,15 +412,80 @@ struct HDRPreviewPane: View {
         renderer.request(sdr: sdrURL, params: params, cgamut: cgamut, sgamut: sgamut, bake: bake)
     }
 
-    // The top-left tag flips between the HDR look and the original SDR edit.
+    // MARK: Hold-to-lock helpers
+
+    private func beginArming(at loc: CGPoint) {
+        holdState = .arming
+        cursor = loc
+        lockedThisGesture = false
+        ringProgress = 0
+        ringVisible = false
+        // Grace: keep the ring hidden briefly so a reflexive quick-peek never flashes it.
+        graceTask?.cancel()
+        graceTask = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(graceDelay))
+            guard !Task.isCancelled, holdState == .arming else { return }
+            ringVisible = true
+            withAnimation(.linear(duration: holdDuration - graceDelay)) { ringProgress = 1 }
+        }
+        // Authoritative lock clock (independent of the fill animation).
+        holdTask?.cancel()
+        holdTask = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(holdDuration))
+            guard !Task.isCancelled, holdState == .arming else { return }
+            fireLock()
+        }
+    }
+
+    private func cancelArming() {
+        holdTask?.cancel(); holdTask = nil
+        graceTask?.cancel(); graceTask = nil
+        ringVisible = false
+        withAnimation(.easeOut(duration: 0.18)) { ringProgress = 0 }
+    }
+
+    private func fireLock() {
+        lockedThisGesture = true
+        ringProgress = 1
+        NSHapticFeedbackManager.defaultPerformer.perform(.levelChange, performanceTime: .now)
+        // Animate the ring flying to the corner + morphing into the lock chip.
+        withAnimation(reduceMotion ? .easeOut(duration: 0.2)
+                                   : .spring(response: 0.45, dampingFraction: 0.72)) {
+            holdState = .locked
+        }
+    }
+
+    private func unlock() {
+        NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
+        withAnimation(reduceMotion ? .easeOut(duration: 0.18)
+                                   : .spring(response: 0.4, dampingFraction: 0.8)) {
+            holdState = .idle
+        }
+    }
+
+    /// Drop any peek/lock/arming state (used on new photo or on edit auto-unlock).
+    private func resetHold() {
+        cancelArming()
+        holdState = .idle
+    }
+
+    // The top-left tag: LIVE HDR (accent), ORIGINAL · SDR (stone, while peeking),
+    // or LOCKED · SDR (amber + lock, while pinned to SDR).
     private var stateBadge: some View {
-        Text(showingOriginal ? "ORIGINAL · SDR" : "LIVE HDR")
-            .font(Theme.mono(10, .semibold)).tracking(1.2)
-            .foregroundStyle(showingOriginal ? Theme.inset : .white)
-            .padding(.horizontal, 8).padding(.vertical, 4)
-            .background((showingOriginal ? Theme.stone : Theme.accent).opacity(0.92),
-                        in: RoundedRectangle(cornerRadius: 5))
-            .padding(10)
+        let text = locked ? "LOCKED · SDR" : (showSDR ? "ORIGINAL · SDR" : "LIVE HDR")
+        let fg: Color = (showSDR || locked) ? Theme.inset : .white
+        let bg: Color = locked ? Theme.warn : (showSDR ? Theme.stone : Theme.accent)
+        return HStack(spacing: 4) {
+            if locked {
+                Image(systemName: "lock.fill").font(.system(size: 9, weight: .bold))
+            }
+            Text(text)
+        }
+        .font(Theme.mono(10, .semibold)).tracking(1.2)
+        .foregroundStyle(fg)
+        .padding(.horizontal, 8).padding(.vertical, 4)
+        .background(bg.opacity(0.92), in: RoundedRectangle(cornerRadius: 5))
+        .padding(10)
     }
 
     private var controls: some View {
@@ -393,13 +512,50 @@ struct HDRPreviewPane: View {
 
     @ViewBuilder private var compareHint: some View {
         if hasImage {
-            Text(showingOriginal ? "showing your original — release for HDR"
-                                 : "press & hold to compare original")
+            Text(locked ? "tap the lock to return to HDR"
+                        : "press & hold to compare · keep holding to lock")
                 .font(Theme.mono(9))
                 .foregroundStyle(.white.opacity(0.85))
                 .padding(.horizontal, 9).padding(.vertical, 4)
                 .background(.black.opacity(0.4), in: Capsule())
                 .padding(10)
+        }
+    }
+}
+
+/// The hold-to-lock indicator: while arming it's a JumpScrollKit-style amber
+/// progress ring with an open padlock that fills at the cursor; on lock it morphs
+/// into a compact amber-bordered chip with a closed padlock that lives in the
+/// corner as the click-to-unlock target. On a dark backing disc so it reads over
+/// any photo.
+private struct HoldLockRing: View {
+    let progress: CGFloat
+    let locked: Bool
+    private var disc: CGFloat { locked ? 30 : 40 }
+    var body: some View {
+        ZStack {
+            // Legibility backing — a dark disc with a hairline (amber once locked).
+            Circle()
+                .fill(.black.opacity(locked ? 0.5 : 0.42))
+                .overlay(Circle().stroke(locked ? Theme.warn.opacity(0.9) : .white.opacity(0.08),
+                                         lineWidth: locked ? 1.5 : 1))
+                .frame(width: disc, height: disc)
+                .shadow(color: .black.opacity(0.5), radius: 6)
+            // Track + amber progress arc — only while filling (fades out on lock).
+            if !locked {
+                Circle().stroke(.white.opacity(0.25), lineWidth: 3)
+                    .frame(width: 26, height: 26)
+                Circle()
+                    .trim(from: 0, to: progress)
+                    .stroke(Theme.warn, style: StrokeStyle(lineWidth: 3, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+                    .frame(width: 26, height: 26)
+            }
+            // open padlock while filling → closed amber padlock once locked.
+            Image(systemName: locked ? "lock.fill" : "lock.open")
+                .font(.system(size: locked ? 13 : 11, weight: .bold))
+                .foregroundStyle(locked ? Theme.warn : .white)
+                .contentTransition(.symbolEffect(.replace))
         }
     }
 }
