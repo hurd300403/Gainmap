@@ -417,10 +417,17 @@ struct ContentView: View {
                         .foregroundStyle(Theme.stoneDim)
                         .help("Auto-adjusts the look for each photo based on how bright it is. Off = your sliders apply exactly as set.")
                     Spacer()
-                    Button("Save as default") { model.setSignatureFromCurrent() }
-                        .buttonStyle(.plain)
-                        .font(Theme.mono(10, .semibold)).foregroundStyle(Theme.gold)
-                        .help("Save the current look as your default — it becomes the 100% Intensity preset and what Reset returns to (kept across launches).")
+                    if model.hasCustomDefault {
+                        Button("Restore app default") { model.restoreBuiltInDefault() }
+                            .buttonStyle(.plain)
+                            .font(Theme.mono(10, .semibold)).foregroundStyle(Theme.gold)
+                            .help("Restore the look Gainmap originally shipped with, clearing the default you saved. (Reset just returns to your current saved default.)")
+                    } else {
+                        Button("Save as default") { model.setSignatureFromCurrent() }
+                            .buttonStyle(.plain)
+                            .font(Theme.mono(10, .semibold)).foregroundStyle(Theme.gold)
+                            .help("Save the current look as your default — it becomes the 100% Intensity preset and what Reset returns to (kept across launches).")
+                    }
                 }
                 HStack {
                     Toggle("GLOW IN SDR", isOn: $model.bakeGlowIntoSDR)

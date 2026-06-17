@@ -68,6 +68,10 @@ final class MergeModel: ObservableObject {
     /// as the built-in signature, overridable via "Set as default look".
     @Published var signature: AutoHDR.BloomParams = AutoHDR.signatureLook
 
+    /// True once the user has saved their own default look (so the button offers
+    /// "Restore app default" instead of "Save as default").
+    @Published private(set) var hasCustomDefault = SignatureStore.hasSaved
+
     init() {
         let sig = SignatureStore.load() ?? AutoHDR.signatureLook
         signature = sig
@@ -99,6 +103,16 @@ final class MergeModel: ObservableObject {
         anchorLook = bloom
         intensity = 1.0
         SignatureStore.save(bloom)
+        hasCustomDefault = true
+    }
+
+    /// Throw away the user's saved default and return to the look Gainmap shipped
+    /// with (then re-anchor the current photo to it).
+    func restoreBuiltInDefault() {
+        SignatureStore.clear()
+        signature = AutoHDR.signatureLook
+        hasCustomDefault = false
+        resetToDefault()
     }
 
     // MARK: Copy / paste a look between photos
@@ -384,6 +398,8 @@ private extension Array {
 /// Persists the user's "default look" (signature) across launches.
 enum SignatureStore {
     private static let key = "gainmap.signatureLook"
+    static var hasSaved: Bool { UserDefaults.standard.data(forKey: key) != nil }
+    static func clear() { UserDefaults.standard.removeObject(forKey: key) }
     static func save(_ p: AutoHDR.BloomParams) {
         if let data = try? JSONEncoder().encode(p) {
             UserDefaults.standard.set(data, forKey: key)
