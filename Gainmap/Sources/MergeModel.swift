@@ -146,7 +146,7 @@ final class MergeModel: ObservableObject {
     /// shows on every display (the SDR fallback is the bloomed look, not the
     /// original). When false, the SDR fallback is the original JPEG passed through
     /// pixel-for-pixel and the glow lives only in the gain map (HDR-only).
-    @Published var bakeGlowIntoSDR: Bool = UserDefaults.standard.object(forKey: "gainmap.bakeGlowIntoSDR") as? Bool ?? true {
+    @Published var bakeGlowIntoSDR: Bool = UserDefaults.standard.object(forKey: "gainmap.bakeGlowIntoSDR") as? Bool ?? false {
         didSet { UserDefaults.standard.set(bakeGlowIntoSDR, forKey: "gainmap.bakeGlowIntoSDR") }
     }
 
