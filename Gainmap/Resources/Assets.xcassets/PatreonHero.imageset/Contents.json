@@ -1,0 +1,6 @@
+{
+  "images" : [
+    { "idiom" : "universal", "filename" : "patreon-hero.jpg" }
+  ],
+  "info" : { "author" : "xcode", "version" : 1 }
+}

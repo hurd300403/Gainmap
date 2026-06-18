@@ -18,9 +18,10 @@ struct ContentView: View {
     @State private var showAdvancedLook = false
     @State private var window: NSWindow?
     @State private var shareHover = false
+    @State private var showShareModal = false
 
-    // The Patreon post where the app can be downloaded — shared via the native
-    // macOS share sheet so patrons can pass the app along. TODO: confirm exact URL.
+    // The Patreon post where the app can be downloaded — shown in the share modal
+    // so patrons can copy/pass the link along. TODO: confirm exact download-post URL.
     private let shareURL = URL(string: "https://www.patreon.com/samhurd")!
 
     var body: some View {
@@ -58,6 +59,14 @@ struct ContentView: View {
             // the (right-justified) header rides right up to the window edge. Safe
             // because the macOS traffic lights live top-LEFT, where we keep empty.
             .ignoresSafeArea(.container, edges: .top)
+
+            if showShareModal {
+                ShareModal(url: shareURL) {
+                    withAnimation(.easeOut(duration: 0.18)) { showShareModal = false }
+                }
+                .transition(.opacity)
+                .zIndex(10)
+            }
         }
         .frame(minWidth: 900, minHeight: 620)
         .background(WindowAccessor { window = $0 })
@@ -656,14 +665,12 @@ struct ContentView: View {
     }
 
     /// Native macOS share button (top-left) — pops Messages / Mail / AirDrop /
-    /// Copy Link with the Patreon download post, so patrons can pass the app along.
+    /// Opens the in-app share card with the Patreon download link.
     private var shareButton: some View {
-        ShareLink(item: shareURL,
-                  subject: Text("Gainmap"),
-                  message: Text("Gainmap — fuse an SDR + HDR edit into one UltraHDR JPEG, with clean highlights everywhere.")) {
+        Button { withAnimation(.easeOut(duration: 0.2)) { showShareModal = true } } label: {
             HStack(spacing: 8) {
                 Image(systemName: "square.and.arrow.up").font(.system(size: 14, weight: .semibold))
-                Text("Share").font(Theme.mono(13, .semibold)).tracking(1.5)
+                Text("Share a link").font(Theme.mono(13, .semibold)).tracking(1.5)
             }
             .foregroundStyle(shareHover ? .white : Theme.accent)
             .padding(.horizontal, 16).padding(.vertical, 9)
@@ -674,7 +681,107 @@ struct ContentView: View {
         .buttonStyle(.plain)
         .padding(.leading, 44)        // clear the macOS traffic-light buttons
         .onHover { shareHover = $0 }
-        .help("Share Gainmap with someone")
+        .help("Share the download link with someone")
+    }
+}
+
+// MARK: - Share modal (in-app share card → Patreon download link)
+
+/// A custom share card: a hero shot of Sam's Patreon, a short "this is supported
+/// by patrons" note, the download link, and Copy-link / Open-Patreon actions.
+private struct ShareModal: View {
+    let url: URL
+    var onClose: () -> Void
+    @State private var copied = false
+
+    var body: some View {
+        ZStack {
+            Rectangle().fill(.black.opacity(0.62)).ignoresSafeArea()
+                .onTapGesture(perform: onClose)
+
+            card
+                .frame(width: 460)
+                .background(RoundedRectangle(cornerRadius: 20, style: .continuous).fill(Theme.surface))
+                .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).strokeBorder(Theme.line, lineWidth: 1))
+                .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                .overlay(alignment: .topTrailing) {
+                    Button(action: onClose) {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 22))
+                            .foregroundStyle(.white.opacity(0.85), .black.opacity(0.45))
+                            .padding(10)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Close")
+                }
+                .shadow(color: .black.opacity(0.55), radius: 34, y: 14)
+        }
+    }
+
+    private var card: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Image("PatreonHero")
+                .resizable().aspectRatio(contentMode: .fill)
+                .frame(height: 138)
+                .frame(maxWidth: .infinity)
+                .clipped()
+                .overlay(Rectangle().fill(.black.opacity(0.04)))
+
+            VStack(alignment: .leading, spacing: 14) {
+                Text("Share Gainmap")
+                    .font(Theme.mono(17, .semibold)).foregroundStyle(.white)
+
+                Text("Gainmap is free for my Patreon community. If it's useful to you, passing the download link along is the kindest thanks — and a great way to support the work that keeps it free. ❤️")
+                    .font(Theme.mono(11.5)).foregroundStyle(Theme.stone)
+                    .lineSpacing(3.5)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                HStack(spacing: 8) {
+                    Image(systemName: "link").font(.system(size: 10, weight: .semibold)).foregroundStyle(Theme.stoneDim)
+                    Text(url.absoluteString.replacingOccurrences(of: "https://", with: ""))
+                        .font(Theme.mono(10)).foregroundStyle(Theme.stoneDim)
+                        .lineLimit(1).truncationMode(.middle)
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 13).padding(.vertical, 10)
+                .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(Theme.inset))
+                .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(Theme.line, lineWidth: 1))
+
+                HStack(spacing: 10) {
+                    Button(action: copyLink) {
+                        HStack(spacing: 7) {
+                            Image(systemName: copied ? "checkmark" : "doc.on.doc.fill")
+                            Text(copied ? "Copied!" : "Copy link")
+                        }
+                        .font(Theme.mono(12.5, .semibold))
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity).padding(.vertical, 11)
+                        .background(Capsule().fill(Theme.accent))
+                    }
+                    .buttonStyle(.plain)
+
+                    Button { NSWorkspace.shared.open(url); onClose() } label: {
+                        HStack(spacing: 7) {
+                            Image(systemName: "arrow.up.forward")
+                            Text("Open Patreon")
+                        }
+                        .font(Theme.mono(12.5, .semibold))
+                        .foregroundStyle(Theme.accent)
+                        .frame(maxWidth: .infinity).padding(.vertical, 11)
+                        .background(Capsule().fill(Theme.accent.opacity(0.14)))
+                        .overlay(Capsule().strokeBorder(Theme.accent.opacity(0.5), lineWidth: 1))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(20)
+        }
+    }
+
+    private func copyLink() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(url.absoluteString, forType: .string)
+        withAnimation { copied = true }
     }
 }
 
