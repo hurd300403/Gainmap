@@ -722,10 +722,9 @@ private struct ShareModal: View {
         VStack(alignment: .leading, spacing: 0) {
             Image("PatreonHero")
                 .resizable().aspectRatio(contentMode: .fill)
-                .frame(height: 138)
+                .frame(height: 184)          // matches the 2.5:1 banner crop at 460pt wide
                 .frame(maxWidth: .infinity)
                 .clipped()
-                .overlay(Rectangle().fill(.black.opacity(0.04)))
 
             VStack(alignment: .leading, spacing: 14) {
                 Text("Share Gainmap")
