@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 #
-# release.sh — produce notarized, distributable artifacts for BOTH deliverables:
-#   1. Gainmap.app  → Gainmap.dmg   (standalone app)
-#   2. the .lrplugin → Lightroom-UltraHDR-mac.zip   (Lightroom plugin)
+# release.sh — produce the notarized, distributable Gainmap.app → Gainmap.dmg.
+#
+# NOTE: the Lightroom .lrplugin is intentionally NOT packaged/published right now
+# (revisit another day). The plugin section below is commented out; re-enable it
+# and add "$ZIP" back to the appcast input + gh release publish to ship it again.
 #
 # Notarization needs a stored notarytool credential profile. The reusable one is
 # "legacylab-notary" (Apple ID samhurd+apple2@gmail.com, team S8HQ5TEYDE). If it's
@@ -98,15 +100,15 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 2. Lightroom plugin → zip → notarize (the bundled binary is what's checked).
+# 2. Lightroom plugin — DISABLED for now (revisit another day). To re-enable,
+#    uncomment, and add "$ZIP" back to the appcast input + gh release publish.
 # ---------------------------------------------------------------------------
-echo "▸ packaging + notarizing the Lightroom plugin…"
-PLUGIN="$ROOT/upstream/lua/lightroom-hdr.lrplugin"
-ZIP="$DIST/Lightroom-UltraHDR-mac.zip"; rm -f "$ZIP"
-( cd "$(dirname "$PLUGIN")" && ditto -c -k --sequesterRsrc --keepParent "lightroom-hdr.lrplugin" "$ZIP" )
-# Notarize the zip so Gatekeeper accepts the bundled uhdrtool on first run.
-xcrun notarytool submit "$ZIP" --keychain-profile "$PROFILE" --wait
-# (.lrplugin can't be stapled; notarizing the binary inside clears Gatekeeper.)
+# echo "▸ packaging + notarizing the Lightroom plugin…"
+# PLUGIN="$ROOT/upstream/lua/lightroom-hdr.lrplugin"
+# ZIP="$DIST/Lightroom-UltraHDR-mac.zip"; rm -f "$ZIP"
+# ( cd "$(dirname "$PLUGIN")" && ditto -c -k --sequesterRsrc --keepParent "lightroom-hdr.lrplugin" "$ZIP" )
+# xcrun notarytool submit "$ZIP" --keychain-profile "$PROFILE" --wait
+# # (.lrplugin can't be stapled; notarizing the binary inside clears Gatekeeper.)
 
 # ---------------------------------------------------------------------------
 # 3. Sparkle appcast — EdDSA-sign the DMG (keychain key) + write appcast.xml,
@@ -120,12 +122,11 @@ TAG="v$VER"
 "$GEN_APPCAST" --download-url-prefix "https://github.com/hurd300403/Gainmap/releases/latest/download/" "$DIST"
 
 echo "▸ publishing GitHub Release ${TAG} ..."
-gh release create "$TAG" "$DMG" "$DIST/appcast.xml" "$ZIP" \
+gh release create "$TAG" "$DMG" "$DIST/appcast.xml" \
     --repo hurd300403/Gainmap --title "Gainmap $VER" --notes "Gainmap $VER" \
-  || gh release upload "$TAG" "$DMG" "$DIST/appcast.xml" "$ZIP" --repo hurd300403/Gainmap --clobber
+  || gh release upload "$TAG" "$DMG" "$DIST/appcast.xml" --repo hurd300403/Gainmap --clobber
 
 echo
 echo "✓ artifacts in $DIST:"
 echo "  • Gainmap.dmg                  (notarized + stapled)"
-echo "  • Lightroom-UltraHDR-mac.zip   (notarized)"
 echo "  • appcast.xml                  (EdDSA-signed; published to GitHub Release $TAG)"
