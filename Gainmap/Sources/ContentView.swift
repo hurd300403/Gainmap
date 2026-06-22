@@ -35,28 +35,45 @@ struct ContentView: View {
                            center: .top, startRadius: 0, endRadius: 380)
                 .ignoresSafeArea()
 
-            ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
-                    header
-                        .padding(.horizontal, 38)
-                        .padding(.top, 18)
-                        .padding(.bottom, 16)
+            VStack(alignment: .leading, spacing: 0) {
+                header
+                    .padding(.horizontal, 38)
+                    .padding(.top, 18)
+                    .padding(.bottom, 16)
 
-                    if model.mode == .advanced && model.phase == .done {
-                        ResultCard(model: model).padding(.horizontal, 38)
-                    } else {
-                        benchSection.padding(.horizontal, 38)
+                // Two static columns: the live preview is pinned on the left and
+                // never moves; only the controls column on the right scrolls — so
+                // dialing settings never nudges the photo you're judging.
+                HStack(alignment: .top, spacing: 22) {
+                    VStack(spacing: 10) {
+                        HDRPreviewPane(sdrURL: model.sdrURL, params: model.bloom,
+                                       cgamut: model.cgamut, sgamut: model.sgamut, bake: model.bakeGlowIntoSDR,
+                                       expanded: true,
+                                       onRequestAdd: model.items.isEmpty ? { addPhotos() } : nil)
+                        Text(model.items.isEmpty ? "click the preview or drop SDR JPEGs anywhere to begin"
+                                                 : "live HDR preview · press & hold to compare original")
+                            .font(Theme.mono(10)).foregroundStyle(Theme.stoneDim)
                     }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
 
-                    footer.padding(.top, 28).padding(.bottom, 22)
+                    ScrollView(.vertical, showsIndicators: false) {
+                        VStack(spacing: 0) {
+                            BatchFilmstrip(model: model)
+                            bloomControls.padding(.top, 14)
+                            if !model.items.isEmpty { autoResultStrip }
+                            footer.padding(.top, 24)
+                        }
+                        .padding(.bottom, 10)
+                    }
+                    .frame(width: 408)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .padding(.horizontal, 38)
+                .padding(.bottom, 14)
             }
-            // Drop SDR JPEGs anywhere in the window (auto mode) to add to the queue.
+            // Drop SDR JPEGs anywhere in the window to add to the queue.
             .onDrop(of: [.fileURL], isTargeted: nil, perform: handleWindowDrop)
-            // Pin the Save/Prev/Next bar to the bottom so it's ALWAYS reachable —
-            // no matter how tall the slider stack gets, it can't scroll off. The
-            // ScrollView content insets above it automatically.
+            // Pin the Save/Prev/Next bar to the bottom so it's ALWAYS reachable.
             .safeAreaInset(edge: .bottom, spacing: 0) { pinnedActionBar }
             // Reclaim the ~28pt the hidden title bar reserves as top safe area, so
             // the (right-justified) header rides right up to the window edge. Safe
@@ -150,20 +167,9 @@ struct ContentView: View {
 
     // MARK: Bench (idle / error / merging)
 
-    private var benchSection: some View {
-        VStack(spacing: 0) {
-            modePicker.padding(.bottom, 12)
-
-            if model.mode == .auto {
-                autoSection
-            } else {
-                advancedSection
-                // Gamut pickers + Lightroom how-to are only relevant to the
-                // two-file workflow, so they live in the Advanced tab only.
-                settingsPanel.padding(.top, 26)
-            }
-        }
-    }
+    // NOTE: the Auto/Advanced mode picker is hidden for now — the app runs the
+    // one-photo (Auto) flow only. The two-file (Advanced) views below are kept
+    // intact so the mode can be re-enabled later without rebuilding them.
 
     // Advanced = HDR TIFF + SDR JPEG, one shot.
     private var advancedSection: some View {
@@ -176,32 +182,6 @@ struct ContentView: View {
         }
     }
 
-    // Auto = a queue of SDR JPEGs. Always a big preview on the left, controls on
-    // the right. Drop images anywhere in the window to add them.
-    private var autoSection: some View {
-        HStack(alignment: .top, spacing: 22) {
-            VStack(spacing: 10) {
-                HDRPreviewPane(sdrURL: model.sdrURL, params: model.bloom,
-                               cgamut: model.cgamut, sgamut: model.sgamut, bake: model.bakeGlowIntoSDR,
-                               expanded: true,
-                               onRequestAdd: model.items.isEmpty ? { addPhotos() } : nil)
-                Text(model.items.isEmpty ? "click the preview or drop SDR JPEGs anywhere to begin"
-                                         : "live HDR preview · press & hold to compare original")
-                    .font(Theme.mono(10)).foregroundStyle(Theme.stoneDim)
-            }
-            .frame(maxWidth: .infinity)
-
-            VStack(spacing: 0) {
-                BatchFilmstrip(model: model)
-                bloomControls.padding(.top, 14)
-                if !model.items.isEmpty {
-                    autoResultStrip   // queue Save/Prev/Next is pinned to the window bottom (see pinnedActionBar)
-                }
-            }
-            .frame(width: 408)
-        }
-    }
-
     @ViewBuilder private var autoResultStrip: some View {
         if let sel = model.selectedItem {
             if sel.status == .done {
@@ -210,29 +190,6 @@ struct ContentView: View {
                 ErrorBanner(message: e).padding(.top, 16)
             }
         }
-    }
-
-    // Auto = one SDR JPEG → popped; Advanced = HDR TIFF + SDR JPEG.
-    private var modePicker: some View {
-        HStack(spacing: 3) {
-            modeButton("Auto · one photo", .auto)
-            modeButton("Advanced · two files", .advanced)
-        }
-        .padding(3)
-        .background(Theme.inset, in: RoundedRectangle(cornerRadius: 10))
-        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Theme.line, lineWidth: 1))
-    }
-
-    private func modeButton(_ title: String, _ m: MergeModel.Mode) -> some View {
-        let on = model.mode == m
-        return Button(action: { withAnimation(.easeOut(duration: 0.2)) { model.mode = m } }) {
-            Text(title)
-                .font(Theme.ui(12.5, .semibold))
-                .foregroundStyle(on ? .white : Theme.stoneDim)
-                .frame(maxWidth: .infinity).padding(.vertical, 8)
-                .background(on ? Theme.surfaceHi : .clear, in: RoundedRectangle(cornerRadius: 7))
-        }
-        .buttonStyle(.plain)
     }
 
     // MARK: Queue navigation + save bar (auto mode)
@@ -411,6 +368,7 @@ struct ContentView: View {
             // The one slider most people ever touch: blend the signature look from
             // subtle to full.
             sliderRow("INTENSITY", intensityBinding, 0...1, fmt: "%.0f%%", "subtle", "full", scale: 100,
+                      resetTo: 1.0,
                       help: "Overall strength of the HDR pop. Slide down for a subtle effect, up for full punch — it blends all the Advanced settings at once.")
 
             Divider().overlay(Theme.line)
@@ -428,56 +386,63 @@ struct ContentView: View {
             .buttonStyle(.plain)
 
             if showAdvancedLook {
-                // The "default" the top "Reset" snaps back to. Lives above the look
-                // groups because it's about the panel's reset behavior, not a parameter.
-                HStack(alignment: .top) {
-                    Spacer()
-                    VStack(alignment: .trailing, spacing: 2) {
-                        if model.hasCustomDefault {
-                            Button("Restore app default") { model.restoreBuiltInDefault() }
-                                .buttonStyle(.plain)
-                                .font(Theme.mono(10, .semibold)).foregroundStyle(Theme.gold)
-                                .help("Replace your saved default with the look Gainmap originally shipped with. “Reset” will then snap to that.")
-                        } else {
-                            Button("Save as default") { model.setSignatureFromCurrent() }
-                                .buttonStyle(.plain)
-                                .font(Theme.mono(10, .semibold)).foregroundStyle(Theme.gold)
-                                .help("Make the current look your default — the 100% Intensity preset and what “Reset” snaps back to (kept across launches).")
+                // The saved "default look" the top "Reset" (and double-click) snap back
+                // to. Real boxed buttons so it's obviously clickable; left-justified
+                // with an inline caption so it doesn't waste the row's width.
+                HStack(spacing: 9) {
+                    boxedButton(model.hasCustomDefault ? "Update default" : "Save as default",
+                                tint: Theme.gold) {
+                        model.setSignatureFromCurrent()
+                    }
+                    .help("Make the current look your default — the 100% Intensity preset and what “Reset” (and double-clicking a slider) snaps back to. Kept across launches.")
+                    if model.hasCustomDefault {
+                        boxedButton("Restore app default", tint: Theme.stoneDim) {
+                            model.restoreBuiltInDefault()
                         }
-                        // "Reset" tinted to match the actual Reset button (accentHot)
-                        // so the link reads at a glance; arrow points up at the button.
+                        .help("Replace your saved default with the look Gainmap originally shipped with. “Reset” will then snap to that.")
+                    } else {
+                        // "Reset" tinted to match the actual Reset button (accentHot).
                         (Text("what ").foregroundStyle(Theme.stoneDim)
                          + Text("“Reset”").foregroundStyle(Theme.accentHot)
-                         + Text(" snaps to ↑").foregroundStyle(Theme.stoneDim))
+                         + Text(" snaps to").foregroundStyle(Theme.stoneDim))
                             .font(Theme.mono(8.5))
                     }
+                    Spacer(minLength: 0)
                 }
 
                 // THE GLOW — shape & strength of the bloom.
                 lookGroup("glow", "THE GLOW", "how the highlights bloom") {
                     sliderRow("GLOW", $model.bloom.glow, 0...1.5, fmt: "%.2f", "none", "bright",
+                              resetTo: model.signature.glow,
                               help: "How much the bright areas bloom and spill light. Higher = brighter, dreamier highlights.")
                     sliderRow("SPREAD", $model.bloom.spread, 0.002...0.025, fmt: "%.1f%%", "tight", "wide", scale: 100,
+                              resetTo: model.signature.spread,
                               help: "Size of the glow halo around bright areas. Tight = crisp and contained; wide = soft and dreamy.")
                     sliderRow("PUNCH", $model.bloom.punch, 0...1, fmt: "%.2f", "soft glow", "sharp pop",
+                              resetTo: model.signature.punch,
                               help: "The character of the glow. Left = soft, dreamy bloom; right = sharp, snappy highlights.")
                     sliderRow("FALLOFF", $model.bloom.falloff, 0.5...2.0, fmt: "%.2f", "hard", "smooth",
+                              resetTo: model.signature.falloff,
                               help: "How abruptly the glow ramps up in the highlights. Hard = sudden onset; smooth = gradual and gentle.")
                 }
 
                 // COLOR — the color of the glow.
                 lookGroup("color", "COLOR", "the color of that light") {
                     sliderRow("GLOW COLOR", $model.bloom.saturation, 0...1.5, fmt: "%.2f", "white", "vivid",
+                              resetTo: model.signature.saturation,
                               help: "How colorful the glow is. White = neutral light; vivid = keeps the scene's own color in the glow.")
                     sliderRow("TINT", $model.bloom.tint, -1...1, fmt: "%+.2f", "cool", "warm",
+                              resetTo: model.signature.tint,
                               help: "Warmth of the glow. Cool leans blue; warm leans golden-hour.")
                 }
 
                 // HDR & SCREENS — how the effect shows across displays.
                 lookGroup("hdr", "HDR & SCREENS", "how it shows across displays") {
                     sliderRow("HEADROOM", $model.bloom.headroom, 1...3, fmt: "%.1f×", "natural", "intense",
+                              resetTo: model.signature.headroom,
                               help: "How far the bright tones climb on HDR screens. Higher makes highlights glow harder on HDR-capable displays (little effect on regular screens or the SDR fallback).")
                     sliderRow("THRESHOLD", $model.bloom.threshold, 0.3...0.95, fmt: "%.0f%%", "everything", "specular", scale: 100,
+                              resetTo: model.signature.threshold,
                               help: "Which areas get the HDR treatment. Left = most of the image brightens; right = only the very brightest spots, like the sun or shiny reflections.")
                     HStack {
                         Toggle("GLOW IN SDR", isOn: $model.bakeGlowIntoSDR)
@@ -507,8 +472,10 @@ struct ContentView: View {
                     }
                     if model.bloom.autoAdapt {
                         sliderRow("ADAPT", $model.bloom.adaptAmount, 0...1, fmt: "%.0f%%", "fixed", "dynamic", scale: 100,
+                                  resetTo: model.signature.adaptAmount,
                                   help: "How strongly AUTO retunes the look per photo. Fixed = your settings as-is; dynamic = more automatic adjustment.")
                         sliderRow("HL GUARD", $model.bloom.highlightGuard, 0...1, fmt: "%.0f%%", "loose", "strict", scale: 100,
+                                  resetTo: model.signature.highlightGuard,
                                   help: "Protects already-bright photos from blowing out. Stricter pulls the effect back more on high-key images.")
                     }
                 }
@@ -521,7 +488,7 @@ struct ContentView: View {
 
     private func sliderRow(_ title: String, _ value: Binding<Double>, _ range: ClosedRange<Double>,
                            fmt: String, _ left: String, _ right: String, scale: Double = 1,
-                           help: String = "") -> some View {
+                           resetTo: Double? = nil, help: String = "") -> some View {
         HStack(spacing: 10) {
             HStack(spacing: 4) {
                 Text(title).font(Theme.mono(10, .semibold)).tracking(1)
@@ -530,7 +497,13 @@ struct ContentView: View {
             }
             .frame(width: 108, alignment: .leading)
             VStack(spacing: 2) {
-                Slider(value: value, in: range).tint(Theme.accent)
+                // Double-click the slider snaps this one control back to the saved
+                // default (the same value the top "Reset" uses). Native Slider can't
+                // see the click, so this wraps NSSlider with a real double-click
+                // recognizer that coexists with normal dragging.
+                ResettableSlider(value: value, range: range) {
+                    if let d = resetTo { value.wrappedValue = d }
+                }
                 HStack { Text(left); Spacer(); Text(right) }
                     .font(Theme.mono(8.5)).foregroundStyle(Theme.stoneFaint)
             }
@@ -539,7 +512,22 @@ struct ContentView: View {
                 .frame(width: 44, alignment: .trailing)
         }
         .contentShape(Rectangle())
-        .help(help)
+        .help(resetTo == nil || help.isEmpty ? help
+              : help + "\n\nDouble-click the slider to reset it to your default.")
+    }
+
+    /// A small bordered, tappable button matching the clustered advanced-controls
+    /// style — used for the "default look" actions so they read clearly as buttons.
+    private func boxedButton(_ title: String, tint: Color, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(Theme.mono(10, .semibold)).foregroundStyle(tint)
+                .padding(.horizontal, 11).padding(.vertical, 6)
+                .background(Theme.surface, in: RoundedRectangle(cornerRadius: 7))
+                .overlay(RoundedRectangle(cornerRadius: 7).stroke(Theme.line, lineWidth: 1))
+                .contentShape(RoundedRectangle(cornerRadius: 7))
+        }
+        .buttonStyle(.plain)
     }
 
     /// A collapsible, titled card that groups related look controls. The plain-language
@@ -1059,5 +1047,43 @@ struct GMButton: ButtonStyle {
             }
             .opacity(configuration.isPressed ? 0.85 : 1)
             .scaleEffect(configuration.isPressed ? 0.99 : 1)
+    }
+}
+
+/// A native NSSlider (so its fill uses the app accent + matches the rest of the UI)
+/// with a double-click recognizer that resets the control to its default. The
+/// recognizer requires two clicks, so it coexists with normal single-click dragging.
+struct ResettableSlider: NSViewRepresentable {
+    @Binding var value: Double
+    let range: ClosedRange<Double>
+    var onReset: () -> Void
+
+    func makeNSView(context: Context) -> NSSlider {
+        let s = NSSlider(value: value, minValue: range.lowerBound, maxValue: range.upperBound,
+                         target: context.coordinator, action: #selector(Coordinator.changed(_:)))
+        s.isContinuous = true
+        s.controlSize = .small
+        let dbl = NSClickGestureRecognizer(target: context.coordinator,
+                                           action: #selector(Coordinator.doubleClicked))
+        dbl.numberOfClicksRequired = 2
+        s.addGestureRecognizer(dbl)
+        s.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        return s
+    }
+
+    func updateNSView(_ s: NSSlider, context: Context) {
+        context.coordinator.parent = self
+        s.minValue = range.lowerBound
+        s.maxValue = range.upperBound
+        if abs(s.doubleValue - value) > .ulpOfOne { s.doubleValue = value }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    final class Coordinator: NSObject {
+        var parent: ResettableSlider
+        init(_ parent: ResettableSlider) { self.parent = parent }
+        @objc func changed(_ sender: NSSlider) { parent.value = sender.doubleValue }
+        @objc func doubleClicked() { parent.onReset() }
     }
 }

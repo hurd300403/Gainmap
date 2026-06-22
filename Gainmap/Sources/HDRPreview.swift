@@ -308,7 +308,7 @@ struct HDRPreviewPane: View {
     @State private var holdTask: Task<Void, Never>?
     @State private var graceTask: Task<Void, Never>?
 
-    private let holdDuration: TimeInterval = 0.8     // press → lock
+    private let holdDuration: TimeInterval = 1.6     // press → lock
     private let graceDelay: TimeInterval = 0.15      // ring stays hidden this long (pure peeks never flash it)
 
     private var locked: Bool { holdState == .locked }
