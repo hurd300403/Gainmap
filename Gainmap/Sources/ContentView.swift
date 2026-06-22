@@ -16,6 +16,9 @@ struct ContentView: View {
     @StateObject private var model = MergeModel()
     @State private var showSettings = false
     @State private var showAdvancedLook = false
+    // Which advanced groups are expanded. All open by default so nothing is hidden
+    // on first look; the grouping (not the collapse) is what tames the complexity.
+    @State private var expandedGroups: Set<String> = ["glow", "color", "hdr", "auto"]
     @State private var window: NSWindow?
     @State private var shareHover = false
     @State private var showShareModal = false
@@ -425,15 +428,10 @@ struct ContentView: View {
             .buttonStyle(.plain)
 
             if showAdvancedLook {
+                // The "default" the top "Reset" snaps back to. Lives above the look
+                // groups because it's about the panel's reset behavior, not a parameter.
                 HStack(alignment: .top) {
-                    Toggle("AUTO", isOn: $model.bloom.autoAdapt)
-                        .toggleStyle(.switch)
-                        .font(Theme.mono(10, .semibold))
-                        .foregroundStyle(Theme.stoneDim)
-                        .help("Auto-adjusts the look for each photo based on how bright it is. Off = your sliders apply exactly as set.")
                     Spacer()
-                    // The "default" the top "Reset" snaps back to. Caption makes that
-                    // link explicit (the two controls live in different sections).
                     VStack(alignment: .trailing, spacing: 2) {
                         if model.hasCustomDefault {
                             Button("Restore app default") { model.restoreBuiltInDefault() }
@@ -454,40 +452,66 @@ struct ContentView: View {
                             .font(Theme.mono(8.5))
                     }
                 }
-                HStack {
-                    Toggle("GLOW IN SDR", isOn: $model.bakeGlowIntoSDR)
-                        .toggleStyle(.switch)
-                        .font(Theme.mono(10, .semibold))
-                        .foregroundStyle(Theme.stoneDim)
-                        .help("SDR = the standard, non-HDR version of your photo (a regular JPEG — what most screens and apps show). On: the soft glow is baked into that SDR version so it shows on every screen. Off: the SDR version stays pixel-identical to your input, and the glow appears only on HDR displays.")
-                    InfoButton(title: "GLOW IN SDR",
-                               text: "“SDR” is the standard, non-HDR version of your photo — a regular JPEG, the kind every screen and app can show. Your export always tucks one inside as the fallback for non-HDR screens.\n\nOn: the soft glow is baked into that SDR version, so your look carries everywhere (the fallback is your bloomed photo, not the untouched original).\n\nOff: the SDR version is pixel-identical to the file you started with, and the glow lives only in the HDR layer — so it appears only on HDR-capable displays.")
-                    Spacer()
-                    Text(model.bakeGlowIntoSDR ? "shows on every screen" : "HDR screens only")
-                        .font(Theme.mono(9)).foregroundStyle(Theme.stoneFaint)
+
+                // THE GLOW — shape & strength of the bloom.
+                lookGroup("glow", "THE GLOW", "how the highlights bloom") {
+                    sliderRow("GLOW", $model.bloom.glow, 0...1.5, fmt: "%.2f", "none", "bright",
+                              help: "How much the bright areas bloom and spill light. Higher = brighter, dreamier highlights.")
+                    sliderRow("SPREAD", $model.bloom.spread, 0.002...0.025, fmt: "%.1f%%", "tight", "wide", scale: 100,
+                              help: "Size of the glow halo around bright areas. Tight = crisp and contained; wide = soft and dreamy.")
+                    sliderRow("PUNCH", $model.bloom.punch, 0...1, fmt: "%.2f", "soft glow", "sharp pop",
+                              help: "The character of the glow. Left = soft, dreamy bloom; right = sharp, snappy highlights.")
+                    sliderRow("FALLOFF", $model.bloom.falloff, 0.5...2.0, fmt: "%.2f", "hard", "smooth",
+                              help: "How abruptly the glow ramps up in the highlights. Hard = sudden onset; smooth = gradual and gentle.")
                 }
-                sliderRow("GLOW", $model.bloom.glow, 0...1.5, fmt: "%.2f", "none", "bright",
-                          help: "How much the bright areas bloom and spill light. Higher = brighter, dreamier highlights.")
-                sliderRow("HEADROOM", $model.bloom.headroom, 1...3, fmt: "%.1f×", "natural", "intense",
-                          help: "How far the bright tones climb on HDR screens. Higher makes highlights glow harder on HDR-capable displays (little effect on regular screens or the SDR fallback).")
-                sliderRow("THRESHOLD", $model.bloom.threshold, 0.3...0.95, fmt: "%.0f%%", "everything", "specular", scale: 100,
-                          help: "Which areas get the HDR treatment. Left = most of the image brightens; right = only the very brightest spots, like the sun or shiny reflections.")
-                sliderRow("SPREAD", $model.bloom.spread, 0.002...0.025, fmt: "%.1f%%", "tight", "wide", scale: 100,
-                          help: "Size of the glow halo around bright areas. Tight = crisp and contained; wide = soft and dreamy.")
-                sliderRow("PUNCH", $model.bloom.punch, 0...1, fmt: "%.2f", "soft glow", "sharp pop",
-                          help: "The character of the glow. Left = soft, dreamy bloom; right = sharp, snappy highlights.")
-                if model.bloom.autoAdapt {
-                    sliderRow("ADAPT", $model.bloom.adaptAmount, 0...1, fmt: "%.0f%%", "fixed", "dynamic", scale: 100,
-                              help: "How strongly AUTO retunes the look per photo. Fixed = your settings as-is; dynamic = more automatic adjustment.")
-                    sliderRow("HL GUARD", $model.bloom.highlightGuard, 0...1, fmt: "%.0f%%", "loose", "strict", scale: 100,
-                              help: "Protects already-bright photos from blowing out. Stricter pulls the effect back more on high-key images.")
+
+                // COLOR — the color of the glow.
+                lookGroup("color", "COLOR", "the color of that light") {
+                    sliderRow("GLOW COLOR", $model.bloom.saturation, 0...1.5, fmt: "%.2f", "white", "vivid",
+                              help: "How colorful the glow is. White = neutral light; vivid = keeps the scene's own color in the glow.")
+                    sliderRow("TINT", $model.bloom.tint, -1...1, fmt: "%+.2f", "cool", "warm",
+                              help: "Warmth of the glow. Cool leans blue; warm leans golden-hour.")
                 }
-                sliderRow("FALLOFF", $model.bloom.falloff, 0.5...2.0, fmt: "%.2f", "hard", "smooth",
-                          help: "How abruptly the glow ramps up in the highlights. Hard = sudden onset; smooth = gradual and gentle.")
-                sliderRow("GLOW COLOR", $model.bloom.saturation, 0...1.5, fmt: "%.2f", "white", "vivid",
-                          help: "How colorful the glow is. White = neutral light; vivid = keeps the scene's own color in the glow.")
-                sliderRow("TINT", $model.bloom.tint, -1...1, fmt: "%+.2f", "cool", "warm",
-                          help: "Warmth of the glow. Cool leans blue; warm leans golden-hour.")
+
+                // HDR & SCREENS — how the effect shows across displays.
+                lookGroup("hdr", "HDR & SCREENS", "how it shows across displays") {
+                    sliderRow("HEADROOM", $model.bloom.headroom, 1...3, fmt: "%.1f×", "natural", "intense",
+                              help: "How far the bright tones climb on HDR screens. Higher makes highlights glow harder on HDR-capable displays (little effect on regular screens or the SDR fallback).")
+                    sliderRow("THRESHOLD", $model.bloom.threshold, 0.3...0.95, fmt: "%.0f%%", "everything", "specular", scale: 100,
+                              help: "Which areas get the HDR treatment. Left = most of the image brightens; right = only the very brightest spots, like the sun or shiny reflections.")
+                    HStack {
+                        Toggle("GLOW IN SDR", isOn: $model.bakeGlowIntoSDR)
+                            .toggleStyle(.switch)
+                            .font(Theme.mono(10, .semibold))
+                            .foregroundStyle(Theme.stoneDim)
+                            .help("SDR = the standard, non-HDR version of your photo (a regular JPEG — what most screens and apps show). On: the soft glow is baked into that SDR version so it shows on every screen. Off: the SDR version stays pixel-identical to your input, and the glow appears only on HDR displays.")
+                        InfoButton(title: "GLOW IN SDR",
+                                   text: "“SDR” is the standard, non-HDR version of your photo — a regular JPEG, the kind every screen and app can show. Your export always tucks one inside as the fallback for non-HDR screens.\n\nOn: the soft glow is baked into that SDR version, so your look carries everywhere (the fallback is your bloomed photo, not the untouched original).\n\nOff: the SDR version is pixel-identical to the file you started with, and the glow lives only in the HDR layer — so it appears only on HDR-capable displays.")
+                        Spacer()
+                        Text(model.bakeGlowIntoSDR ? "shows on every screen" : "HDR screens only")
+                            .font(Theme.mono(9)).foregroundStyle(Theme.stoneFaint)
+                    }
+                }
+
+                // AUTO — per-photo auto-tuning (Adapt + HL Guard only matter when on).
+                lookGroup("auto", "AUTO", "let Gainmap tune each photo") {
+                    HStack {
+                        Toggle("AUTO", isOn: $model.bloom.autoAdapt)
+                            .toggleStyle(.switch)
+                            .font(Theme.mono(10, .semibold))
+                            .foregroundStyle(Theme.stoneDim)
+                            .help("Auto-adjusts the look for each photo based on how bright it is. Off = your sliders apply exactly as set.")
+                        Spacer()
+                        Text(model.bloom.autoAdapt ? "tunes each photo" : "sliders apply as set")
+                            .font(Theme.mono(9)).foregroundStyle(Theme.stoneFaint)
+                    }
+                    if model.bloom.autoAdapt {
+                        sliderRow("ADAPT", $model.bloom.adaptAmount, 0...1, fmt: "%.0f%%", "fixed", "dynamic", scale: 100,
+                                  help: "How strongly AUTO retunes the look per photo. Fixed = your settings as-is; dynamic = more automatic adjustment.")
+                        sliderRow("HL GUARD", $model.bloom.highlightGuard, 0...1, fmt: "%.0f%%", "loose", "strict", scale: 100,
+                                  help: "Protects already-bright photos from blowing out. Stricter pulls the effect back more on high-key images.")
+                    }
+                }
             }
         }
         .padding(16)
@@ -516,6 +540,42 @@ struct ContentView: View {
         }
         .contentShape(Rectangle())
         .help(help)
+    }
+
+    /// A collapsible, titled card that groups related look controls. The plain-language
+    /// subtitle does the explaining the info buttons used to, so the panel reads at a glance.
+    @ViewBuilder
+    private func lookGroup<Content: View>(_ id: String, _ title: String, _ subtitle: String,
+                                          @ViewBuilder _ content: () -> Content) -> some View {
+        let expanded = expandedGroups.contains(id)
+        VStack(spacing: 0) {
+            Button {
+                withAnimation(.easeOut(duration: 0.2)) {
+                    if expanded { expandedGroups.remove(id) } else { expandedGroups.insert(id) }
+                }
+            } label: {
+                HStack(alignment: .firstTextBaseline, spacing: 9) {
+                    Text(title).font(Theme.mono(10, .semibold)).tracking(1).foregroundStyle(Theme.stone)
+                    Text(subtitle).font(Theme.ui(11)).foregroundStyle(Theme.stoneDim)
+                    Spacer(minLength: 6)
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(Theme.stoneDim)
+                        .rotationEffect(.degrees(expanded ? 0 : -90))
+                }
+                .padding(.horizontal, 13).padding(.vertical, 11)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            if expanded {
+                VStack(spacing: 4) { content() }
+                    .padding(.horizontal, 13)
+                    .padding(.top, 1)
+                    .padding(.bottom, 10)
+            }
+        }
+        .background(Theme.inset, in: RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Theme.line, lineWidth: 1))
     }
 
     private var mergeAction: some View {

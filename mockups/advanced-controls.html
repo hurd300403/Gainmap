@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Gainmap — Advanced controls grouping studies</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Zilla+Slab:wght@500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#1a1818; --bg-deep:#141212; --surface:#2c2a2b; --surface-hi:#363334; --inset:#111010;
+  --accent:#e05a3f; --accent-hot:#f47a5e; --gold:#e8b86d; --gold-deep:#d4a96a;
+  --info:#f0a878; --warn:#f0a03c;
+  --stone:#dad7ce; --stone-dim:rgba(218,215,206,.45); --stone-faint:rgba(218,215,206,.16);
+  --line:rgba(218,215,206,.10);
+  --display:'Zilla Slab',Georgia,serif; --ui:'Inter',-apple-system,sans-serif; --mono:'JetBrains Mono',ui-monospace,monospace;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{min-height:100%}
+body{
+  font-family:var(--ui); color:var(--stone);
+  background:radial-gradient(120% 80% at 50% -8%, #241f1d 0%, var(--bg-deep) 55%, #0d0c0b 100%);
+  -webkit-font-smoothing:antialiased; padding:40px 28px 80px; min-height:100vh;
+}
+body::after{ /* film grain */
+  content:"";position:fixed;inset:0;pointer-events:none;z-index:9999;opacity:.04;mix-blend-mode:overlay;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+/* ===== page head ===== */
+.phead{max-width:1240px;margin:0 auto 34px;display:flex;align-items:flex-end;gap:18px;flex-wrap:wrap}
+.phead h1{font-family:var(--display);font-weight:600;font-size:26px;color:#fff;letter-spacing:-.01em}
+.phead h1 .lab{color:var(--accent)}
+.phead p{font-size:13px;color:var(--stone-dim);max-width:560px;line-height:1.6}
+.legend{margin-left:auto;font-family:var(--mono);font-size:10px;color:var(--stone-dim);letter-spacing:.04em;
+  display:flex;gap:14px;flex-wrap:wrap}
+.legend b{color:var(--accent);font-weight:500}
+
+/* ===== concept grid ===== */
+.grid{max-width:1240px;margin:0 auto;display:grid;grid-template-columns:repeat(3,1fr);gap:26px;align-items:start}
+@media (max-width:1080px){.grid{grid-template-columns:1fr;max-width:440px}}
+.concept{animation:rise .7s cubic-bezier(.16,1,.3,1) both}
+.concept:nth-child(2){animation-delay:.08s}.concept:nth-child(3){animation-delay:.16s}
+@keyframes rise{from{opacity:0;transform:translateY(18px)}to{opacity:1;transform:none}}
+.clabel{display:flex;align-items:baseline;gap:9px;margin-bottom:11px}
+.clabel .tag{font-family:var(--mono);font-size:11px;font-weight:600;letter-spacing:.12em;color:#fff;
+  background:var(--surface-hi);border:1px solid var(--line);padding:3px 8px;border-radius:6px}
+.clabel .name{font-size:14px;font-weight:600;color:var(--stone)}
+.clabel .why{font-size:11.5px;color:var(--stone-dim);margin-top:6px;line-height:1.5}
+.cwhy{font-size:11.5px;color:var(--stone-dim);margin-bottom:12px;line-height:1.5;min-height:32px}
+
+/* ===== app panel chrome ===== */
+.panel{background:rgba(44,42,43,.5);border:1px solid var(--line);border-radius:12px;padding:15px 15px 17px;position:relative}
+.phdr{display:flex;align-items:center;margin-bottom:13px}
+.phdr .h{font-family:var(--mono);font-size:11px;font-weight:600;letter-spacing:.18em;color:var(--gold);text-transform:uppercase}
+.phdr .acts{margin-left:auto;display:flex;gap:11px;font-family:var(--mono);font-size:10px;letter-spacing:.05em}
+.phdr .acts span{color:var(--stone-dim);cursor:default}
+.phdr .acts .reset{color:var(--accent)}
+.adv-div{height:1px;background:var(--line);margin:14px 0 10px}
+.adv-h{font-family:var(--mono);font-size:9.5px;font-weight:600;letter-spacing:.16em;color:var(--stone-dim);
+  text-transform:uppercase;display:flex;align-items:center;gap:6px}
+.adv-h .chev{font-size:8px}
+
+/* ===== slider rows (desktop) ===== */
+.row{display:flex;align-items:center;gap:10px;padding:6px 0}
+.rlabel{width:92px;flex:none;font-family:var(--mono);font-size:9.5px;font-weight:600;letter-spacing:.07em;
+  color:var(--stone-dim);text-transform:uppercase;display:flex;align-items:center;gap:5px}
+.info{display:inline-grid;place-items:center;width:12px;height:12px;border-radius:50%;border:1px solid var(--info);
+  color:var(--info);font-size:8px;font-style:normal;font-family:var(--ui);font-weight:600;flex:none}
+.rmid{flex:1;display:flex;flex-direction:column;gap:3px;min-width:0}
+.ends{display:flex;justify-content:space-between;font-family:var(--mono);font-size:8px;color:var(--stone-faint)}
+.rval{width:46px;flex:none;text-align:right;font-family:var(--mono);font-size:11px;color:var(--gold)}
+
+.sld{-webkit-appearance:none;appearance:none;width:100%;height:14px;background:transparent;cursor:pointer;--p:50%;--fill:var(--accent)}
+.sld::-webkit-slider-runnable-track{height:4px;border-radius:3px;
+  background:linear-gradient(90deg,var(--fill) var(--p),rgba(218,215,206,.14) var(--p))}
+.sld::-webkit-slider-thumb{-webkit-appearance:none;width:13px;height:13px;border-radius:50%;background:#fff;
+  margin-top:-4.5px;box-shadow:0 1px 3px rgba(0,0,0,.55);border:none}
+.sld::-moz-range-track{height:4px;border-radius:3px;background:rgba(218,215,206,.14)}
+.sld::-moz-range-progress{height:4px;border-radius:3px;background:var(--fill)}
+.sld::-moz-range-thumb{width:13px;height:13px;border:none;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.55)}
+.sld:focus-visible{outline:none}
+.sld:focus-visible::-webkit-slider-thumb{box-shadow:0 0 0 3px rgba(224,90,63,.55)}
+.sld:focus-visible::-moz-range-thumb{box-shadow:0 0 0 3px rgba(224,90,63,.55)}
+
+/* ===== toggle row ===== */
+.trow{display:flex;align-items:center;gap:10px;padding:7px 0}
+.switch{width:38px;height:22px;border-radius:11px;background:rgba(218,215,206,.16);border:none;position:relative;
+  cursor:pointer;padding:0;transition:background .2s;flex:none}
+.switch.on{background:var(--accent)}
+.switch .knob{position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:50%;background:#fff;
+  transition:transform .2s;box-shadow:0 1px 2px rgba(0,0,0,.4)}
+.switch.on .knob{transform:translateX(16px)}
+.switch:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.trow .status{flex:1;text-align:right;font-family:var(--mono);font-size:9px;color:var(--stone-dim)}
+.autohide{overflow:hidden;transition:max-height .3s ease,opacity .25s}
+.autohide.off{max-height:0!important;opacity:0;pointer-events:none}
+
+/* ===== concept A — boxed accordion ===== */
+.gcard{border:1px solid var(--line);background:var(--inset);border-radius:10px;margin-top:10px;overflow:hidden}
+.ghead{width:100%;display:flex;align-items:baseline;gap:9px;padding:11px 13px;background:none;border:none;cursor:pointer;text-align:left}
+.ghead:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+.gname{font-family:var(--mono);font-size:10px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;color:var(--stone)}
+.gsub{font-size:11px;color:var(--stone-dim);flex:1;line-height:1.3}
+.gcard .chev{font-size:9px;color:var(--stone-dim);transition:transform .25s}
+.gcard.closed .chev{transform:rotate(-90deg)}
+.gbody{padding:1px 13px 9px}
+.gcard.closed .gbody{display:none}
+
+/* ===== concept B — color spine ===== */
+.gsec{margin-top:15px;padding-left:13px;border-left:2px solid var(--hue,var(--accent))}
+.gsechead{display:flex;align-items:baseline;gap:8px;margin-bottom:3px}
+.gsechead .gname{color:var(--hue,var(--stone))}
+.gsechead .gsub{font-size:10.5px}
+
+/* ===== concept C — tabs ===== */
+.tabs{display:flex;gap:3px;background:var(--inset);border:1px solid var(--line);border-radius:9px;padding:3px;margin-top:10px}
+.tab{flex:1;border:none;background:none;color:var(--stone-dim);font-family:var(--mono);font-size:9px;font-weight:600;
+  letter-spacing:.05em;text-transform:uppercase;padding:7px 3px;border-radius:6px;cursor:pointer;transition:all .16s;
+  display:flex;flex-direction:column;align-items:center;gap:4px}
+.tab .dot{width:5px;height:5px;border-radius:50%;background:var(--hue);opacity:.5;transition:opacity .16s}
+.tab.on{background:var(--surface-hi);color:#fff;box-shadow:0 1px 4px rgba(0,0,0,.3)}
+.tab.on .dot{opacity:1}
+.tab:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.tabpanel{display:none;padding-top:8px;animation:fade .25s both}
+.tabpanel.on{display:block}
+.tabsub{font-size:11px;color:var(--stone-dim);padding:4px 2px 2px;line-height:1.4}
+@keyframes fade{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+
+/* ===== concept D — iOS phone ===== */
+.mobile-wrap{max-width:1240px;margin:48px auto 0;display:flex;gap:34px;align-items:center;flex-wrap:wrap;justify-content:center}
+.mobile-copy{max-width:300px}
+.mobile-copy .tag{font-family:var(--mono);font-size:11px;font-weight:600;letter-spacing:.12em;color:#fff;
+  background:var(--surface-hi);border:1px solid var(--line);padding:3px 8px;border-radius:6px;display:inline-block;margin-bottom:12px}
+.mobile-copy h3{font-family:var(--display);font-size:20px;color:#fff;margin-bottom:10px}
+.mobile-copy p{font-size:13px;color:var(--stone-dim);line-height:1.7}
+.phone{width:312px;flex:none;border-radius:48px;background:linear-gradient(160deg,#2a2726,#0e0d0d);padding:11px;
+  box-shadow:0 50px 90px -40px rgba(0,0,0,.9),0 0 0 1px rgba(255,255,255,.04) inset}
+.screen{border-radius:38px;overflow:hidden;background:var(--bg-deep);height:640px;position:relative;display:flex;flex-direction:column}
+.notch{position:absolute;top:0;left:50%;transform:translateX(-50%);width:120px;height:26px;background:#000;
+  border-radius:0 0 16px 16px;z-index:5}
+.statusbar{height:46px;display:flex;align-items:flex-end;justify-content:space-between;padding:0 26px 7px;
+  font-family:var(--mono);font-size:11px;color:var(--stone);position:relative;z-index:4}
+.preview{height:200px;position:relative;flex:none;
+  background:radial-gradient(58% 78% at 70% 32%,rgba(255,255,255,.95),rgba(232,184,109,.55) 30%,transparent 62%),
+    linear-gradient(155deg,#3a2d22 0%,#8a5a32 38%,#e8b86d 70%,#fff6e6 100%)}
+.preview .live{position:absolute;top:12px;left:16px;font-family:var(--mono);font-size:9px;font-weight:600;
+  letter-spacing:.12em;background:rgba(224,90,63,.92);color:#fff;padding:4px 7px;border-radius:5px}
+.sheet{flex:1;background:var(--bg);border-radius:22px 22px 0 0;margin-top:-22px;position:relative;z-index:3;
+  padding:8px 20px 20px;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 -14px 30px -18px rgba(0,0,0,.7)}
+.grab{width:38px;height:4px;border-radius:2px;background:var(--stone-faint);margin:6px auto 12px;flex:none}
+.m-master{flex:none;margin-bottom:6px}
+.m-pills{display:flex;gap:7px;overflow-x:auto;padding:8px 0 12px;flex:none;scrollbar-width:none}
+.m-pills::-webkit-scrollbar{display:none}
+.m-pill{flex:none;border:1px solid var(--line);background:var(--surface);color:var(--stone-dim);
+  font-family:var(--mono);font-size:10px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;
+  padding:8px 14px;border-radius:20px;cursor:pointer;display:flex;align-items:center;gap:6px;transition:all .16s}
+.m-pill .dot{width:6px;height:6px;border-radius:50%;background:var(--hue);opacity:.55}
+.m-pill.on{background:var(--surface-hi);color:#fff;border-color:var(--hue)}
+.m-pill.on .dot{opacity:1}
+.m-pill:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.m-body{flex:1;overflow-y:auto;scrollbar-width:none}
+.m-body::-webkit-scrollbar{display:none}
+.m-groupsub{font-size:12px;color:var(--stone-dim);margin:2px 0 8px;line-height:1.4}
+/* big touch slider rows */
+.brow{padding:13px 0;border-bottom:1px solid var(--line)}
+.brow:last-child{border-bottom:none}
+.brow .btop{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:11px}
+.brow .blabel{font-family:var(--mono);font-size:12px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--stone)}
+.brow .bval{font-family:var(--mono);font-size:15px;color:var(--gold)}
+.brow .bends{display:flex;justify-content:space-between;font-family:var(--mono);font-size:9px;color:var(--stone-faint);margin-top:7px}
+.bsld{-webkit-appearance:none;appearance:none;width:100%;height:28px;background:transparent;cursor:pointer;--p:50%;--fill:var(--accent)}
+.bsld::-webkit-slider-runnable-track{height:6px;border-radius:4px;
+  background:linear-gradient(90deg,var(--fill) var(--p),rgba(218,215,206,.16) var(--p))}
+.bsld::-webkit-slider-thumb{-webkit-appearance:none;width:26px;height:26px;border-radius:50%;background:#fff;
+  margin-top:-10px;box-shadow:0 2px 6px rgba(0,0,0,.5)}
+.bsld::-moz-range-track{height:6px;border-radius:4px;background:rgba(218,215,206,.16)}
+.bsld::-moz-range-progress{height:6px;border-radius:4px;background:var(--fill)}
+.bsld::-moz-range-thumb{width:26px;height:26px;border:none;border-radius:50%;background:#fff}
+.bsld:focus-visible{outline:none}
+.bsld:focus-visible::-webkit-slider-thumb{box-shadow:0 0 0 4px rgba(224,90,63,.5)}
+.btrow{display:flex;align-items:center;gap:12px;padding:14px 0;border-bottom:1px solid var(--line)}
+.btrow .blabel{flex:1}
+.btrow .bstatus{font-family:var(--mono);font-size:10px;color:var(--stone-dim)}
+.bswitch{width:48px;height:28px;border-radius:14px;background:rgba(218,215,206,.16);border:none;position:relative;cursor:pointer;flex:none;transition:background .2s}
+.bswitch.on{background:var(--accent)}
+.bswitch .knob{position:absolute;top:3px;left:3px;width:22px;height:22px;border-radius:50%;background:#fff;transition:transform .2s}
+.bswitch.on .knob{transform:translateX(20px)}
+
+.pgfoot{max-width:1240px;margin:60px auto 0;text-align:center;font-family:var(--mono);font-size:10px;
+  letter-spacing:.14em;text-transform:uppercase;color:var(--stone-faint)}
+.pgfoot b{color:var(--accent)}
+
+@media (prefers-reduced-motion:reduce){
+  *{animation:none!important;transition:none!important}
+}
+</style>
+</head>
+<body>
+
+<div class="phead">
+  <div>
+    <h1>Gain<span class="lab">map</span> · advanced controls</h1>
+    <p>Four ways to group the ten advanced sliders so the panel explains itself — no info button required. Everything's live: open sections, switch tabs, drag sliders. Narrow the window to see how each holds up small.</p>
+  </div>
+  <div class="legend">
+    <span><b>●</b> The Glow</span><span><b style="color:var(--gold)">●</b> Color</span>
+    <span><b style="color:var(--warn)">●</b> HDR &amp; Screens</span><span><b style="color:var(--stone-dim)">●</b> Auto</span>
+  </div>
+</div>
+
+<div class="grid">
+  <div class="concept">
+    <div class="clabel"><span class="tag">A</span><span class="name">Boxed groups</span></div>
+    <div class="cwhy">Each group is a collapsible card with a plain-language subtitle. Most familiar, easiest to scan, collapse what you don't need.</div>
+    <div class="panel" id="panelA"></div>
+  </div>
+  <div class="concept">
+    <div class="clabel"><span class="tag">B</span><span class="name">Color spine</span></div>
+    <div class="cwhy">No boxes — a thin colored rule per group lets the eye chunk them by hue. Quieter and more elegant; everything stays visible at once.</div>
+    <div class="panel" id="panelB"></div>
+  </div>
+  <div class="concept">
+    <div class="clabel"><span class="tag">C</span><span class="name">Tabbed sets</span></div>
+    <div class="cwhy">One tap shows just that group — never more than four sliders on screen. The biggest simplification, and it maps straight onto mobile.</div>
+    <div class="panel" id="panelC"></div>
+  </div>
+</div>
+
+<div class="mobile-wrap">
+  <div class="mobile-copy">
+    <span class="tag">D · iOS</span>
+    <h3>The same grouping, on a phone</h3>
+    <p>The tabbed model from concept C scales naturally to touch: a live preview up top, group pills you swipe through, and big draggable sliders below. This is roughly how an iOS Gainmap edit sheet would feel.</p>
+  </div>
+  <div class="phone">
+    <div class="screen">
+      <div class="notch"></div>
+      <div class="statusbar"><span>9:41</span><span>􀙇 􀛨 􀛪</span></div>
+      <div class="preview"><span class="live">LIVE HDR</span></div>
+      <div class="sheet">
+        <div class="grab"></div>
+        <div class="m-master" id="mMaster"></div>
+        <div class="m-pills" id="mPills"></div>
+        <div class="m-body" id="mBody"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="pgfoot">A <b>Legacy Lab</b> instrument · grouping studies · pick a direction</div>
+
+<script>
+/* ---------- the model: 4 groups, derived from each slider's real job ---------- */
+const GROUPS = [
+  { id:'glow', name:'The Glow', sub:'how the highlights bloom', hue:'var(--accent)',
+    sliders:[
+      {label:'Glow',    min:0,   max:1.5, val:1.50, lo:'none',      hi:'bright',    fmt:v=>v.toFixed(2)},
+      {label:'Spread',  min:0.2, max:2.5, val:2.50, lo:'tight',     hi:'wide',      fmt:v=>v.toFixed(1)+'%'},
+      {label:'Punch',   min:0,   max:1,   val:0.30, lo:'soft glow', hi:'sharp pop', fmt:v=>v.toFixed(2)},
+      {label:'Falloff', min:0.5, max:2.0, val:1.54, lo:'hard',      hi:'smooth',    fmt:v=>v.toFixed(2)},
+    ]},
+  { id:'color', name:'Color', sub:'the color of that light', hue:'var(--gold)',
+    sliders:[
+      {label:'Glow Color', min:0,  max:1.5, val:0.74, lo:'white', hi:'vivid', fmt:v=>v.toFixed(2)},
+      {label:'Tint',       min:-1, max:1,   val:0.10, lo:'cool',  hi:'warm',  fmt:v=>(v>=0?'+':'')+v.toFixed(2)},
+    ]},
+  { id:'hdr', name:'HDR & Screens', sub:'how it shows across displays', hue:'var(--warn)',
+    sliders:[
+      {label:'Headroom',  min:1,  max:3,  val:1.5, lo:'natural',    hi:'intense',  fmt:v=>v.toFixed(1)+'×'},
+      {label:'Threshold', min:30, max:95, val:67,  lo:'everything', hi:'specular', fmt:v=>Math.round(v)+'%'},
+    ],
+    toggle:{label:'Glow in SDR', on:true, onText:'shows on every screen', offText:'HDR screens only'}},
+  { id:'auto', name:'Auto', sub:'let Gainmap tune each photo', hue:'var(--stone-dim)',
+    toggle:{label:'Auto', on:true, onText:'tunes each photo', offText:'sliders apply as set', controlsAuto:true},
+    sliders:[
+      {label:'Adapt',    min:0, max:1, val:1.0,  lo:'fixed', hi:'dynamic', fmt:v=>Math.round(v*100)+'%', autoOnly:true},
+      {label:'HL Guard', min:0, max:1, val:0.19, lo:'loose', hi:'strict',  fmt:v=>Math.round(v*100)+'%', autoOnly:true},
+    ]},
+];
+const MASTER = {label:'Intensity', min:0, max:1, val:1, lo:'subtle', hi:'full', fmt:v=>Math.round(v*100)+'%'};
+
+/* ---------- tiny builders ---------- */
+const el=(t,c)=>{const e=document.createElement(t); if(c)e.className=c; return e;};
+
+function makeSlider(s,{fill}={}){
+  const row=el('div','row');
+  const lab=el('div','rlabel'); lab.innerHTML=`${s.label.toUpperCase()} <span class="info">i</span>`;
+  const mid=el('div','rmid');
+  const inp=document.createElement('input');
+  inp.type='range'; inp.min=s.min; inp.max=s.max; inp.step=(s.max-s.min)/200; inp.value=s.val;
+  inp.className='sld'; inp.setAttribute('aria-label',s.label);
+  if(fill) inp.style.setProperty('--fill',fill);
+  const ends=el('div','ends'); ends.innerHTML=`<span>${s.lo}</span><span>${s.hi}</span>`;
+  mid.append(inp,ends);
+  const val=el('div','rval');
+  const upd=()=>{const v=+inp.value; val.textContent=s.fmt(v);
+    inp.style.setProperty('--p',((v-s.min)/(s.max-s.min)*100)+'%');};
+  inp.addEventListener('input',upd); upd();
+  row.append(lab,mid,val);
+  return row;
+}
+
+function makeToggle(t){
+  const row=el('div','trow');
+  const lab=el('div','rlabel'); lab.textContent=t.label.toUpperCase();
+  const sw=el('button','switch'+(t.on?' on':'')); sw.type='button';
+  sw.setAttribute('role','switch'); sw.setAttribute('aria-checked',t.on);
+  sw.setAttribute('aria-label',t.label); sw.innerHTML='<span class="knob"></span>';
+  const status=el('div','status'); status.textContent=t.on?t.onText:t.offText;
+  sw.onclick=()=>{const on=!sw.classList.contains('on');
+    sw.classList.toggle('on',on); sw.setAttribute('aria-checked',on);
+    status.textContent=on?t.onText:t.offText; if(t._cb)t._cb(on);};
+  row.append(lab,sw,status);
+  return {row,sw};
+}
+
+/* shared app-panel header: HDR LOOK + Intensity master + Advanced divider */
+function masterHead(){
+  const wrap=el('div');
+  const h=el('div','phdr');
+  h.innerHTML=`<span class="h">HDR Look</span><span class="acts"><span>Copy</span><span>Paste</span><span class="reset">Reset</span></span>`;
+  wrap.append(h, makeSlider(MASTER));
+  const d=el('div','adv-div'); wrap.append(d);
+  const ah=el('div','adv-h'); ah.innerHTML='<span class="chev">▾</span> Advanced controls';
+  wrap.append(ah);
+  return wrap;
+}
+
+/* auto-only sliders share a collapsible container driven by the Auto toggle */
+function autoContainer(group,big){
+  const box=el('div','autohide');
+  group.sliders.filter(s=>s.autoOnly).forEach(s=>box.append(big?makeBig(s):makeSlider(s,{fill:group.hue})));
+  return box;
+}
+function wireAuto(tog,box){ tog.t._cb=on=>{ box.classList.toggle('off',!on);
+    box.style.maxHeight=on?box.scrollHeight+'px':'0'; };
+  box.style.maxHeight=box.scrollHeight+'px'; }
+
+/* ================= CONCEPT A — boxed accordion ================= */
+function buildA(root){
+  root.append(masterHead());
+  GROUPS.forEach(g=>{
+    const card=el('div','gcard');
+    const head=el('button','ghead'); head.type='button';
+    head.innerHTML=`<span class="gname">${g.name}</span><span class="gsub">${g.sub}</span><span class="chev">▾</span>`;
+    const body=el('div','gbody');
+    if(g.toggle && g.toggle.controlsAuto){
+      const tg=makeToggle(g.toggle); body.append(tg.row);
+      const box=autoContainer(g,false); body.append(box); wireAuto({t:g.toggle},box);
+    }
+    (g.sliders||[]).filter(s=>!s.autoOnly).forEach(s=>body.append(makeSlider(s,{fill:g.hue})));
+    if(g.toggle && !g.toggle.controlsAuto) body.append(makeToggle(g.toggle).row);
+    head.onclick=()=>card.classList.toggle('closed');
+    card.append(head,body); root.append(card);
+  });
+}
+
+/* ================= CONCEPT B — color spine ================= */
+function buildB(root){
+  root.append(masterHead());
+  GROUPS.forEach(g=>{
+    const sec=el('div','gsec'); sec.style.setProperty('--hue',g.hue);
+    const head=el('div','gsechead');
+    head.innerHTML=`<span class="gname">${g.name}</span><span class="gsub">${g.sub}</span>`;
+    sec.append(head);
+    if(g.toggle && g.toggle.controlsAuto){
+      const tg=makeToggle(g.toggle); sec.append(tg.row);
+      const box=autoContainer(g,false); sec.append(box); wireAuto({t:g.toggle},box);
+    }
+    (g.sliders||[]).filter(s=>!s.autoOnly).forEach(s=>sec.append(makeSlider(s,{fill:g.hue})));
+    if(g.toggle && !g.toggle.controlsAuto) sec.append(makeToggle(g.toggle).row);
+    root.append(sec);
+  });
+}
+
+/* ================= CONCEPT C — tabbed sets ================= */
+function buildC(root){
+  root.append(masterHead());
+  const tabs=el('div','tabs'); root.append(tabs);
+  const panels=[];
+  GROUPS.forEach((g,i)=>{
+    const tab=el('button','tab'+(i===0?' on':'')); tab.type='button';
+    tab.style.setProperty('--hue',g.hue);
+    tab.innerHTML=`<span class="dot"></span>${g.name.replace('The ','')}`;
+    tabs.append(tab);
+    const panel=el('div','tabpanel'+(i===0?' on':''));
+    const sub=el('div','tabsub'); sub.textContent=g.sub; panel.append(sub);
+    if(g.toggle && g.toggle.controlsAuto){
+      const tg=makeToggle(g.toggle); panel.append(tg.row);
+      const box=autoContainer(g,false); panel.append(box); wireAuto({t:g.toggle},box);
+    }
+    (g.sliders||[]).filter(s=>!s.autoOnly).forEach(s=>panel.append(makeSlider(s,{fill:g.hue})));
+    if(g.toggle && !g.toggle.controlsAuto) panel.append(makeToggle(g.toggle).row);
+    root.append(panel); panels.push({tab,panel});
+    tab.onclick=()=>panels.forEach((p,j)=>{
+      p.tab.classList.toggle('on',j===i); p.panel.classList.toggle('on',j===i);});
+  });
+}
+
+/* ================= CONCEPT D — iOS phone ================= */
+function makeBig(s,{fill}={}){
+  const row=el('div','brow');
+  const top=el('div','btop');
+  top.innerHTML=`<span class="blabel">${s.label}</span><span class="bval"></span>`;
+  const inp=document.createElement('input');
+  inp.type='range'; inp.min=s.min; inp.max=s.max; inp.step=(s.max-s.min)/200; inp.value=s.val;
+  inp.className='bsld'; inp.setAttribute('aria-label',s.label);
+  if(fill) inp.style.setProperty('--fill',fill);
+  const ends=el('div','bends'); ends.innerHTML=`<span>${s.lo}</span><span>${s.hi}</span>`;
+  const valEl=top.querySelector('.bval');
+  const upd=()=>{const v=+inp.value; valEl.textContent=s.fmt(v);
+    inp.style.setProperty('--p',((v-s.min)/(s.max-s.min)*100)+'%');};
+  inp.addEventListener('input',upd); upd();
+  row.append(top,inp,ends);
+  return row;
+}
+function makeBigToggle(t){
+  const row=el('div','btrow');
+  const lab=el('div','blabel'); lab.textContent=t.label;
+  const sw=el('button','bswitch'+(t.on?' on':'')); sw.type='button';
+  sw.setAttribute('role','switch'); sw.setAttribute('aria-checked',t.on);
+  sw.setAttribute('aria-label',t.label); sw.innerHTML='<span class="knob"></span>';
+  const status=el('div','bstatus'); status.textContent=t.on?t.onText:t.offText;
+  sw.onclick=()=>{const on=!sw.classList.contains('on');
+    sw.classList.toggle('on',on); sw.setAttribute('aria-checked',on);
+    status.textContent=on?t.onText:t.offText; if(t._cb)t._cb(on);};
+  row.append(lab,status,sw);
+  return {row,sw};
+}
+function buildD(){
+  document.getElementById('mMaster').append(makeBig(MASTER));
+  const pills=document.getElementById('mPills'), body=document.getElementById('mBody');
+  function render(g){
+    body.innerHTML='';
+    const sub=el('div','m-groupsub'); sub.textContent=g.sub; body.append(sub);
+    if(g.toggle && g.toggle.controlsAuto){
+      const autoState={};
+      const tg=makeBigToggle(g.toggle); body.append(tg.row);
+      const box=el('div','autohide');
+      g.sliders.filter(s=>s.autoOnly).forEach(s=>box.append(makeBig(s,{fill:g.hue})));
+      body.append(box);
+      g.toggle._cb=on=>{box.classList.toggle('off',!on);box.style.maxHeight=on?box.scrollHeight+'px':'0';};
+      box.style.maxHeight=box.scrollHeight+'px';
+    }
+    (g.sliders||[]).filter(s=>!s.autoOnly).forEach(s=>body.append(makeBig(s,{fill:g.hue})));
+    if(g.toggle && !g.toggle.controlsAuto) body.append(makeBigToggle(g.toggle).row);
+  }
+  GROUPS.forEach((g,i)=>{
+    const p=el('button','m-pill'+(i===0?' on':'')); p.type='button';
+    p.style.setProperty('--hue',g.hue);
+    p.innerHTML=`<span class="dot"></span>${g.name.replace('The ','')}`;
+    p.onclick=()=>{pills.querySelectorAll('.m-pill').forEach(x=>x.classList.remove('on'));
+      p.classList.add('on'); render(g);};
+    pills.append(p);
+  });
+  render(GROUPS[0]);
+}
+
+buildA(document.getElementById('panelA'));
+buildB(document.getElementById('panelB'));
+buildC(document.getElementById('panelC'));
+buildD();
+</script>
+</body>
+</html>
