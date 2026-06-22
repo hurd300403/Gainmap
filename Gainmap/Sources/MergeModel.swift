@@ -156,10 +156,12 @@ final class MergeModel: ObservableObject {
     @Published var cgamut: Gamut = .rec709
     @Published var sgamut: Gamut = .rec709
 
-    /// When true (default), the soft bloom is baked into the SDR base so the glow
-    /// shows on every display (the SDR fallback is the bloomed look, not the
-    /// original). When false, the SDR fallback is the original JPEG passed through
-    /// pixel-for-pixel and the glow lives only in the gain map (HDR-only).
+    /// Defaults to FALSE: the SDR fallback is the original JPEG passed through
+    /// pixel-for-pixel, and the glow lives only in the gain map (HDR-only) — so the
+    /// non-HDR version (thumbnails, social, any screen that strips the gain map)
+    /// stays clean and faithful. When true, the soft bloom is baked into the SDR
+    /// base too, so the glow shows everywhere — but that base reads brighter / more
+    /// blown on non-HDR screens (the UI warns about this before enabling).
     @Published var bakeGlowIntoSDR: Bool = UserDefaults.standard.object(forKey: "gainmap.bakeGlowIntoSDR") as? Bool ?? false {
         didSet { UserDefaults.standard.set(bakeGlowIntoSDR, forKey: "gainmap.bakeGlowIntoSDR") }
     }

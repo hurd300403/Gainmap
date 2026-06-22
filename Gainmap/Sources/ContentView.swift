@@ -22,6 +22,9 @@ struct ContentView: View {
     @State private var window: NSWindow?
     @State private var shareHover = false
     @State private var showShareModal = false
+    // Confirm + explain before baking the glow into the SDR base (it makes the
+    // non-HDR/fallback version look brighter/blown, which surprises people).
+    @State private var showGlowInSDRInfo = false
 
     // The Patreon post where the app can be downloaded — shown in the share modal
     // so patrons can copy/pass the link along. TODO: confirm exact download-post URL.
@@ -84,6 +87,19 @@ struct ContentView: View {
                 ShareModal(url: shareURL) {
                     withAnimation(.easeOut(duration: 0.18)) { showShareModal = false }
                 }
+                .transition(.opacity)
+                .zIndex(10)
+            }
+
+            if showGlowInSDRInfo {
+                GlowInSDRModal(
+                    onEnable: {
+                        model.bakeGlowIntoSDR = true
+                        withAnimation(.easeOut(duration: 0.18)) { showGlowInSDRInfo = false }
+                    },
+                    onCancel: {
+                        withAnimation(.easeOut(duration: 0.18)) { showGlowInSDRInfo = false }
+                    })
                 .transition(.opacity)
                 .zIndex(10)
             }
@@ -445,7 +461,17 @@ struct ContentView: View {
                               resetTo: model.signature.threshold,
                               help: "Which areas get the HDR treatment. Left = most of the image brightens; right = only the very brightest spots, like the sun or shiny reflections.")
                     HStack {
-                        Toggle("GLOW IN SDR", isOn: $model.bakeGlowIntoSDR)
+                        // Turning it ON opens an explainer first (so the brighter/blown
+                        // SDR fallback doesn't surprise anyone); turning OFF is instant.
+                        Toggle("GLOW IN SDR", isOn: Binding(
+                            get: { model.bakeGlowIntoSDR },
+                            set: { wantOn in
+                                if wantOn && !model.bakeGlowIntoSDR {
+                                    showGlowInSDRInfo = true
+                                } else {
+                                    model.bakeGlowIntoSDR = wantOn
+                                }
+                            }))
                             .toggleStyle(.switch)
                             .font(Theme.mono(10, .semibold))
                             .foregroundStyle(Theme.stoneDim)
@@ -829,6 +855,67 @@ private struct ShareModal: View {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(url.absoluteString, forType: .string)
         withAnimation { copied = true }
+    }
+}
+
+/// Explainer shown the moment someone flips "Glow in SDR" on, so the brighter /
+/// blown-looking non-HDR fallback reads as a deliberate trade-off, not a bug.
+private struct GlowInSDRModal: View {
+    var onEnable: () -> Void
+    var onCancel: () -> Void
+
+    var body: some View {
+        ZStack {
+            Rectangle().fill(.black.opacity(0.62)).ignoresSafeArea()
+                .onTapGesture(perform: onCancel)
+
+            VStack(alignment: .leading, spacing: 16) {
+                HStack(spacing: 11) {
+                    Image(systemName: "sun.max.fill")
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(Theme.warn)
+                    Text("Bake the glow into SDR?")
+                        .font(Theme.mono(16, .semibold)).foregroundStyle(.white)
+                }
+
+                VStack(alignment: .leading, spacing: 11) {
+                    Text("“SDR” is the standard, non-HDR copy tucked inside every export — what thumbnails, social apps, and any screen that ignores the gain map fall back to.")
+                    Text("Turning this on bakes the soft glow into that copy, so your look carries to those places too. The trade-off: the non-HDR copy reads brighter, and bright areas can look blown out. That's expected — not a bug.")
+                    (Text("Leaving it off ").foregroundStyle(Theme.stone)
+                     + Text("(recommended)").foregroundStyle(Theme.gold)
+                     + Text(" keeps that copy identical to your original; the glow then shows only on HDR displays.").foregroundStyle(Theme.stone))
+                }
+                .font(Theme.mono(11.5)).foregroundStyle(Theme.stone)
+                .lineSpacing(3.5)
+                .fixedSize(horizontal: false, vertical: true)
+
+                HStack(spacing: 10) {
+                    Button(action: onCancel) {
+                        Text("Keep it off")
+                            .font(Theme.mono(12.5, .semibold)).foregroundStyle(Theme.stone)
+                            .frame(maxWidth: .infinity).padding(.vertical, 11)
+                            .background(Capsule().fill(Theme.surfaceHi))
+                            .overlay(Capsule().strokeBorder(Theme.line, lineWidth: 1))
+                    }
+                    .buttonStyle(.plain)
+                    .keyboardShortcut(.cancelAction)
+
+                    Button(action: onEnable) {
+                        Text("Turn it on")
+                            .font(Theme.mono(12.5, .semibold)).foregroundStyle(.white)
+                            .frame(maxWidth: .infinity).padding(.vertical, 11)
+                            .background(Capsule().fill(Theme.accent))
+                    }
+                    .buttonStyle(.plain)
+                    .keyboardShortcut(.defaultAction)
+                }
+            }
+            .padding(22)
+            .frame(width: 440)
+            .background(RoundedRectangle(cornerRadius: 20, style: .continuous).fill(Theme.surface))
+            .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).strokeBorder(Theme.line, lineWidth: 1))
+            .shadow(color: .black.opacity(0.55), radius: 34, y: 14)
+        }
     }
 }
 
