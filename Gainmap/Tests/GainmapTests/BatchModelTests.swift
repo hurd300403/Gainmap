@@ -119,6 +119,61 @@ final class BatchModelTests: XCTestCase {
         XCTAssertNil(m.sdrURL)
     }
 
+    // MARK: GLOW-IN-SDR is per-photo (travels with the look)
+
+    func testBakeIsPerPhotoAndIndependent() {
+        let m = MergeModel()
+        m.addFiles([url("a"), url("b")])
+        // Turn bake ON for photo A only.
+        m.bloom.bakeGlowIntoSDR = true
+        XCTAssertEqual(m.items[0].look?.bakeGlowIntoSDR, true)
+        // Move to B and turn it OFF; A must be unaffected.
+        m.selectNext()
+        m.bloom.bakeGlowIntoSDR = false
+        XCTAssertEqual(m.items[1].look?.bakeGlowIntoSDR, false)
+        m.selectPrevious()
+        XCTAssertTrue(m.bloom.bakeGlowIntoSDR, "photo A keeps its own bake setting")
+    }
+
+    func testCopyPasteLookCarriesBake() {
+        let m = MergeModel()
+        m.addFiles([url("a"), url("b")])
+        m.bloom.bakeGlowIntoSDR = true
+        m.copyLook()
+        m.selectNext()                     // photo B, bake currently on via running-look
+        m.bloom.bakeGlowIntoSDR = false    // turn B off
+        XCTAssertFalse(m.bloom.bakeGlowIntoSDR)
+        m.pasteLook()                      // paste A's look (bake on) onto B
+        XCTAssertTrue(m.bloom.bakeGlowIntoSDR, "pasting a look brings its bake along")
+    }
+
+    func testTogglingBakeDoesNotResetIntensity() {
+        let m = MergeModel()
+        m.addFiles([url("a")])
+        m.setIntensity(0.4)                       // dial Intensity down
+        XCTAssertEqual(m.intensity, 0.4, accuracy: 1e-9)
+        let glowBefore = m.bloom.glow
+        m.bloom.bakeGlowIntoSDR = true            // flipping bake is not a look-strength change
+        XCTAssertEqual(m.intensity, 0.4, accuracy: 1e-9, "bake toggle must not snap Intensity to 100%")
+        XCTAssertEqual(m.bloom.glow, glowBefore, accuracy: 1e-9)
+        // And a later Intensity move must PRESERVE the toggle (anchor stayed in sync).
+        m.setIntensity(0.8)
+        XCTAssertTrue(m.bloom.bakeGlowIntoSDR)
+    }
+
+    func testSaveAsDefaultNormalizesBakeOff() {
+        let m = MergeModel()
+        m.addFiles([url("a")])
+        m.bloom.bakeGlowIntoSDR = true
+        m.setSignatureFromCurrent()
+        XCTAssertFalse(m.signature.bakeGlowIntoSDR, "the saved default look never carries bake")
+        // The current photo keeps its own bake, though.
+        XCTAssertTrue(m.bloom.bakeGlowIntoSDR)
+        // A subsequent Reset (snap to default) turns bake off.
+        m.resetToDefault()
+        XCTAssertFalse(m.bloom.bakeGlowIntoSDR)
+    }
+
     // MARK: TINT look control
 
     func testTintDefaultsNeutral() {

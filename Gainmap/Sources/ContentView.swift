@@ -50,7 +50,7 @@ struct ContentView: View {
                 HStack(alignment: .top, spacing: 22) {
                     VStack(spacing: 10) {
                         HDRPreviewPane(sdrURL: model.sdrURL, params: model.bloom,
-                                       cgamut: model.cgamut, sgamut: model.sgamut, bake: model.bakeGlowIntoSDR,
+                                       cgamut: model.cgamut, sgamut: model.sgamut, bake: model.bloom.bakeGlowIntoSDR,
                                        expanded: true,
                                        onRequestAdd: model.items.isEmpty ? { addPhotos() } : nil)
                         Text(model.items.isEmpty ? "click the preview or drop SDR JPEGs anywhere to begin"
@@ -94,7 +94,7 @@ struct ContentView: View {
             if showGlowInSDRInfo {
                 GlowInSDRModal(
                     onEnable: {
-                        model.bakeGlowIntoSDR = true
+                        model.bloom.bakeGlowIntoSDR = true
                         withAnimation(.easeOut(duration: 0.18)) { showGlowInSDRInfo = false }
                     },
                     onCancel: {
@@ -459,17 +459,17 @@ struct ContentView: View {
                               help: "How far the bright tones climb on HDR screens. Higher makes highlights glow harder on HDR-capable displays (little effect on regular screens or the SDR fallback).")
                     sliderRow("THRESHOLD", $model.bloom.threshold, 0.3...0.95, fmt: "%.0f%%", "everything", "specular", scale: 100,
                               resetTo: model.signature.threshold,
-                              help: "Which areas get the HDR treatment. Left = most of the image brightens; right = only the very brightest spots, like the sun or shiny reflections.")
+                              help: "Which areas get the HDR treatment. Left = most of the image brightens; right = only the very brightest spots, like the sun or shiny reflections. Shapes the HDR / gain-map layer either way — it still applies when “Glow in SDR” is off (it just doesn't change the untouched SDR fallback).")
                     HStack {
                         // Turning it ON opens an explainer first (so the brighter/blown
                         // SDR fallback doesn't surprise anyone); turning OFF is instant.
                         Toggle("GLOW IN SDR", isOn: Binding(
-                            get: { model.bakeGlowIntoSDR },
+                            get: { model.bloom.bakeGlowIntoSDR },
                             set: { wantOn in
-                                if wantOn && !model.bakeGlowIntoSDR {
+                                if wantOn && !model.bloom.bakeGlowIntoSDR {
                                     showGlowInSDRInfo = true
                                 } else {
-                                    model.bakeGlowIntoSDR = wantOn
+                                    model.bloom.bakeGlowIntoSDR = wantOn
                                 }
                             }))
                             .toggleStyle(.switch)
@@ -479,30 +479,8 @@ struct ContentView: View {
                         InfoButton(title: "GLOW IN SDR",
                                    text: "“SDR” is the standard, non-HDR version of your photo — a regular JPEG, the kind every screen and app can show. Your export always tucks one inside as the fallback for non-HDR screens.\n\nOn: the soft glow is baked into that SDR version, so your look carries everywhere (the fallback is your bloomed photo, not the untouched original).\n\nOff: the SDR version is pixel-identical to the file you started with, and the glow lives only in the HDR layer — so it appears only on HDR-capable displays.")
                         Spacer()
-                        Text(model.bakeGlowIntoSDR ? "shows on every screen" : "HDR screens only")
+                        Text(model.bloom.bakeGlowIntoSDR ? "shows on every screen" : "HDR screens only")
                             .font(Theme.mono(9)).foregroundStyle(Theme.stoneFaint)
-                    }
-                }
-
-                // AUTO — per-photo auto-tuning (Adapt + HL Guard only matter when on).
-                lookGroup("auto", "AUTO", "let Gainmap tune each photo") {
-                    HStack {
-                        Toggle("AUTO", isOn: $model.bloom.autoAdapt)
-                            .toggleStyle(.switch)
-                            .font(Theme.mono(10, .semibold))
-                            .foregroundStyle(Theme.stoneDim)
-                            .help("Auto-adjusts the look for each photo based on how bright it is. Off = your sliders apply exactly as set.")
-                        Spacer()
-                        Text(model.bloom.autoAdapt ? "tunes each photo" : "sliders apply as set")
-                            .font(Theme.mono(9)).foregroundStyle(Theme.stoneFaint)
-                    }
-                    if model.bloom.autoAdapt {
-                        sliderRow("ADAPT", $model.bloom.adaptAmount, 0...1, fmt: "%.0f%%", "fixed", "dynamic", scale: 100,
-                                  resetTo: model.signature.adaptAmount,
-                                  help: "How strongly AUTO retunes the look per photo. Fixed = your settings as-is; dynamic = more automatic adjustment.")
-                        sliderRow("HL GUARD", $model.bloom.highlightGuard, 0...1, fmt: "%.0f%%", "loose", "strict", scale: 100,
-                                  resetTo: model.signature.highlightGuard,
-                                  help: "Protects already-bright photos from blowing out. Stricter pulls the effect back more on high-key images.")
                     }
                 }
             }

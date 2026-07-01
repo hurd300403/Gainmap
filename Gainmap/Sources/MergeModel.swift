@@ -47,12 +47,27 @@ final class MergeModel: ObservableObject {
             if let i = selectedIndex { items[i].look = bloom }
             // A manual (advanced-slider) edit redefines the 100% anchor the
             // Intensity slider scales from — so Intensity is always RELATIVE to
-            // wherever you've currently set things, not a fixed preset.
+            // wherever you've currently set things, not a fixed preset. But flipping
+            // ONLY the GLOW-IN-SDR toggle isn't a look-strength change, so it must
+            // NOT re-anchor / snap Intensity to 100%; just keep the anchor's bake in
+            // sync (so a later Intensity move preserves, not reverts, the toggle).
             if !applyingIntensity {
-                anchorLook = bloom
-                intensity = 1.0
+                if onlyBakeChanged(from: oldValue) {
+                    anchorLook.bakeGlowIntoSDR = bloom.bakeGlowIntoSDR
+                } else {
+                    anchorLook = bloom
+                    intensity = 1.0
+                }
             }
         }
+    }
+
+    /// True when `bloom` differs from `old` only in the GLOW-IN-SDR flag.
+    private func onlyBakeChanged(from old: AutoHDR.BloomParams) -> Bool {
+        guard bloom.bakeGlowIntoSDR != old.bakeGlowIntoSDR else { return false }
+        var a = bloom, b = old
+        a.bakeGlowIntoSDR = false; b.bakeGlowIntoSDR = false
+        return a == b
     }
     /// The most-recently dialed look, inherited by the next photo you arrive at.
     @Published var runningLook = AutoHDR.BloomParams()
@@ -73,6 +88,9 @@ final class MergeModel: ObservableObject {
     @Published private(set) var hasCustomDefault = SignatureStore.hasSaved
 
     init() {
+        // Retire the old global GLOW-IN-SDR flag (now per-photo on the look) so a
+        // stale `true` from an earlier build can't override the clean default.
+        UserDefaults.standard.removeObject(forKey: "gainmap.bakeGlowIntoSDR")
         let sig = SignatureStore.load() ?? AutoHDR.signatureLook
         signature = sig
         anchorLook = sig
@@ -97,12 +115,17 @@ final class MergeModel: ObservableObject {
         intensity = 1.0
     }
 
-    /// Make the current dialed look the new 100% signature (persists it).
+    /// Make the current dialed look the new 100% signature (persists it). The saved
+    /// default never carries GLOW-IN-SDR: it's a deliberate per-photo opt-in, so new
+    /// photos always start with a clean SDR base (the current photo's own bake is
+    /// left untouched — only the stored default is normalized off).
     func setSignatureFromCurrent() {
-        signature = bloom
+        var sig = bloom
+        sig.bakeGlowIntoSDR = false
+        signature = sig
         anchorLook = bloom
         intensity = 1.0
-        SignatureStore.save(bloom)
+        SignatureStore.save(sig)
         hasCustomDefault = true
     }
 
@@ -156,15 +179,11 @@ final class MergeModel: ObservableObject {
     @Published var cgamut: Gamut = .rec709
     @Published var sgamut: Gamut = .rec709
 
-    /// Defaults to FALSE: the SDR fallback is the original JPEG passed through
-    /// pixel-for-pixel, and the glow lives only in the gain map (HDR-only) — so the
-    /// non-HDR version (thumbnails, social, any screen that strips the gain map)
-    /// stays clean and faithful. When true, the soft bloom is baked into the SDR
-    /// base too, so the glow shows everywhere — but that base reads brighter / more
-    /// blown on non-HDR screens (the UI warns about this before enabling).
-    @Published var bakeGlowIntoSDR: Bool = UserDefaults.standard.object(forKey: "gainmap.bakeGlowIntoSDR") as? Bool ?? false {
-        didSet { UserDefaults.standard.set(bakeGlowIntoSDR, forKey: "gainmap.bakeGlowIntoSDR") }
-    }
+    // GLOW-IN-SDR is now a per-photo dial that lives on `bloom.bakeGlowIntoSDR`
+    // (see AutoHDR.BloomParams) so it travels with each photo's look. It used to be
+    // a single global persisted under UserDefaults "gainmap.bakeGlowIntoSDR"; that
+    // key is retired and cleared once at launch (see init) so a stale value from an
+    // older build can't linger.
 
     // MARK: Shared status (advanced phase + per-merge spinner)
 
@@ -313,7 +332,7 @@ final class MergeModel: ObservableObject {
     /// the SDR primary is the bloomed look (glow shows everywhere); off, it's the
     /// original passed through pixel-for-pixel (glow lives only in the gain map).
     private func runMerge(sdr: URL, look: AutoHDR.BloomParams, out: URL) async -> RunOutcome {
-        let bake = bakeGlowIntoSDR
+        let bake = look.bakeGlowIntoSDR
         do {
             if bake {
                 let inputs = try await Task.detached(priority: .userInitiated) {
@@ -403,7 +422,11 @@ enum SignatureStore {
     static var hasSaved: Bool { UserDefaults.standard.data(forKey: key) != nil }
     static func clear() { UserDefaults.standard.removeObject(forKey: key) }
     static func save(_ p: AutoHDR.BloomParams) {
-        if let data = try? JSONEncoder().encode(p) {
+        // The saved default look never carries GLOW-IN-SDR — it's a per-photo
+        // opt-in, so new photos always start from a clean SDR base.
+        var q = p
+        q.bakeGlowIntoSDR = false
+        if let data = try? JSONEncoder().encode(q) {
             UserDefaults.standard.set(data, forKey: key)
         }
     }

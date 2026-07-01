@@ -2,17 +2,17 @@
 //  AutoHDR.swift
 //  Gainmap
 //
-//  One-file auto mode: synthesize a highlight-boosted HDR rendition from a single
-//  SDR JPEG, so the SDR fallback stays pixel-identical (uhdrtool passes the JPEG
-//  through untouched) while HDR displays get a clean highlight pop.
+//  One-file auto mode: synthesize a highlight-boosted "bloom-as-HDR" rendition
+//  from a single SDR JPEG. With the glow kept out of the SDR base (the default),
+//  uhdrtool passes the original JPEG through untouched, so the SDR fallback stays
+//  pixel-identical while HDR displays get a clean highlight pop that lives only in
+//  the gain map.
 //
-//  The synthesis is inverse tone-mapping: linearize the SDR, and multiply each
-//  pixel by a gain that is 1.0 through shadows/midtones and ramps up to `maxBoost`
-//  in the highlights (above a luma `knee`). The result is written as an RGBA f16
-//  buffer for `uhdrtool --raw-hdr` — same layout as the engine's --dump-raw.
-//
-//  The gain math here mirrors the ImageMagick recipe used to tune the default
-//  strength (knee ≈ 0.55, default maxBoost 2.5×).
+//  The look is built by `bloomCIImage`: extract highlights above a threshold,
+//  blur them for the halo (spread), shape the ramp (falloff), then composite the
+//  glow back over the linear base and lift the brights into HDR headroom. The same
+//  CIImage feeds both the export (rendered to an RGBA f16 buffer for
+//  `uhdrtool --raw-hdr`) and the live EDR preview, so the two match by construction.
 //
 
 import Foundation
@@ -23,9 +23,6 @@ import CoreImage
 import CoreImage.CIFilterBuiltins
 
 enum AutoHDR {
-
-    static let defaultMaxBoost = 2.5   // legacy (per-pixel multiply); kept for tests
-    static let defaultKnee = 0.55
 
     static let ciContext: CIContext = {
         let cs = CGColorSpace(name: CGColorSpace.extendedLinearSRGB)!
@@ -85,10 +82,10 @@ enum AutoHDR {
         var tint: Double = 0.0         // glow hue: -1 = cool, 0 = neutral, +1 = warm
         var headroom: Double = 1.0     // HDR headroom: expand highlights above SDR
                                        // white (1 = unchanged … pushes target nits up)
-        var autoAdapt: Bool = false    // OFF by default: sliders drive the export directly
-                                       // (on = scale the look per photo from scene stats)
-        var adaptAmount: Double = 0.65 // 0 = fixed preset, 1 = full scene-aware correction
-        var highlightGuard: Double = 0.85 // dampen high-key / highlight-heavy scenes
+        // Per-photo: bake the soft bloom into the SDR base too (glow shows on every
+        // screen) vs. HDR-only glow with a pixel-faithful SDR fallback. Travels with
+        // the look (copy/paste + running-look inheritance). Default OFF (clean base).
+        var bakeGlowIntoSDR: Bool = false
     }
 
     /// The built-in "signature" look — the dialed-in favorite that the single
@@ -97,7 +94,6 @@ enum AutoHDR {
         var p = BloomParams()
         p.glow = 1.5; p.headroom = 1.5; p.threshold = 0.67; p.spread = 0.025
         p.punch = 0.30; p.falloff = 1.54; p.saturation = 0.74; p.tint = -1.0
-        p.autoAdapt = true; p.adaptAmount = 1.0; p.highlightGuard = 0.19
         return p
     }()
 
@@ -120,23 +116,7 @@ enum AutoHDR {
         return min(1, max(0, p.glow / s.glow))
     }
 
-    /// Cheap thumbnail-derived scene description used to adapt the user's base
-    /// look. Values are gamma-space fractions, stable enough for per-photo style
-    /// scaling without reading the full-resolution image twice.
-    struct SceneStats: Equatable {
-        var meanLuma: Double
-        var highlightLoad: Double
-        var specularLoad: Double
-        var shadowLoad: Double
-    }
-
     // MARK: Pure math (unit-tested)
-
-    /// Highlight gain for a perceptual luma in [0,1]. 1.0 below the knee, ramping
-    /// smoothly to `maxBoost` at full white.
-    static func gain(luma: Double, maxBoost: Double, knee: Double = defaultKnee) -> Double {
-        1.0 + (maxBoost - 1.0) * smoothstep(knee, 1.0, luma)
-    }
 
     static func smoothstep(_ e0: Double, _ e1: Double, _ x: Double) -> Double {
         guard e1 > e0 else { return x < e0 ? 0 : 1 }
@@ -144,111 +124,9 @@ enum AutoHDR {
         return t * t * (3 - 2 * t)
     }
 
-    // MARK: Adaptive boost (per-image)
-
-    static let minBoost = 1.8
-    static let maxBoostCap = 3.4
-
-    /// Pick a max boost from the image's mean perceptual luma. Brighter images
-    /// (more highlight data) over-blow easily, so they get LESS boost; darker
-    /// images have headroom and get more pop. The line is calibrated to Sam's
-    /// tuning: meanLuma 0.81→2.0×, 0.55→2.6×, 0.35→3.0×.
-    static func recommendedBoost(meanLuma: Double) -> Double {
-        let b = 3.0 - (meanLuma - 0.351) * 2.188
-        return min(maxBoostCap, max(minBoost, b))
-    }
-
-    /// Mean perceptual luma (gamma space) of a downsampled copy. Side-effecting;
-    /// call off the main thread.
-    static func meanLuma(of url: URL, sample: CGFloat = 256) -> Double? {
-        sceneStats(of: url, sample: sample)?.meanLuma
-    }
-
-    /// Analyze a small thumbnail for broad image character. The thresholds are
-    /// intentionally perceptual: enough to tell high-key frames from isolated
-    /// speculars, not a replacement for the real HDR encode.
-    static func sceneStats(of url: URL, sample: CGFloat = 384) -> SceneStats? {
-        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
-        let opts: [CFString: Any] = [
-            kCGImageSourceCreateThumbnailFromImageAlways: true,
-            kCGImageSourceThumbnailMaxPixelSize: sample,
-            kCGImageSourceCreateThumbnailWithTransform: true,
-        ]
-        guard let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) else { return nil }
-        let w = cg.width, h = cg.height
-        guard w > 0, h > 0 else { return nil }
-        var px = [UInt8](repeating: 0, count: w * h * 4)
-        guard let cs = CGColorSpace(name: CGColorSpace.sRGB),
-              let ctx = px.withUnsafeMutableBytes({ ptr in
-                  CGContext(data: ptr.baseAddress, width: w, height: h, bitsPerComponent: 8,
-                            bytesPerRow: w * 4, space: cs,
-                            bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)
-              }) else { return nil }
-        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
-        var sum = 0.0
-        var highlights = 0
-        var speculars = 0
-        var shadows = 0
-        var p = 0
-        for _ in 0..<(w * h) {
-            let luma = (0.2126 * Double(px[p]) + 0.7152 * Double(px[p + 1]) + 0.0722 * Double(px[p + 2])) / 255.0
-            sum += luma
-            if luma >= 0.72 { highlights += 1 }
-            if luma >= 0.92 { speculars += 1 }
-            if luma <= 0.22 { shadows += 1 }
-            p += 4
-        }
-        let n = Double(w * h)
-        return SceneStats(meanLuma: sum / n,
-                          highlightLoad: Double(highlights) / n,
-                          specularLoad: Double(speculars) / n,
-                          shadowLoad: Double(shadows) / n)
-    }
-
     /// sRGB EOTF (gamma → linear) for a normalized channel.
     static func srgbToLinear(_ c: Double) -> Double {
         c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4)
-    }
-
-    /// Apply the dynamic preset layer. The user's sliders remain the base look;
-    /// this only scales them from scene statistics, mainly to keep highlight-rich
-    /// frames from becoming overwhelming while letting isolated speculars pop.
-    static func adaptedBloomParams(_ params: BloomParams, stats: SceneStats) -> BloomParams {
-        guard params.autoAdapt, params.adaptAmount > 0 else { return params }
-
-        let amount = clamp01(params.adaptAmount)
-        let guardAmount = amount * clamp01(params.highlightGuard)
-        let highlightPressure = clamp01(
-            smoothstep(0.08, 0.38, stats.highlightLoad) * 0.75 +
-            smoothstep(0.50, 0.80, stats.meanLuma) * 0.25
-        )
-        let shadowPressure = smoothstep(0.45, 0.75, stats.shadowLoad)
-        let specularFocus = clamp01(
-            smoothstep(0.003, 0.035, stats.specularLoad) *
-            (1.0 - smoothstep(0.18, 0.45, stats.highlightLoad))
-        )
-
-        var out = params
-        out.glow = clamp(params.glow * max(0.25, 1.0 - guardAmount * (0.45 * highlightPressure + 0.12 * shadowPressure)),
-                         0.0, 1.5)
-        out.peak = clamp(1.0 + (params.peak - 1.0) * max(0.40, 1.0 - guardAmount * 0.35 * highlightPressure),
-                         1.2, 5.0)
-        out.spread = clamp(params.spread * max(0.65, 1.0 - guardAmount * 0.25 * highlightPressure),
-                           0.002, 0.025)
-        out.threshold = clamp(params.threshold + guardAmount * 0.12 * highlightPressure - amount * 0.035 * specularFocus,
-                              0.30, 0.95)
-        out.punch = clamp(params.punch + amount * 0.22 * specularFocus - guardAmount * 0.10 * highlightPressure,
-                          0.0, 1.0)
-        out.falloff = clamp(params.falloff + guardAmount * 0.45 * highlightPressure + amount * 0.18 * shadowPressure,
-                            0.5, 2.0)
-        out.saturation = clamp(params.saturation * (1.0 - guardAmount * 0.18 * highlightPressure),
-                               0.0, 1.5)
-        return out
-    }
-
-    static func effectiveBloomParams(_ params: BloomParams, for url: URL) -> BloomParams {
-        guard params.autoAdapt, let stats = sceneStats(of: url) else { return params }
-        return adaptedBloomParams(params, stats: stats)
     }
 
     // MARK: Synthesis (side-effecting; call off the main thread)
@@ -287,8 +165,8 @@ enum AutoHDR {
 
     /// The bloom-as-HDR rendition as a linear, extended-range CIImage. SHARED by
     /// the export (rendered to the f16 buffer / gain map) and the live EDR preview
-    /// so the two are guaranteed identical. `p` must already be the effective
-    /// (adapted) params. `base` is the sRGB source; spread scales with its width.
+    /// so the two are guaranteed identical. `base` is the sRGB source; spread scales
+    /// with its width.
     static func bloomCIImage(base: CIImage, params p: BloomParams) -> CIImage? {
         let bounds = base.extent
         // The base is sampled into the extendedLinearSRGB working space, so Core
@@ -326,8 +204,7 @@ enum AutoHDR {
     }
 
     /// Build the bloom-as-HDR rendition and render it to the engine's RGBA f16 buffer.
-    static func synthesize(from sdrURL: URL, params: BloomParams) throws -> RawBuffer {
-        let p = effectiveBloomParams(params, for: sdrURL)
+    static func synthesize(from sdrURL: URL, params p: BloomParams) throws -> RawBuffer {
         guard let src = CGImageSourceCreateWithURL(sdrURL as CFURL, nil),
               let cg = CGImageSourceCreateImageAtIndex(src, 0, nil) else {
             throw SynthError.decode
@@ -358,8 +235,7 @@ enum AutoHDR {
     /// bloomed look, NOT pixel-identical to the input (that's the trade-off).
     struct UltraHDRInputs { let hdr: RawBuffer; let sdrJPEG: URL }
 
-    static func synthesizeInputs(from sdrURL: URL, params: BloomParams) throws -> UltraHDRInputs {
-        let p = effectiveBloomParams(params, for: sdrURL)
+    static func synthesizeInputs(from sdrURL: URL, params p: BloomParams) throws -> UltraHDRInputs {
         guard let src = CGImageSourceCreateWithURL(sdrURL as CFURL, nil),
               let cg = CGImageSourceCreateImageAtIndex(src, 0, nil) else { throw SynthError.decode }
         let w = cg.width, h = cg.height
@@ -392,12 +268,34 @@ enum AutoHDR {
 
         return UltraHDRInputs(hdr: RawBuffer(url: hdrURL, width: w, height: h), sdrJPEG: sdrURLout)
     }
+}
 
-    private static func clamp01(_ x: Double) -> Double {
-        min(1, max(0, x))
+extension AutoHDR.BloomParams {
+    // Tolerant decoder: read every field with a default so older saved looks —
+    // one missing the newer `bakeGlowIntoSDR`, or still carrying the removed AUTO
+    // keys (autoAdapt / adaptAmount / highlightGuard) — decode cleanly instead of
+    // throwing. Swift's synthesized Decodable does NOT fall back to a property's
+    // default value for a missing key (it throws keyNotFound), and
+    // `SignatureStore.load()` swallows that with `try?` → nil → a user's saved
+    // default look would be silently wiped. Encoding stays synthesized (uses these
+    // same keys), so a re-saved look no longer carries the dead AUTO fields.
+    private enum CodingKeys: String, CodingKey {
+        case glow, threshold, spread, punch, peak, falloff, saturation, tint, headroom, bakeGlowIntoSDR
     }
 
-    private static func clamp(_ x: Double, _ lo: Double, _ hi: Double) -> Double {
-        min(hi, max(lo, x))
+    init(from decoder: Decoder) throws {
+        var p = AutoHDR.BloomParams()
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        p.glow           = try c.decodeIfPresent(Double.self, forKey: .glow)           ?? p.glow
+        p.threshold      = try c.decodeIfPresent(Double.self, forKey: .threshold)      ?? p.threshold
+        p.spread         = try c.decodeIfPresent(Double.self, forKey: .spread)         ?? p.spread
+        p.punch          = try c.decodeIfPresent(Double.self, forKey: .punch)          ?? p.punch
+        p.peak           = try c.decodeIfPresent(Double.self, forKey: .peak)           ?? p.peak
+        p.falloff        = try c.decodeIfPresent(Double.self, forKey: .falloff)        ?? p.falloff
+        p.saturation     = try c.decodeIfPresent(Double.self, forKey: .saturation)     ?? p.saturation
+        p.tint           = try c.decodeIfPresent(Double.self, forKey: .tint)           ?? p.tint
+        p.headroom       = try c.decodeIfPresent(Double.self, forKey: .headroom)       ?? p.headroom
+        p.bakeGlowIntoSDR = try c.decodeIfPresent(Bool.self, forKey: .bakeGlowIntoSDR) ?? p.bakeGlowIntoSDR
+        self = p
     }
 }

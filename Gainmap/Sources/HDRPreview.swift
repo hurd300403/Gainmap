@@ -109,10 +109,9 @@ final class PreviewRenderer: ObservableObject {
     @Published var aspect: CGFloat?      // native width / height of the photo
     @Published var rendering = false
 
-    // The cached, downscaled SDR base + its scene stats (for the live proxy).
+    // The cached, downscaled SDR base (for the live proxy).
     private var baseURL: URL?
     private var baseImage: CIImage?
-    private var baseStats: AutoHDR.SceneStats?
     private var loadTask: Task<Void, Never>?
     private var accurateTask: Task<Void, Never>?
     private var lastFile: URL?
@@ -123,7 +122,7 @@ final class PreviewRenderer: ObservableObject {
     private var curParams = AutoHDR.BloomParams()
     private var curCgamut: Gamut = .rec709
     private var curSgamut: Gamut = .rec709
-    private var curBake = true
+    private var curBake = false
 
     /// Two-stage preview for real-time scrubbing:
     ///   • PROXY — render `bloomCIImage` (the same linear-HDR the export encodes)
@@ -132,11 +131,10 @@ final class PreviewRenderer: ObservableObject {
     ///   • ACCURATE — ~200 ms after you stop, run the REAL gain-map export and
     ///     decode it, snapping the preview to the exact file (its L/K encoding).
     ///
-    /// CRUCIAL: both stages use the SAME *effective* params — i.e. the Adaptive
-    /// layer (AUTO) is resolved up-front from cached scene stats and baked in, so
-    /// the live proxy can't show a stronger look than the file actually saves.
+    /// Both stages use the SAME params, so the live proxy can't show a different
+    /// look than the file actually saves.
     func request(sdr: URL?, params: AutoHDR.BloomParams,
-                 cgamut: Gamut = .rec709, sgamut: Gamut = .rec709, bake: Bool = true) {
+                 cgamut: Gamut = .rec709, sgamut: Gamut = .rec709, bake: Bool = false) {
         // Stash the latest inputs so a base-load that finishes later renders with
         // CURRENT params/gamut, not whatever they were when the load kicked off.
         curParams = params; curCgamut = cgamut; curSgamut = sgamut; curBake = bake
@@ -144,20 +142,22 @@ final class PreviewRenderer: ObservableObject {
         guard let sdr else {
             loadTask?.cancel(); accurateTask?.cancel()
             image = nil; original = nil; aspect = nil
-            baseImage = nil; baseStats = nil; baseURL = nil; rendering = false
+            baseImage = nil; baseURL = nil; rendering = false
             return
         }
 
         if sdr != baseURL {
-            // New photo: cancel any in-flight render of the previous photo, drop
-            // the stale original immediately (so the before/after compare can't
-            // show the photo you came from), then load this base + stats.
+            // New photo: cancel any in-flight render of the previous photo and drop
+            // BOTH the stale HDR render and its original immediately — otherwise a
+            // press-and-hold in the brief load window would compare against (or show)
+            // the photo you came from. `hasImage` then stays false until this photo's
+            // own render lands, so the gesture can't arm against a stale frame.
             baseURL = sdr
-            baseImage = nil; baseStats = nil; original = nil
+            baseImage = nil; original = nil; image = nil
             loadTask?.cancel(); accurateTask?.cancel()
             loadTask = Task { [weak self] in
-                let (base, stats) = await Task.detached(priority: .userInitiated) {
-                    (Self.baseCIImage(for: sdr), AutoHDR.sceneStats(of: sdr))
+                let base = await Task.detached(priority: .userInitiated) {
+                    Self.baseCIImage(for: sdr)
                 }.value
                 if Task.isCancelled { return }
                 // Guard by PHOTO IDENTITY, not generation: a same-photo re-request
@@ -165,7 +165,6 @@ final class PreviewRenderer: ObservableObject {
                 // original get stuck on the previous photo.
                 guard let self, self.baseURL == sdr else { return }
                 self.baseImage = base
-                self.baseStats = stats
                 self.original = base
                 self.aspect = base.map { $0.extent.width / max(1, $0.extent.height) }
                 self.renderCurrent()
@@ -179,18 +178,8 @@ final class PreviewRenderer: ObservableObject {
     /// Render the current photo with the latest stored params/gamut.
     private func renderCurrent() {
         guard let sdr = baseURL else { return }
-        let eff = effective(curParams)
-        renderProxy(params: eff)
-        scheduleAccurate(sdr: sdr, params: eff, cgamut: curCgamut, sgamut: curSgamut, bake: curBake, gen: generation)
-    }
-
-    /// Resolve the Adaptive (AUTO) layer once from cached stats and bake it in,
-    /// disabling further adaptation so the export path won't re-apply it.
-    private func effective(_ params: AutoHDR.BloomParams) -> AutoHDR.BloomParams {
-        guard params.autoAdapt, let stats = baseStats else { return params }
-        var e = AutoHDR.adaptedBloomParams(params, stats: stats)
-        e.autoAdapt = false
-        return e
+        renderProxy(params: curParams)
+        scheduleAccurate(sdr: sdr, params: curParams, cgamut: curCgamut, sgamut: curSgamut, bake: curBake, gen: generation)
     }
 
     /// Instant: build the bloom CIImage graph (cheap) and hand it to the EDR view.
@@ -200,9 +189,8 @@ final class PreviewRenderer: ObservableObject {
         image = proxy
     }
 
-    /// Debounced: replace the proxy with the real exported gain-map file.
-    /// `params` are already effective (autoAdapt baked off), so synthesize won't
-    /// re-adapt — the file matches the proxy exactly.
+    /// Debounced: replace the proxy with the real exported gain-map file, which
+    /// uses the same `params` as the proxy — so the file matches it exactly.
     private func scheduleAccurate(sdr: URL, params: AutoHDR.BloomParams,
                                   cgamut: Gamut, sgamut: Gamut, bake: Bool, gen: Int) {
         accurateTask?.cancel()
@@ -281,7 +269,7 @@ struct HDRPreviewPane: View {
     var sgamut: Gamut = .rec709
     /// Bake the soft bloom into the SDR base (vs HDR-only glow) — affects the
     /// settled render so the preview reflects the chosen export mode.
-    var bake: Bool = true
+    var bake: Bool = false
     /// Inline height (ignored when `expanded`, which fills the docked column).
     var height: CGFloat = 203
     /// Docked-to-side mode: taller, fills available height, collapse icon.
@@ -468,9 +456,14 @@ struct HDRPreviewPane: View {
     }
 
     /// Drop any peek/lock/arming state (used on new photo or on edit auto-unlock).
+    /// Also clears the press latch — otherwise a gesture whose `onEnded` was dropped
+    /// (interrupted by a re-render mid-press) would leave `isPressing` stuck true, so
+    /// the next press hits the wrong branch and the hold silently stops working.
     private func resetHold() {
         cancelArming()
         holdState = .idle
+        isPressing = false
+        pressStart = nil
     }
 
     // The top-left tag: LIVE HDR (accent), ORIGINAL · SDR (stone, while peeking),

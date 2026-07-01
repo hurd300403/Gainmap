@@ -132,38 +132,13 @@ final class UHDRRunnerTests: XCTestCase {
         XCTAssertTrue(message.contains("code 2"))
     }
 
-    // MARK: AutoHDR gain (one-file mode)
-
-    func testAutoGainBelowKneeIsUnity() {
-        // Shadows/midtones must not be boosted (SDR-faithful base).
-        XCTAssertEqual(AutoHDR.gain(luma: 0.0, maxBoost: 2.5), 1.0, accuracy: 1e-9)
-        XCTAssertEqual(AutoHDR.gain(luma: 0.55, maxBoost: 2.5), 1.0, accuracy: 1e-9)
-        XCTAssertEqual(AutoHDR.gain(luma: 0.40, maxBoost: 2.5), 1.0, accuracy: 1e-9)
-    }
-
-    func testAutoGainReachesMaxAtWhite() {
-        XCTAssertEqual(AutoHDR.gain(luma: 1.0, maxBoost: 2.5), 2.5, accuracy: 1e-9)
-        XCTAssertEqual(AutoHDR.gain(luma: 1.0, maxBoost: 4.0), 4.0, accuracy: 1e-9)
-    }
-
-    func testAutoGainMonotonicInHighlights() {
-        var prev = 0.0
-        for i in 0...10 {
-            let luma = 0.55 + 0.045 * Double(i)   // sweep knee→white
-            let g = AutoHDR.gain(luma: luma, maxBoost: 2.5)
-            XCTAssertGreaterThanOrEqual(g, prev)   // never decreases
-            XCTAssertLessThanOrEqual(g, 2.5 + 1e-9) // never exceeds maxBoost
-            prev = g
-        }
-    }
-
     // MARK: Export path responds to the sliders (real AutoHDR.synthesize)
 
     func testSynthesizeRespondsToGlow() throws {
         let jpg = try makeHighlightJPEG()
         defer { try? FileManager.default.removeItem(at: jpg) }
-        var low = AutoHDR.BloomParams();  low.autoAdapt = false;  low.glow = 0.2
-        var high = low;                                            high.glow = 1.3
+        var low = AutoHDR.BloomParams();  low.glow = 0.2
+        var high = low;                   high.glow = 1.3
         let bLow = try AutoHDR.synthesize(from: jpg, params: low)
         let bHigh = try AutoHDR.synthesize(from: jpg, params: high)
         defer { try? FileManager.default.removeItem(at: bLow.url); try? FileManager.default.removeItem(at: bHigh.url) }
@@ -175,8 +150,8 @@ final class UHDRRunnerTests: XCTestCase {
     func testSynthesizeRespondsToThreshold() throws {
         let jpg = try makeHighlightJPEG()
         defer { try? FileManager.default.removeItem(at: jpg) }
-        var open = AutoHDR.BloomParams(); open.autoAdapt = false; open.glow = 1.2; open.threshold = 0.30
-        var tight = open;                                          tight.threshold = 0.95
+        var open = AutoHDR.BloomParams(); open.glow = 1.2; open.threshold = 0.30
+        var tight = open;                 tight.threshold = 0.95
         let bOpen = try AutoHDR.synthesize(from: jpg, params: open)
         let bTight = try AutoHDR.synthesize(from: jpg, params: tight)
         defer { try? FileManager.default.removeItem(at: bOpen.url); try? FileManager.default.removeItem(at: bTight.url) }
@@ -226,86 +201,35 @@ final class UHDRRunnerTests: XCTestCase {
         XCTAssertEqual(AutoHDR.smoothstep(0, 1, 0.5), 0.5, accuracy: 1e-9)
     }
 
-    // MARK: Adaptive boost — calibrated to Sam's three real photos
+    // MARK: BloomParams Codable migration (forward/backward compatible)
 
-    func testAdaptiveBoostMatchesCalibration() {
-        // photo 1 (meanL 0.808, very bright) → ~2.0×
-        XCTAssertEqual(AutoHDR.recommendedBoost(meanLuma: 0.808), 2.0, accuracy: 0.1)
-        // photo 2 (meanL 0.548, medium) → ~2.5–2.6×
-        XCTAssertEqual(AutoHDR.recommendedBoost(meanLuma: 0.548), 2.57, accuracy: 0.15)
-        // photo 3 (meanL 0.351, dark) → ~3.0×
-        XCTAssertEqual(AutoHDR.recommendedBoost(meanLuma: 0.351), 3.0, accuracy: 0.1)
+    func testBloomParamsDecodesLegacyJSONWithRemovedAndMissingKeys() throws {
+        // A saved look from an older build: it still carries the removed AUTO keys
+        // (autoAdapt/adaptAmount/highlightGuard) and lacks the newer bakeGlowIntoSDR.
+        // It must decode cleanly (NOT throw — SignatureStore.load swallows throws and
+        // would silently wipe the user's saved default), keep the known values, drop
+        // the dead keys, and default bake OFF.
+        let legacy = """
+        {"glow":1.25,"threshold":0.7,"spread":0.02,"punch":0.4,"peak":3.5,
+         "falloff":1.3,"saturation":0.8,"tint":-0.5,"headroom":1.8,
+         "autoAdapt":true,"adaptAmount":1.0,"highlightGuard":0.19}
+        """.data(using: .utf8)!
+        let p = try JSONDecoder().decode(AutoHDR.BloomParams.self, from: legacy)
+        XCTAssertEqual(p.glow, 1.25, accuracy: 1e-9)
+        XCTAssertEqual(p.headroom, 1.8, accuracy: 1e-9)
+        XCTAssertEqual(p.tint, -0.5, accuracy: 1e-9)
+        XCTAssertFalse(p.bakeGlowIntoSDR, "a missing bake key must default OFF")
     }
 
-    func testAdaptiveBoostInverseAndClamped() {
-        // Brighter ⇒ less boost (monotonic decreasing).
-        XCTAssertGreaterThan(AutoHDR.recommendedBoost(meanLuma: 0.3),
-                             AutoHDR.recommendedBoost(meanLuma: 0.7))
-        // Clamped to a sane range at the extremes.
-        XCTAssertEqual(AutoHDR.recommendedBoost(meanLuma: 0.98), AutoHDR.minBoost, accuracy: 1e-9)
-        XCTAssertEqual(AutoHDR.recommendedBoost(meanLuma: 0.05), AutoHDR.maxBoostCap, accuracy: 1e-9)
-    }
-
-    // MARK: Dynamic HDR look adaptation
-
-    func testDynamicLookDampensHighlightHeavyScenes() {
-        var base = AutoHDR.BloomParams()
-        base.autoAdapt = true
-        base.glow = 1.0
-        base.threshold = 0.55
-        base.punch = 0.35
-        base.peak = 4.0
-        base.saturation = 1.2
-        base.adaptAmount = 1.0
-        base.highlightGuard = 1.0
-
-        let highKey = AutoHDR.SceneStats(
-            meanLuma: 0.82,
-            highlightLoad: 0.46,
-            specularLoad: 0.04,
-            shadowLoad: 0.02)
-        let out = AutoHDR.adaptedBloomParams(base, stats: highKey)
-
-        XCTAssertLessThan(out.glow, base.glow)
-        XCTAssertLessThan(out.peak, base.peak)
-        XCTAssertGreaterThan(out.threshold, base.threshold)
-        XCTAssertLessThan(out.saturation, base.saturation)
-        XCTAssertLessThanOrEqual(out.punch, base.punch)
-    }
-
-    func testDynamicLookKeepsIsolatedSpecularsCrisp() {
-        var base = AutoHDR.BloomParams()
-        base.autoAdapt = true
-        base.glow = 0.7
-        base.threshold = 0.62
-        base.punch = 0.10
-        base.adaptAmount = 1.0
-        base.highlightGuard = 1.0
-
-        let specular = AutoHDR.SceneStats(
-            meanLuma: 0.36,
-            highlightLoad: 0.05,
-            specularLoad: 0.025,
-            shadowLoad: 0.38)
-        let out = AutoHDR.adaptedBloomParams(base, stats: specular)
-
-        XCTAssertGreaterThan(out.punch, base.punch)
-        XCTAssertLessThan(out.threshold, base.threshold)
-        XCTAssertGreaterThan(out.glow, base.glow * 0.85)
-    }
-
-    func testDynamicLookCanBeDisabled() {
-        var base = AutoHDR.BloomParams()
-        base.autoAdapt = false
-        base.glow = 1.0
-        base.peak = 4.0
-
-        let highKey = AutoHDR.SceneStats(
-            meanLuma: 0.90,
-            highlightLoad: 0.60,
-            specularLoad: 0.08,
-            shadowLoad: 0.0)
-        XCTAssertEqual(AutoHDR.adaptedBloomParams(base, stats: highKey), base)
+    func testBloomParamsRoundTripsBakeAndDropsDeadKeys() throws {
+        var p = AutoHDR.BloomParams(); p.bakeGlowIntoSDR = true; p.glow = 0.9
+        let data = try JSONEncoder().encode(p)
+        let back = try JSONDecoder().decode(AutoHDR.BloomParams.self, from: data)
+        XCTAssertEqual(p, back)
+        XCTAssertTrue(back.bakeGlowIntoSDR)
+        // The removed AUTO fields are no longer emitted.
+        let json = String(data: data, encoding: .utf8)!
+        XCTAssertFalse(json.contains("autoAdapt"))
     }
 
     // MARK: Live preview responds to the slider
