@@ -17,6 +17,18 @@ import CoreImage
 @MainActor
 final class BatchModelTests: XCTestCase {
 
+    // MergeModel reads UserDefaults.standard directly; a persisted SAME-LOOK
+    // flag from another test (or the app) would silently flip every model here
+    // into batch mode and break the commit-on-leave assertions.
+    override func setUp() {
+        super.setUp()
+        UserDefaults.standard.removeObject(forKey: MergeModel.sameLookKey)
+    }
+    override func tearDown() {
+        UserDefaults.standard.removeObject(forKey: MergeModel.sameLookKey)
+        super.tearDown()
+    }
+
     private func url(_ name: String) -> URL { URL(fileURLWithPath: "/tmp/\(name).jpg") }
 
     // MARK: Queue building

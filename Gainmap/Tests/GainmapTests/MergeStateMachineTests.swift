@@ -13,9 +13,28 @@ import XCTest
 @MainActor
 final class MergeStateMachineTests: XCTestCase {
 
-    private func url(_ name: String) -> URL { URL(fileURLWithPath: "/tmp/\(name).jpg") }
+    // Isolated working dir: successful merges now MOVE a real temp file into
+    // `<base>_UltraHDR.jpg` beside the source, so tests need a disposable home.
+    private var workDir: URL!
 
-    /// A model whose synthesis is a no-op and whose tool returns `outcome`.
+    override func setUp() {
+        super.setUp()
+        UserDefaults.standard.removeObject(forKey: MergeModel.sameLookKey)
+        workDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("gm-msm-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: true)
+    }
+    override func tearDown() {
+        UserDefaults.standard.removeObject(forKey: MergeModel.sameLookKey)
+        if let workDir { try? FileManager.default.removeItem(at: workDir) }
+        super.tearDown()
+    }
+
+    private func url(_ name: String) -> URL { workDir.appendingPathComponent("\(name).jpg") }
+
+    /// A model whose synthesis is a no-op and whose tool "writes" the output
+    /// (an empty file at job.out — the atomic-place step requires it to exist)
+    /// and returns `outcome`.
     private func stubbedModel(outcome: @escaping @Sendable (UHDRRunner.Job) -> RunOutcome) -> MergeModel {
         let m = MergeModel()
         m.synthesizeBuffer = { sdr, _, _ in
@@ -26,7 +45,11 @@ final class MergeStateMachineTests: XCTestCase {
                                                           width: 4, height: 4),
                                    sdrJPEG: sdr)
         }
-        m.runTool = { job in outcome(job) }
+        m.runTool = { job in
+            let o = outcome(job)
+            if case .success = o { try? Data("stub".utf8).write(to: job.out) }
+            return o
+        }
         return m
     }
 
@@ -69,12 +92,13 @@ final class MergeStateMachineTests: XCTestCase {
 
         var merged: [String] = []
         m.runTool = { job in
-            merged.append(job.out.lastPathComponent)
+            merged.append(job.sdr.lastPathComponent)   // job.out is now a temp URL
+            try? Data("stub".utf8).write(to: job.out)
             return .success(output: job.out, readout: nil)
         }
         await m.exportAll()
 
-        XCTAssertEqual(merged, ["a_UltraHDR.jpg", "c_UltraHDR.jpg"], "done items are not re-merged")
+        XCTAssertEqual(merged, ["a.jpg", "c.jpg"], "done items are not re-merged")
         XCTAssertEqual(m.savedCount, 3)
         XCTAssertEqual(m.pendingCount, 0)
     }

@@ -99,6 +99,7 @@ struct ContentView: View {
 
             if showGlowInSDRInfo {
                 GlowInSDRModal(
+                    appliesToAll: model.sameLookForAll,
                     onEnable: {
                         model.bloom.bakeGlowIntoSDR = true
                         withAnimation(.easeOut(duration: 0.18)) { showGlowInSDRInfo = false }
@@ -134,6 +135,11 @@ struct ContentView: View {
             }
         }
         .frame(minWidth: 900, minHeight: 620)
+        .onAppear {
+            #if DEBUG
+            model.applyDebugSeedIfRequested()
+            #endif
+        }
         .background(WindowAccessor { window = $0 })
         .preferredColorScheme(.dark)
         .tint(Theme.accent)
@@ -251,30 +257,28 @@ struct ContentView: View {
                            enabled: model.hasPrevious) { model.selectPrevious() }
                     .keyboardShortcut(.leftArrow, modifiers: .command)
 
-                Button(action: { Task { await model.saveSelectedAndAdvance() } }) {
-                    HStack(spacing: 10) {
-                        if model.phase == .merging {
-                            ProgressView().controlSize(.small).tint(.white)
-                        } else {
-                            Image(systemName: saveGlyph)
-                        }
-                        Text(saveLabel).font(Theme.ui(14.5, .semibold))
+                if model.sameLookForAll {
+                    // Batch mode: exporting the whole queue IS the primary action.
+                    primaryCapsule(enabled: model.canExportAll && !model.isExportingAll,
+                                   spinning: model.isExportingAll,
+                                   glyph: "sun.max.fill",
+                                   label: model.isExportingAll
+                                       ? "Exporting… \(min(model.batchDone + 1, max(model.batchTotal, 1))) of \(model.batchTotal)"
+                                       : "Export all · \(model.items.count) photo\(model.items.count == 1 ? "" : "s")") {
+                        model.startExportAll()
                     }
-                    .foregroundStyle(.white)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 14)
-                    .background(
-                        Capsule().fill(LinearGradient(
-                            colors: model.canSaveSelected ? [Theme.accentHot, Theme.accent]
-                                                          : [Theme.surfaceHi, Theme.surface],
-                            startPoint: .top, endPoint: .bottom)))
-                    .overlay(Capsule().stroke(Theme.accent.opacity(model.canSaveSelected ? 0.4 : 0), lineWidth: 1))
-                    .shadow(color: Theme.accent.opacity(model.canSaveSelected ? 0.45 : 0), radius: 16, y: 7)
+                    .keyboardShortcut("s", modifiers: .command)
+                    .help("Merge every photo with the shared look — re-exports saved ones and replaces their _UltraHDR files (⌘S)")
+                } else {
+                    primaryCapsule(enabled: model.canSaveSelected,
+                                   spinning: model.phase == .merging,
+                                   glyph: saveGlyph,
+                                   label: saveLabel) {
+                        Task { await model.saveSelectedAndAdvance() }
+                    }
+                    .keyboardShortcut("s", modifiers: .command)
+                    .help("Merge this photo and move to the next (⌘S)")
                 }
-                .buttonStyle(.plain)
-                .disabled(!model.canSaveSelected)
-                .keyboardShortcut("s", modifiers: .command)
-                .help("Merge this photo and move to the next (⌘S)")
 
                 stepButton(system: "chevron.right", label: "Next",
                            enabled: model.hasNext) { model.selectNext() }
@@ -294,7 +298,7 @@ struct ContentView: View {
                 Text("\(model.savedCount) saved")
                     .font(Theme.mono(11)).foregroundStyle(Theme.goldDeep)
                 Spacer()
-                if model.canPaste && model.items.count > 1 {
+                if model.canPaste && model.items.count > 1 && !model.sameLookForAll {
                     Button("Paste to all") { model.pasteLookToAll() }
                         .buttonStyle(.plain)
                         .font(Theme.mono(11, .semibold)).foregroundStyle(Theme.stone)
@@ -304,18 +308,24 @@ struct ContentView: View {
                     Button(action: { model.stopExportAll() }) {
                         HStack(spacing: 5) {
                             Image(systemName: "stop.fill").font(.system(size: 8))
-                            Text("Stop · \(model.pendingCount) left")
+                            Text("Stop · \(model.batchDone) of \(model.batchTotal)")
                         }
                         .font(Theme.mono(11, .semibold))
                         .foregroundStyle(Theme.accentHot)
                     }
                     .buttonStyle(.plain)
                     .help("Stop after the photo currently merging")
-                } else {
+                } else if !model.sameLookForAll {
+                    // Per-photo mode keeps the batch action as a secondary button
+                    // (in batch mode the primary capsule IS Export all).
                     Button(action: { model.startExportAll() }) {
                         Text(model.pendingCount > 0 ? "Export all · \(model.pendingCount) left" : "All saved ✓")
-                            .font(Theme.mono(11, .semibold))
+                            .font(Theme.mono(10.5, .semibold))
                             .foregroundStyle(model.canExportAll ? Theme.accentHot : Theme.stoneDim)
+                            .padding(.horizontal, 11).padding(.vertical, 6)
+                            .background(Theme.surface, in: RoundedRectangle(cornerRadius: 8))
+                            .overlay(RoundedRectangle(cornerRadius: 8)
+                                .stroke(model.canExportAll ? Theme.accentHot.opacity(0.45) : Theme.line, lineWidth: 1))
                     }
                     .buttonStyle(.plain)
                     .disabled(!model.canExportAll)
@@ -323,6 +333,35 @@ struct ContentView: View {
                 }
             }
         }
+    }
+
+    /// The queue bar's primary action capsule (Save & Next / Export all).
+    private func primaryCapsule(enabled: Bool, spinning: Bool, glyph: String,
+                                label: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                if spinning {
+                    ProgressView().controlSize(.small).tint(.white)
+                } else {
+                    Image(systemName: glyph)
+                }
+                Text(label).font(Theme.ui(14.5, .semibold))
+            }
+            .foregroundStyle(.white)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 14)
+            .background(
+                Capsule().fill(LinearGradient(
+                    colors: enabled ? [Theme.accentHot, Theme.accent]
+                                    : [Theme.surfaceHi, Theme.surface],
+                    startPoint: .top, endPoint: .bottom)))
+            .overlay(Capsule().stroke(Theme.accent.opacity(enabled ? 0.4 : 0), lineWidth: 1))
+            .shadow(color: Theme.accent.opacity(enabled ? 0.45 : 0), radius: 16, y: 7)
+        }
+        .buttonStyle(.plain)
+        // Disabled while spinning too: a live button under a spinner invites
+        // reentrant ⌘S taps that interleave merges and can skip a photo.
+        .disabled(!enabled)
     }
 
     private func stepButton(system: String, label: String, enabled: Bool, action: @escaping () -> Void) -> some View {
@@ -417,21 +456,51 @@ struct ContentView: View {
             HStack(spacing: 12) {
                 Text("HDR LOOK").font(Theme.mono(11, .semibold)).tracking(2).foregroundStyle(Theme.gold)
                 Spacer()
-                Button("Copy") { model.copyLook() }
-                    .buttonStyle(.plain)
-                    .font(Theme.mono(10, .semibold)).foregroundStyle(Theme.stoneDim)
-                    .help("Copy this photo's look")
-                Button("Paste") { model.pasteLook() }
-                    .buttonStyle(.plain)
-                    .font(Theme.mono(10, .semibold))
-                    .foregroundStyle(model.canPaste ? Theme.stone : Theme.stoneFaint)
-                    .disabled(!model.canPaste)
-                    .help("Paste the copied look onto this photo")
+                if !model.sameLookForAll {
+                    Button("Copy") { model.copyLook() }
+                        .buttonStyle(.plain)
+                        .font(Theme.mono(10, .semibold)).foregroundStyle(Theme.stoneDim)
+                        .help("Copy this photo's look")
+                    Button("Paste") { model.pasteLook() }
+                        .buttonStyle(.plain)
+                        .font(Theme.mono(10, .semibold))
+                        .foregroundStyle(model.canPaste ? Theme.stone : Theme.stoneFaint)
+                        .disabled(!model.canPaste)
+                        .help("Paste the copied look onto this photo")
+                }
                 Button("Reset") { model.resetToDefault() }
                     .buttonStyle(.plain)
                     .font(Theme.mono(10, .semibold)).foregroundStyle(Theme.stone)
                     .help("Snap this photo back to your default look (set it under Advanced controls ▸ Save as default).")
             }
+
+            // SAME LOOK FOR ALL — reframes the whole slider stack from
+            // this-photo to whole-queue. Per-photo looks are kept and come back
+            // when it's turned off.
+            HStack(spacing: 10) {
+                Toggle(isOn: Binding(get: { model.sameLookForAll },
+                                     set: { model.setSameLookForAll($0) })) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("SAME LOOK FOR ALL")
+                            .font(Theme.mono(10, .semibold)).tracking(1.5)
+                            .foregroundStyle(model.sameLookForAll ? Theme.gold : Theme.stone)
+                        Text(model.sameLookForAll ? "one look, every photo — the sliders edit the whole queue"
+                                                  : "each photo keeps its own look")
+                            .font(Theme.mono(9)).foregroundStyle(Theme.stoneDim)
+                    }
+                }
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .tint(Theme.gold)
+                .disabled(model.isExportingAll)
+                .help("One look for the whole queue. Per-photo looks are kept and come back when you turn this off; photos you never touched keep inheriting the latest look.")
+                Spacer(minLength: 0)
+            }
+            .padding(.vertical, 9).padding(.horizontal, 12)
+            .background(model.sameLookForAll ? Theme.gold.opacity(0.07) : Theme.inset.opacity(0.6),
+                        in: RoundedRectangle(cornerRadius: 10))
+            .overlay(RoundedRectangle(cornerRadius: 10)
+                .stroke(model.sameLookForAll ? Theme.gold.opacity(0.35) : Theme.line, lineWidth: 1))
 
             // The one slider most people ever touch: blend the signature look from
             // subtle to full.
@@ -450,8 +519,10 @@ struct ContentView: View {
                 HStack(spacing: 5) {
                     Image(systemName: model.bloom.bakeGlowIntoSDR ? "sun.max.fill" : "sun.max")
                         .font(.system(size: 9))
-                    Text(model.bloom.bakeGlowIntoSDR ? "Glow in SDR is ON for this photo"
-                                                     : "Want the glow on non-HDR screens too?")
+                    Text(model.bloom.bakeGlowIntoSDR
+                         ? (model.sameLookForAll ? "Glow in SDR is ON for all photos"
+                                                 : "Glow in SDR is ON for this photo")
+                         : "Want the glow on non-HDR screens too?")
                         .font(Theme.mono(9.5))
                 }
                 .foregroundStyle(model.bloom.bakeGlowIntoSDR ? Theme.gold : Theme.stoneDim)
@@ -814,6 +885,8 @@ private struct ShareModal: View {
 /// Explainer shown the moment someone flips "Glow in SDR" on, so the brighter /
 /// blown-looking non-HDR fallback reads as a deliberate trade-off, not a bug.
 private struct GlowInSDRModal: View {
+    /// SAME-LOOK mode: the toggle applies to the whole queue, not one photo.
+    var appliesToAll: Bool = false
     var onEnable: () -> Void
     var onCancel: () -> Void
 
@@ -837,6 +910,10 @@ private struct GlowInSDRModal: View {
                     (Text("Leaving it off ").foregroundStyle(Theme.stone)
                      + Text("(recommended)").foregroundStyle(Theme.gold)
                      + Text(" keeps that copy identical to your original; the glow then shows only on HDR displays.").foregroundStyle(Theme.stone))
+                    if appliesToAll {
+                        (Text("Same look for all is on").foregroundStyle(Theme.gold)
+                         + Text(" — this applies to every photo in the queue.").foregroundStyle(Theme.stone))
+                    }
                 }
                 .font(Theme.ui(12.5)).foregroundStyle(Theme.stone)
                 .lineSpacing(3.5)

@@ -83,15 +83,80 @@ final class MergeModel: ObservableObject {
     /// "Restore app default" instead of "Save as default").
     @Published private(set) var hasCustomDefault = SignatureStore.hasSaved
 
+    // MARK: Same look for all (batch mode)
+
+    /// ONE shared look for every photo in the queue. While ON, the sliders edit
+    /// the shared look, navigation neither loads nor commits per-photo looks
+    /// (they're KEPT and come back when turned off), and merges use the shared
+    /// look for every item. Persisted across launches. private(set): all changes
+    /// go through setSameLookForAll so the transition rules can't be bypassed.
+    @Published private(set) var sameLookForAll: Bool {
+        didSet { UserDefaults.standard.set(sameLookForAll, forKey: Self.sameLookKey) }
+    }
+    static let sameLookKey = "gainmap.sameLookForAll"
+
+    /// Flip batch mode, running the transition rules. No-ops while a batch
+    /// export is running (flipping mid-run would split the batch's semantics).
+    func setSameLookForAll(_ on: Bool) {
+        guard on != sameLookForAll, !isExportingAll else { return }
+        if on {
+            // A photo that already OWNS a look keeps its uncommitted live edits.
+            // (A never-committed photo's live edits simply BECOME the shared
+            // look — nothing is visually lost, and on later disable it reloads
+            // runningLook, which equals that same look.)
+            if selectedItem?.look != nil { commitLiveLook() }
+            sameLookForAll = true
+            // The shared look you're seeing reads as 100% on the Intensity dial.
+            anchorLook = bloom
+            intensity = 1.0
+        } else {
+            sameLookForAll = false
+            // Restore the selected photo's OWN look, as if freshly selected —
+            // otherwise the still-live shared look would commit onto it at the
+            // next navigation, silently destroying its preserved look. (Can't
+            // reuse select() here: its leading commitLiveLook would do exactly
+            // that stamping, since the mode is already OFF.)
+            if let item = selectedItem {
+                loadAsAnchor(item.look ?? runningLook)
+            }
+        }
+    }
+
+    /// Adopt a STORED look onto the live bench as-is: suppress the didSet
+    /// re-anchoring (so runningLook isn't clobbered by the load), then make it
+    /// the 100% Intensity anchor.
+    private func loadAsAnchor(_ look: AutoHDR.BloomParams) {
+        loadingSelection = true
+        bloom = look
+        loadingSelection = false
+        anchorLook = bloom
+        intensity = 1.0
+    }
+
     init() {
         // Retire the old global GLOW-IN-SDR flag (now per-photo on the look) so a
         // stale `true` from an earlier build can't override the clean default.
         UserDefaults.standard.removeObject(forKey: "gainmap.bakeGlowIntoSDR")
+        sameLookForAll = UserDefaults.standard.bool(forKey: Self.sameLookKey)
         let sig = SignatureStore.load() ?? AutoHDR.signatureLook
         signature = sig
         anchorLook = sig
         bloom = sig   // didSet seeds runningLook + anchor (intensity → 100%)
+
     }
+
+    #if DEBUG
+    /// Dev hook: seed the queue from a launch argument so UI states can be
+    /// screenshotted/driven without file-picker automation (SwiftUI tap
+    /// gestures ignore synthesized AX clicks). Called from the view's
+    /// onAppear — seeding during @StateObject init breaks scene creation.
+    ///   Gainmap -gm-seed "/path/a.jpg,/path/b.jpg"
+    func applyDebugSeedIfRequested() {
+        guard items.isEmpty,
+              let seed = UserDefaults.standard.string(forKey: "gm-seed") else { return }
+        addFiles(seed.split(separator: ",").map { URL(fileURLWithPath: String($0)) })
+    }
+    #endif
 
     /// Drive the whole look from the single Intensity slider, RELATIVE to the
     /// current anchor (100% = the look as currently dialed).
@@ -195,28 +260,35 @@ final class MergeModel: ObservableObject {
     var pendingCount: Int { items.filter { $0.status != .done }.count }
     var hasNext: Bool { selectedIndex.map { $0 < items.count - 1 } ?? false }
     var hasPrevious: Bool { selectedIndex.map { $0 > 0 } ?? false }
-    var canSaveSelected: Bool { selectedItem != nil && phase != .merging }
-    var canExportAll: Bool { pendingCount > 0 && phase != .merging }
+    var canSaveSelected: Bool { selectedItem != nil && phase != .merging && !isExportingAll }
+    /// While SAME-LOOK is on, Export All targets EVERY photo (done ones get
+    /// re-merged so the "same look for all" promise holds after look changes).
+    var canExportAll: Bool {
+        sameLookForAll ? (!items.isEmpty && phase != .merging)
+                       : (pendingCount > 0 && phase != .merging)
+    }
 
     /// Write the live bloom onto the selected item — called when LEAVING a photo
-    /// (navigation, merge, export-all), not on every slider tick.
+    /// (navigation, merge, export-all), not on every slider tick. No-op while
+    /// SAME-LOOK is on: the shared look must never stamp preserved per-photo looks.
     func commitLiveLook() {
+        guard !sameLookForAll else { return }
         if let i = selectedIndex { items[i].look = bloom }
     }
 
     /// Load a queue item into the live bench: its own look if it has one, else the
     /// running look (so a fresh photo arrives pre-dialed to your last settings).
+    /// While SAME-LOOK is on, only the selection + status mirror update — the
+    /// shared look stays live (never loaded from, never committed to, the item).
     func select(_ id: UUID) {
         guard let item = items.first(where: { $0.id == id }) else { return }
         commitLiveLook()   // the photo we're leaving keeps what was dialed on it
         selectedID = id
-        loadingSelection = true
-        bloom = item.look ?? runningLook
+        if !sameLookForAll {
+            // The selected photo's own look becomes the live bench + 100% anchor.
+            loadAsAnchor(item.look ?? runningLook)
+        }
         sdrURL = item.sdrURL
-        loadingSelection = false
-        // The selected photo's current look becomes the Intensity anchor (100%).
-        anchorLook = bloom
-        intensity = 1.0
         outputURL = item.outputURL
         readout = item.readout
         errorMessage = item.error
@@ -304,14 +376,20 @@ final class MergeModel: ObservableObject {
     // MARK: Saving (auto mode)
 
     /// Merge the selected photo, then advance to the next (save-as-you-go).
+    /// Guarded against reentry: a repeated ⌘S (or a save fired between batch
+    /// items) would otherwise interleave merges and can skip a photo unsaved.
     func saveSelectedAndAdvance() async {
-        guard let id = selectedID else { return }
+        guard phase != .merging, !isExportingAll, let id = selectedID else { return }
         await mergeItem(id)
         if hasNext { selectNext() }
     }
 
     /// True while an Export All batch is running (drives the Stop affordance).
     @Published private(set) var isExportingAll = false
+    /// Progress for the CURRENT batch run. `pendingCount` can't describe it
+    /// while SAME-LOOK is on (done items are targets too).
+    @Published private(set) var batchTotal = 0
+    @Published private(set) var batchDone = 0
     private var exportTask: Task<Void, Never>?
 
     /// Kick off Export All as a RETAINED task so the user can stop it — an
@@ -329,42 +407,72 @@ final class MergeModel: ObservableObject {
     /// Stop the batch after the in-flight photo (which also gets terminated).
     func stopExportAll() { exportTask?.cancel() }
 
-    /// Merge every not-yet-saved photo, in order. Checks for cancellation
-    /// between photos so Stop takes effect promptly.
+    /// Merge the batch, in order. SAME-LOOK on: every photo, all with the shared
+    /// look; off: not-yet-saved photos with their own looks. Look AND targets are
+    /// snapshotted before the first await so slider edits or queue mutations
+    /// mid-batch can't split the export. Checks for cancellation between photos.
     func exportAll() async {
         commitLiveLook()
-        for id in items.filter({ $0.status != .done }).map(\.id) {
+        let batchLook: AutoHDR.BloomParams? = sameLookForAll ? bloom : nil
+        let targets = sameLookForAll
+            ? items.map(\.id)
+            : items.filter { $0.status != .done }.map(\.id)
+        batchTotal = targets.count
+        batchDone = 0
+        defer { batchTotal = 0; batchDone = 0 }
+        for id in targets {
             if Task.isCancelled { break }
-            await mergeItem(id)
+            await mergeItem(id, look: batchLook)
+            batchDone += 1
         }
     }
 
-    /// Synthesize + merge a single queue item, writing beside its original.
-    func mergeItem(_ id: UUID) async {
-        if id == selectedID { commitLiveLook() }   // merge what's on screen
+    /// Synthesize + merge a single queue item. The finished file lands beside the
+    /// original ATOMICALLY: the tool writes to a hidden temp URL and only a
+    /// successful run replaces `<base>_UltraHDR.jpg` — so stopping or failing a
+    /// RE-export can never destroy the previous good export.
+    /// `look:` overrides the per-item look (batch snapshot); nil = resolve here.
+    func mergeItem(_ id: UUID, look overrideLook: AutoHDR.BloomParams? = nil) async {
+        if id == selectedID { commitLiveLook() }   // merge what's on screen (no-op while SAME-LOOK)
         guard let item = items.first(where: { $0.id == id }) else { return }
-        let look = item.look ?? runningLook
+        let look = overrideLook ?? (sameLookForAll ? bloom : (item.look ?? runningLook))
         let sdr = item.sdrURL
-        let out = UHDRRunner.defaultOutputURL(forSDR: sdr)
+        let finalOut = UHDRRunner.defaultOutputURL(forSDR: sdr)
+        let tempOut = finalOut.deletingLastPathComponent()
+            .appendingPathComponent(".gm-partial-\(UUID().uuidString).jpg")
+        let prior = item   // for restore if this run is stopped
 
         setStatus(.merging, for: id)
         phase = .merging
-        let outcome = await runMerge(sdr: sdr, look: look, out: out)
+        let outcome = await runMerge(sdr: sdr, look: look, out: tempOut)
         phase = .idle
 
-        guard let idx = items.firstIndex(where: { $0.id == id }) else { return }
+        guard let idx = items.firstIndex(where: { $0.id == id }) else {
+            try? FileManager.default.removeItem(at: tempOut)
+            return
+        }
         switch outcome {
-        case .success(let output, let readout):
-            items[idx].status = .done
-            items[idx].outputURL = output
-            items[idx].readout = readout
-            items[idx].error = nil
-        case .failure(let message):
-            if Task.isCancelled {
-                // Stopped, not failed: back to pending; drop the partial write.
-                items[idx].status = .pending
+        case .success(_, let readout):
+            do {
+                try Self.atomicallyPlace(tempOut, at: finalOut)
+                items[idx].status = .done
+                items[idx].outputURL = finalOut
+                items[idx].readout = readout
                 items[idx].error = nil
-                try? FileManager.default.removeItem(at: out)
+            } catch {
+                try? FileManager.default.removeItem(at: tempOut)
+                items[idx].status = .error
+                items[idx].error = "Couldn't move the finished file into place: \(error.localizedDescription)"
+            }
+        case .failure(let message):
+            try? FileManager.default.removeItem(at: tempOut)
+            if Task.isCancelled {
+                // Stopped, not failed: restore exactly what this photo was
+                // before the run (a re-exported .done keeps its saved file).
+                items[idx].status = prior.status == .merging ? .pending : prior.status
+                items[idx].outputURL = prior.outputURL
+                items[idx].readout = prior.readout
+                items[idx].error = prior.error
             } else {
                 items[idx].status = .error
                 items[idx].error = message
@@ -375,6 +483,16 @@ final class MergeModel: ObservableObject {
             outputURL = updated.outputURL
             readout = updated.readout
             errorMessage = updated.error
+        }
+    }
+
+    /// Move `temp` into `final`'s place: atomic replace when a previous export
+    /// exists, plain move when it doesn't.
+    private static func atomicallyPlace(_ temp: URL, at final: URL) throws {
+        if FileManager.default.fileExists(atPath: final.path) {
+            _ = try FileManager.default.replaceItemAt(final, withItemAt: temp)
+        } else {
+            try FileManager.default.moveItem(at: temp, to: final)
         }
     }
 
