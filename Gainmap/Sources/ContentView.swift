@@ -833,7 +833,7 @@ private struct GlowInSDRModal: View {
 
                 VStack(alignment: .leading, spacing: 11) {
                     Text("“SDR” is the standard, non-HDR copy tucked inside every export — what thumbnails, social apps, and any screen that ignores the gain map fall back to.")
-                    Text("Turning this on bakes the soft glow into that copy, so your look carries to those places too. The trade-off: the non-HDR copy reads brighter, and bright areas can look blown out. That's expected — not a bug.")
+                    Text("Turning this on layers just the soft haze into that copy, so the glow carries to those places too. Your edit's tones stay exactly as exported — only the haze is added, and it fades out near white, so highlights can't blow out.")
                     (Text("Leaving it off ").foregroundStyle(Theme.stone)
                      + Text("(recommended)").foregroundStyle(Theme.gold)
                      + Text(" keeps that copy identical to your original; the glow then shows only on HDR displays.").foregroundStyle(Theme.stone))

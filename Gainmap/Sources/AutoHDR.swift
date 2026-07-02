@@ -57,15 +57,22 @@ enum AutoHDR {
     }
     """)!
 
-    /// Folds an extended-range (>1) bloom into [0,1] for the SDR primary: IDENTITY
-    /// below `knee` so the soft glow passes through UNCHANGED (→ gain ≈ 1 there, so
-    /// it shows identically on SDR and HDR), then a Reinhard shoulder on the excess
-    /// so highlights compress into [knee,1] instead of hard-clipping to white.
-    static let sdrShoulderKernel = CIColorKernel(source: """
-    kernel vec4 sdrShoulder(__sample s, float knee) {
-        vec3 x = max(s.rgb, vec3(0.0));
-        vec3 e = max(x - vec3(knee), vec3(0.0));
-        vec3 o = min(x, vec3(knee)) + (1.0 - knee) * (e / (e + vec3(1.0 - knee)));
+    /// GLOW-IN-SDR bake: the ORIGINAL base with ONLY the soft haze screen-blended
+    /// in — `out = base + haze·(1−base)` — so the fallback keeps the edit's exact
+    /// tonality (no headroom lift, no peak expansion, no shoulder) and the blend
+    /// mathematically can't clip: the haze fades out as the base nears white.
+    /// (The previous bake tone-mapped the FULL HDR rendition into [0,1], dragging
+    /// the 1.5× highlight lift along — which read as overexposed, over-contrasty
+    /// highlights on every non-HDR screen.)
+    static let sdrGlowBakeKernel = CIColorKernel(source: """
+    kernel vec4 gmSdrGlowBake(__sample soft, __sample base, float amount, float saturation, float tint) {
+        vec3 g = max(soft.rgb, vec3(0.0));
+        float l = dot(g, vec3(0.2126, 0.7152, 0.0722));
+        g = mix(vec3(l), g, saturation);
+        g *= vec3(1.0 + 0.18 * tint, 1.0 + 0.05 * tint, 1.0 - 0.18 * tint);
+        vec3 haze = clamp(g * amount, 0.0, 1.0);
+        vec3 b = clamp(base.rgb, 0.0, 1.0);
+        vec3 o = b + haze * (vec3(1.0) - b);   // screen blend: haze only, never clips
         return vec4(o, 1.0);
     }
     """)!
@@ -194,11 +201,10 @@ enum AutoHDR {
         return out
     }
 
-    /// The bloom-as-HDR rendition as a linear, extended-range CIImage. SHARED by
-    /// the export (rendered to the f16 buffer / gain map) and the live EDR preview
-    /// so the two are guaranteed identical. `base` is the sRGB source; spread scales
-    /// with its width.
-    static func bloomCIImage(base: CIImage, params p: BloomParams) -> CIImage? {
+    /// The shared highlight-extraction pipeline: the linear base, the sharp
+    /// thresholded/falloff-shaped highlights, and their blurred soft haze.
+    private static func bloomPieces(base: CIImage, params p: BloomParams)
+        -> (lin: CIImage, hi: CIImage, soft: CIImage)? {
         let bounds = base.extent
         // The base is sampled into the extendedLinearSRGB working space, so Core
         // Image already linearizes it (sRGB→linear) for us. An explicit
@@ -220,18 +226,38 @@ enum AutoHDR {
         let shaped = CIFilter.gammaAdjust()       // Falloff
         shaped.inputImage = clamp.outputImage
         shaped.power = Float(p.falloff)
-        let hi = shaped.outputImage?.cropped(to: bounds)
+        guard let hi = shaped.outputImage?.cropped(to: bounds) else { return nil }
 
         let blur = CIFilter.gaussianBlur()         // Spread (soft glow)
         blur.inputImage = hi
         blur.radius = Float(bounds.width * p.spread)
-        let soft = blur.outputImage?.cropped(to: bounds)
+        guard let soft = blur.outputImage?.cropped(to: bounds) else { return nil }
+        return (lin, hi, soft)
+    }
 
-        guard let hiImg = hi, let softImg = soft else { return nil }
+    /// The bloom-as-HDR rendition as a linear, extended-range CIImage. SHARED by
+    /// the export (rendered to the f16 buffer / gain map) and the live EDR preview
+    /// so the two are guaranteed identical. `base` is the sRGB source; spread scales
+    /// with its width.
+    static func bloomCIImage(base: CIImage, params p: BloomParams) -> CIImage? {
+        guard let pieces = bloomPieces(base: base, params: p) else { return nil }
         return combineKernel.apply(
-            extent: bounds,
-            arguments: [softImg, hiImg, lin, p.punch, p.glow, p.peak, p.saturation, p.tint, p.headroom]
-        )?.cropped(to: bounds)
+            extent: base.extent,
+            arguments: [pieces.soft, pieces.hi, pieces.lin, p.punch, p.glow, p.peak, p.saturation, p.tint, p.headroom]
+        )?.cropped(to: base.extent)
+    }
+
+    /// The bake-on SDR primary: the untouched edit + only the soft haze. Uses the
+    /// SAME extraction (threshold/falloff/spread/saturation/tint/glow) as the HDR
+    /// rendition, so the haze matches what HDR screens see — minus punch (the
+    /// sharp component brightens the highlights themselves, which is exactly the
+    /// overexposed look the bake must avoid) and minus headroom/peak.
+    static func sdrWithBakedGlow(base: CIImage, params p: BloomParams) -> CIImage? {
+        guard let pieces = bloomPieces(base: base, params: p) else { return nil }
+        return sdrGlowBakeKernel.apply(
+            extent: base.extent,
+            arguments: [pieces.soft, pieces.lin, p.glow, p.saturation, p.tint]
+        )?.cropped(to: base.extent)
     }
 
     /// Build the bloom-as-HDR rendition and render it to the engine's RGBA f16 buffer.
@@ -258,12 +284,12 @@ enum AutoHDR {
         return RawBuffer(url: url, width: w, height: h)
     }
 
-    /// The two inputs uhdrtool needs for the HYBRID gain map: a full-range HDR
-    /// rendition AND a bloomed SDR primary (the same bloom tone-mapped into 0…1).
-    /// Encoding gain = fullBloom / bloomedSDR puts the soft (sub-white) glow into
-    /// the SDR base — so it shows on ANY display/headroom — and leaves only the
-    /// supra-white highlight pop in the gain map. The SDR fallback is therefore the
-    /// bloomed look, NOT pixel-identical to the input (that's the trade-off).
+    /// The two inputs uhdrtool needs for the bake-on gain map: the full-range HDR
+    /// rendition AND an SDR primary that is the ORIGINAL edit plus only the soft
+    /// haze (screen-blended, `sdrGlowBakeKernel`). Encoding gain = fullHDR / that
+    /// SDR puts the haze on every screen while the highlight lift/pop stays in
+    /// the gain map for HDR displays. The fallback keeps the edit's tonality; it
+    /// is NOT pixel-identical to the input only where the haze lands.
     struct UltraHDRInputs { let hdr: RawBuffer; let sdrJPEG: URL }
 
     static func synthesizeInputs(from sdrURL: URL, params p: BloomParams, gamut: Gamut = .rec709) throws -> UltraHDRInputs {
@@ -284,15 +310,14 @@ enum AutoHDR {
             .appendingPathComponent("gainmap-\(UUID().uuidString).rawf16")
         try data.write(to: hdrURL)
 
-        // Bloomed SDR primary: the bloom folded into [0,1] with a soft highlight
-        // shoulder (identity below the knee so the glow passes through unchanged;
-        // highlights roll off instead of hard-clipping ~42% of a bright frame to
-        // flat white). Written as a gamma JPEG in the SOURCE's gamut, then
+        // SDR primary: the original edit + only the soft haze (screen blend — no
+        // headroom lift, no peak, no shoulder), so the fallback's tonality stays
+        // exactly as exported. Written as a gamma JPEG in the SOURCE's gamut, then
         // re-wrapped with the source photo's metadata (orientation, EXIF/IPTC/
         // TIFF/GPS) — AddImageFromSource copies the compressed bitstream, so the
         // metadata attach is lossless.
-        guard let sdrImg = sdrShoulderKernel.apply(extent: bounds, arguments: [hdr, 0.85])?
-            .cropped(to: bounds) else { throw SynthError.context }
+        guard let sdrImg = sdrWithBakedGlow(base: CIImage(cgImage: cg), params: p)
+        else { throw SynthError.context }
         let sdrURLout = FileManager.default.temporaryDirectory
             .appendingPathComponent("gainmap-sdr-\(UUID().uuidString).jpg")
         let q = CIImageRepresentationOption(rawValue: kCGImageDestinationLossyCompressionQuality as String)
