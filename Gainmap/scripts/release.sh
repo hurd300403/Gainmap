@@ -117,7 +117,11 @@ fi
 echo "▸ generating Sparkle appcast…"
 GEN_APPCAST="$(find "$HOME/Library/Developer/Xcode/DerivedData" -path '*sparkle/Sparkle/bin/generate_appcast' 2>/dev/null | head -1)"
 VER="$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$APP/Contents/Info.plist")"
-TAG="v$VER"
+BUILDNUM="$(/usr/libexec/PlistBuddy -c 'Print CFBundleVersion' "$APP/Contents/Info.plist")"
+# Tag includes the build number so two builds of one marketing version can't
+# collide on the same tag (the `gh release upload --clobber` fallback used to
+# silently mask that).
+TAG="v$VER-b$BUILDNUM"
 # Enclosure URLs resolve to the *latest* release's assets (stable feed).
 "$GEN_APPCAST" --download-url-prefix "https://github.com/hurd300403/Gainmap/releases/latest/download/" "$DIST"
 

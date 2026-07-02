@@ -2,10 +2,9 @@
 //  ContentView.swift
 //  Gainmap
 //
-//  The single Gainmap window. Mirrors mockups/gainmap.html: a warm-dark bench
-//  with two input plates fusing through the aperture, a merge action, a
-//  collapsible export-settings panel, and a result card with the instrument
-//  readout. Translation of the HTML spec 1:1.
+//  The single Gainmap window: a warm-dark bench with the pinned EDR preview on
+//  the left and the filmstrip + HDR-look controls on the right. Drop SDR JPEGs,
+//  tune the glow per photo, save UltraHDR copies beside the originals.
 //
 
 import SwiftUI
@@ -14,17 +13,18 @@ import UniformTypeIdentifiers
 
 struct ContentView: View {
     @StateObject private var model = MergeModel()
-    @State private var showSettings = false
     @State private var showAdvancedLook = false
     // Which advanced groups are expanded. All open by default so nothing is hidden
     // on first look; the grouping (not the collapse) is what tames the complexity.
-    @State private var expandedGroups: Set<String> = ["glow", "color", "hdr", "auto"]
+    @State private var expandedGroups: Set<String> = ["glow", "color", "hdr"]
     @State private var window: NSWindow?
     @State private var shareHover = false
     @State private var showShareModal = false
     // Confirm + explain before baking the glow into the SDR base (it makes the
     // non-HDR/fallback version look brighter/blown, which surprises people).
     @State private var showGlowInSDRInfo = false
+    // Auto-dismiss timer for the skipped-files drop notice.
+    @State private var dropNoticeTask: Task<Void, Never>?
 
     // The Patreon post where the app can be downloaded — shown in the share modal
     // so patrons can copy/pass the link along. TODO: confirm exact download-post URL.
@@ -50,7 +50,7 @@ struct ContentView: View {
                 HStack(alignment: .top, spacing: 22) {
                     VStack(spacing: 10) {
                         HDRPreviewPane(sdrURL: model.sdrURL, params: model.bloom,
-                                       cgamut: model.cgamut, sgamut: model.sgamut, bake: model.bloom.bakeGlowIntoSDR,
+                                       bake: model.bloom.bakeGlowIntoSDR,
                                        expanded: true,
                                        onRequestAdd: model.items.isEmpty ? { addPhotos() } : nil)
                         Text(model.items.isEmpty ? "click the preview or drop SDR JPEGs anywhere to begin"
@@ -62,8 +62,14 @@ struct ContentView: View {
                     ScrollView(.vertical, showsIndicators: false) {
                         VStack(spacing: 0) {
                             BatchFilmstrip(model: model)
-                            bloomControls.padding(.top, 14)
-                            if !model.items.isEmpty { autoResultStrip }
+                            // Before any photo exists the look controls are inert —
+                            // show how to produce the input file instead.
+                            if model.items.isEmpty {
+                                firstRunHowto.padding(.top, 14)
+                            } else {
+                                bloomControls.padding(.top, 14)
+                                autoResultStrip
+                            }
                             footer.padding(.top, 24)
                         }
                         .padding(.bottom, 10)
@@ -103,6 +109,29 @@ struct ContentView: View {
                 .transition(.opacity)
                 .zIndex(10)
             }
+
+            // Transient toast when dropped files were skipped — a rejected drop
+            // must never be a silent no-op.
+            if let notice = model.dropNotice {
+                VStack {
+                    Spacer()
+                    NoticeBanner(message: notice)
+                        .frame(maxWidth: 480)
+                        .padding(.bottom, 110)   // clear the pinned action bar
+                }
+                .transition(.opacity)
+                .zIndex(9)
+            }
+        }
+        .animation(.easeOut(duration: 0.2), value: model.dropNotice)
+        .onChange(of: model.dropNotice) { _, notice in
+            dropNoticeTask?.cancel()
+            guard notice != nil else { return }
+            dropNoticeTask = Task {
+                try? await Task.sleep(for: .seconds(5))
+                guard !Task.isCancelled else { return }
+                model.dropNotice = nil
+            }
         }
         .frame(minWidth: 900, minHeight: 620)
         .background(WindowAccessor { window = $0 })
@@ -111,7 +140,7 @@ struct ContentView: View {
         // Resize the window to the FIRST imported photo's aspect (auto mode) so the
         // preview fills with no letterbox bars. Doesn't re-resize as you navigate.
         .onChange(of: model.items.isEmpty) { wasEmpty, isEmpty in
-            guard wasEmpty, !isEmpty, model.mode == .auto,
+            guard wasEmpty, !isEmpty,
                   let url = model.items.first?.sdrURL,
                   let size = ImageInfo.pixelSize(of: url), size.height > 0 else { return }
             sizeWindowToAspect(size.width / size.height)
@@ -148,12 +177,15 @@ struct ContentView: View {
     }
 
     private func handleWindowDrop(_ providers: [NSItemProvider]) -> Bool {
-        guard model.mode == .auto else { return false }
         var urls = [URL?](repeating: nil, count: providers.count)
+        let lock = NSLock()   // loadObject callbacks land on arbitrary threads
         let group = DispatchGroup()
         for (i, p) in providers.enumerated() {
             group.enter()
-            _ = p.loadObject(ofClass: URL.self) { u, _ in urls[i] = u; group.leave() }
+            _ = p.loadObject(ofClass: URL.self) { u, _ in
+                lock.lock(); urls[i] = u; lock.unlock()
+                group.leave()
+            }
         }
         group.notify(queue: .main) { model.addFiles(urls.compactMap { $0 }) }
         return true
@@ -171,7 +203,7 @@ struct ContentView: View {
                 (Text("Gain").foregroundStyle(Color.white)
                  + Text("map").foregroundStyle(Theme.accent))
                     .font(Theme.display(30, .semibold))
-                Text("Fuse an SDR + HDR edit into one UltraHDR JPEG — clean highlights everywhere.")
+                Text("Turn your SDR JPEG into an UltraHDR that glows on HDR screens — clean fallback everywhere else.")
                     .font(Theme.ui(12.5))
                     .foregroundStyle(Theme.stoneDim)
             }
@@ -183,23 +215,12 @@ struct ContentView: View {
 
     // MARK: Bench (idle / error / merging)
 
-    // NOTE: the Auto/Advanced mode picker is hidden for now — the app runs the
-    // one-photo (Auto) flow only. The two-file (Advanced) views below are kept
-    // intact so the mode can be re-enabled later without rebuilding them.
-
-    // Advanced = HDR TIFF + SDR JPEG, one shot.
-    private var advancedSection: some View {
-        VStack(spacing: 0) {
-            if model.phase == .error, let msg = model.errorMessage {
-                ErrorBanner(message: msg).padding(.bottom, 16)
-            }
-            advancedBench
-            mergeAction.padding(.top, 24)
-        }
-    }
-
     @ViewBuilder private var autoResultStrip: some View {
         if let sel = model.selectedItem {
+            if sel.looksMerged, sel.status != .done {
+                NoticeBanner(message: "This photo already looks like an UltraHDR export — merging it again doubles the glow.")
+                    .padding(.top, 16)
+            }
             if sel.status == .done {
                 savedStrip(sel).padding(.top, 16)
             } else if sel.status == .error, let e = sel.error {
@@ -213,7 +234,7 @@ struct ContentView: View {
     /// The Save/Prev/Next bar, pinned to the bottom of the window (auto mode) so
     /// the slider stack can never push it off-screen.
     @ViewBuilder private var pinnedActionBar: some View {
-        if model.mode == .auto, !model.items.isEmpty {
+        if !model.items.isEmpty {
             queueBar
                 .padding(.horizontal, 38)
                 .padding(.top, 12)
@@ -228,6 +249,7 @@ struct ContentView: View {
             HStack(spacing: 12) {
                 stepButton(system: "chevron.left", label: "Prev",
                            enabled: model.hasPrevious) { model.selectPrevious() }
+                    .keyboardShortcut(.leftArrow, modifiers: .command)
 
                 Button(action: { Task { await model.saveSelectedAndAdvance() } }) {
                     HStack(spacing: 10) {
@@ -251,9 +273,12 @@ struct ContentView: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(!model.canSaveSelected)
+                .keyboardShortcut("s", modifiers: .command)
+                .help("Merge this photo and move to the next (⌘S)")
 
                 stepButton(system: "chevron.right", label: "Next",
                            enabled: model.hasNext) { model.selectNext() }
+                    .keyboardShortcut(.rightArrow, modifiers: .command)
 
                 if model.selectedItem?.status == .done {
                     stepButton(system: "magnifyingglass", label: "Finder",
@@ -275,13 +300,27 @@ struct ContentView: View {
                         .font(Theme.mono(11, .semibold)).foregroundStyle(Theme.stone)
                         .help("Apply the copied look to every photo in the queue")
                 }
-                Button(action: { Task { await model.exportAll() } }) {
-                    Text(model.pendingCount > 0 ? "Export all · \(model.pendingCount) left" : "All saved ✓")
+                if model.isExportingAll {
+                    Button(action: { model.stopExportAll() }) {
+                        HStack(spacing: 5) {
+                            Image(systemName: "stop.fill").font(.system(size: 8))
+                            Text("Stop · \(model.pendingCount) left")
+                        }
                         .font(Theme.mono(11, .semibold))
-                        .foregroundStyle(model.canExportAll ? Theme.accentHot : Theme.stoneDim)
+                        .foregroundStyle(Theme.accentHot)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Stop after the photo currently merging")
+                } else {
+                    Button(action: { model.startExportAll() }) {
+                        Text(model.pendingCount > 0 ? "Export all · \(model.pendingCount) left" : "All saved ✓")
+                            .font(Theme.mono(11, .semibold))
+                            .foregroundStyle(model.canExportAll ? Theme.accentHot : Theme.stoneDim)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!model.canExportAll)
+                    .help("Merge every photo that hasn't been saved yet")
                 }
-                .buttonStyle(.plain)
-                .disabled(!model.canExportAll)
             }
         }
     }
@@ -319,11 +358,14 @@ struct ContentView: View {
             Image(systemName: "checkmark.seal.fill")
                 .font(.system(size: 17)).foregroundStyle(Theme.gold)
             VStack(alignment: .leading, spacing: 2) {
-                Text("Saved beside the original")
+                Text("Saved beside the original · Re-save replaces it")
                     .font(Theme.ui(11.5, .medium)).foregroundStyle(.white)
                 Text(item.outputURL?.lastPathComponent ?? "—")
                     .font(Theme.mono(9.5)).foregroundStyle(Theme.stoneDim)
                     .lineLimit(1).truncationMode(.middle)
+                Text("Glows on HDR screens & apps (Photos, iOS, Android 14+); everywhere else shows the clean SDR.")
+                    .font(Theme.ui(9.5)).foregroundStyle(Theme.stoneDim)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 8)
             if let r = item.readout {
@@ -347,17 +389,27 @@ struct ContentView: View {
         }
     }
 
-    private var advancedBench: some View {
-        HStack(spacing: 10) {
-            DropWell(role: .hdr, url: model.hdrURL) { model.accept($0) }
-            ApertureIris(spinning: model.phase == .merging).frame(width: 74, height: 74)
-            DropWell(role: .sdr, url: model.sdrURL) { model.accept($0) }
-        }
-    }
-
     // Binding that drives the whole look from one 0…1 intensity.
     private var intensityBinding: Binding<Double> {
         Binding(get: { model.intensity }, set: { model.setIntensity($0) })
+    }
+
+    /// Empty-queue guidance: how to export the right JPEG from Lightroom.
+    /// (The old how-to lived in the hidden two-file settings panel, so new users
+    /// had NO reachable instructions.)
+    private var firstRunHowto: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("GETTING STARTED")
+                .font(Theme.mono(10, .semibold)).tracking(1)
+                .foregroundStyle(Theme.goldDeep)
+            howtoRow("Export your finished edit from Lightroom as a JPEG — sRGB or Display P3, quality 90+, full size")
+            howtoRow("Drop it anywhere in this window, or click the preview to browse — batches welcome")
+            howtoRow("Gainmap builds the HDR glow from the JPEG's own highlights and saves an UltraHDR copy beside the original")
+        }
+        .padding(15)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.inset, in: RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Theme.line, lineWidth: 1))
     }
 
     private var bloomControls: some View {
@@ -377,7 +429,7 @@ struct ContentView: View {
                     .help("Paste the copied look onto this photo")
                 Button("Reset") { model.resetToDefault() }
                     .buttonStyle(.plain)
-                    .font(Theme.mono(10, .semibold)).foregroundStyle(Theme.accentHot)
+                    .font(Theme.mono(10, .semibold)).foregroundStyle(Theme.stone)
                     .help("Snap this photo back to your default look (set it under Advanced controls ▸ Save as default).")
             }
 
@@ -386,6 +438,27 @@ struct ContentView: View {
             sliderRow("INTENSITY", intensityBinding, 0...1, fmt: "%.0f%%", "subtle", "full", scale: 100,
                       resetTo: 1.0,
                       help: "Overall strength of the HDR pop. Slide down for a subtle effect, up for full punch — it blends all the Advanced settings at once.")
+
+            // Teaser for the headline per-photo option, otherwise buried three
+            // levels deep (Advanced ▸ HDR & Screens ▸ toggle).
+            Button {
+                withAnimation(.easeOut(duration: 0.22)) {
+                    showAdvancedLook = true
+                    expandedGroups.insert("hdr")
+                }
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: model.bloom.bakeGlowIntoSDR ? "sun.max.fill" : "sun.max")
+                        .font(.system(size: 9))
+                    Text(model.bloom.bakeGlowIntoSDR ? "Glow in SDR is ON for this photo"
+                                                     : "Want the glow on non-HDR screens too?")
+                        .font(Theme.mono(9.5))
+                }
+                .foregroundStyle(model.bloom.bakeGlowIntoSDR ? Theme.gold : Theme.stoneDim)
+            }
+            .buttonStyle(.plain)
+            .help("Opens Advanced controls ▸ HDR & Screens, where GLOW IN SDR lives")
+            .frame(maxWidth: .infinity, alignment: .leading)
 
             Divider().overlay(Theme.line)
             Button(action: { withAnimation(.easeOut(duration: 0.22)) { showAdvancedLook.toggle() } }) {
@@ -509,7 +582,7 @@ struct ContentView: View {
                     if let d = resetTo { value.wrappedValue = d }
                 }
                 HStack { Text(left); Spacer(); Text(right) }
-                    .font(Theme.mono(8.5)).foregroundStyle(Theme.stoneFaint)
+                    .font(Theme.mono(9.5)).foregroundStyle(Theme.stoneFaint)
             }
             Text(String(format: fmt, value.wrappedValue * scale))
                 .font(Theme.mono(11)).foregroundStyle(Theme.gold)
@@ -566,104 +639,6 @@ struct ContentView: View {
                     .padding(.bottom, 10)
             }
         }
-        .background(Theme.inset, in: RoundedRectangle(cornerRadius: 10))
-        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Theme.line, lineWidth: 1))
-    }
-
-    private var mergeAction: some View {
-        VStack(spacing: 14) {
-            Button(action: { Task { await model.mergeAdvanced() } }) {
-                HStack(spacing: 11) {
-                    if model.phase == .merging {
-                        ProgressView().controlSize(.small).tint(.white)
-                    } else {
-                        Image(systemName: "sun.max.fill")
-                    }
-                    Text(model.phase == .merging ? "Merging…" : "Merge to UltraHDR")
-                        .font(Theme.ui(15, .semibold))
-                }
-                .foregroundStyle(.white)
-                .padding(.vertical, 15).padding(.horizontal, 38)
-                .background(
-                    Capsule().fill(LinearGradient(
-                        colors: model.canMergeAdvanced ? [Theme.accentHot, Theme.accent]
-                                                       : [Theme.surfaceHi, Theme.surface],
-                        startPoint: .top, endPoint: .bottom)))
-                .overlay(Capsule().stroke(Theme.accent.opacity(model.canMergeAdvanced ? 0.4 : 0), lineWidth: 1))
-                .shadow(color: Theme.accent.opacity(model.canMergeAdvanced ? 0.5 : 0), radius: 18, y: 8)
-            }
-            .buttonStyle(.plain)
-            .disabled(!model.canMergeAdvanced)
-
-            HStack(spacing: 8) {
-                Circle().fill(Theme.goldDeep).frame(width: 5, height: 5)
-                    .shadow(color: Theme.goldDeep, radius: 4)
-                Text("99.9th-pct peak · K=1.05 margin · ISO 21496-1 gain map")
-            }
-            .font(Theme.mono(11))
-            .foregroundStyle(Theme.stoneDim)
-        }
-    }
-
-    // MARK: Export settings (disclosure)
-
-    private var settingsPanel: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            Divider().overlay(Theme.line)
-            Button(action: { withAnimation(.easeOut(duration: 0.28)) { showSettings.toggle() } }) {
-                HStack(spacing: 9) {
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 10, weight: .bold))
-                        .rotationEffect(.degrees(showSettings ? 90 : 0))
-                    Text("Export settings & Lightroom how-to")
-                        .font(Theme.ui(12, .semibold)).tracking(1)
-                        .textCase(.uppercase)
-                }
-                .foregroundStyle(Theme.stoneDim)
-            }
-            .buttonStyle(.plain)
-            .padding(.top, 18)
-
-            if showSettings {
-                HStack(alignment: .top, spacing: 22) {
-                    gamutField("HDR color gamut", flag: "--cgamut",
-                               selection: $model.cgamut, label: \.hdrLabel,
-                               recommended: "Rec.709 (recommended)")
-                    gamutField("SDR color gamut", flag: "--sgamut",
-                               selection: $model.sgamut, label: \.sdrLabel,
-                               recommended: "sRGB (recommended)")
-                }
-                .padding(.top, 18)
-                howto.padding(.top, 18)
-            }
-        }
-    }
-
-    private func gamutField(_ title: String, flag: String,
-                            selection: Binding<Gamut>,
-                            label: KeyPath<Gamut, String>,
-                            recommended: String) -> some View {
-        VStack(alignment: .leading, spacing: 7) {
-            HStack(spacing: 6) {
-                Text(title).font(Theme.ui(11)).foregroundStyle(Theme.stoneDim)
-                Text(flag).font(Theme.mono(10)).foregroundStyle(Theme.stoneFaint)
-            }
-            GamutSegments(selection: selection, label: label)
-            Text(recommended).font(Theme.mono(9.5)).foregroundStyle(Theme.goldDeep)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private var howto: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("EXPORTING FROM LIGHTROOM CLASSIC")
-                .font(Theme.mono(10, .semibold)).tracking(1)
-                .foregroundStyle(Theme.goldDeep)
-            howtoRow("HDR copy → TIFF · 32-bit float · HDR display on · Maximize Compatibility OFF · no compression")
-            howtoRow("SDR base → JPEG · sRGB · quality ~92 · same resolution as the TIFF")
-        }
-        .padding(15)
-        .frame(maxWidth: .infinity, alignment: .leading)
         .background(Theme.inset, in: RoundedRectangle(cornerRadius: 10))
         .overlay(RoundedRectangle(cornerRadius: 10).stroke(Theme.line, lineWidth: 1))
     }
@@ -783,7 +758,7 @@ private struct ShareModal: View {
                     .font(Theme.mono(17, .semibold)).foregroundStyle(.white)
 
                 Text("Gainmap is free for my Patreon community. If it's useful to you, passing the download link along is the kindest thanks — and a great way to support the work that keeps it free. ❤️")
-                    .font(Theme.mono(11.5)).foregroundStyle(Theme.stone)
+                    .font(Theme.ui(12.5)).foregroundStyle(Theme.stone)
                     .lineSpacing(3.5)
                     .fixedSize(horizontal: false, vertical: true)
 
@@ -863,7 +838,7 @@ private struct GlowInSDRModal: View {
                      + Text("(recommended)").foregroundStyle(Theme.gold)
                      + Text(" keeps that copy identical to your original; the glow then shows only on HDR displays.").foregroundStyle(Theme.stone))
                 }
-                .font(Theme.mono(11.5)).foregroundStyle(Theme.stone)
+                .font(Theme.ui(12.5)).foregroundStyle(Theme.stone)
                 .lineSpacing(3.5)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -938,31 +913,20 @@ struct InfoButton: View {
     }
 }
 
-// MARK: - Segmented gamut control
+// MARK: - Notice banner (transient / advisory, non-error)
 
-struct GamutSegments: View {
-    @Binding var selection: Gamut
-    let label: KeyPath<Gamut, String>
-
+struct NoticeBanner: View {
+    let message: String
     var body: some View {
-        HStack(spacing: 0) {
-            ForEach(Gamut.allCases) { g in
-                let on = g == selection
-                Button(action: { selection = g }) {
-                    Text(g[keyPath: label])
-                        .font(Theme.ui(11.5, .medium))
-                        .foregroundStyle(on ? .white : Theme.stoneDim)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 7)
-                        .background(on ? Theme.surfaceHi : .clear,
-                                    in: RoundedRectangle(cornerRadius: 6))
-                }
-                .buttonStyle(.plain)
-            }
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "info.circle.fill").foregroundStyle(Theme.gold)
+            Text(message).font(Theme.ui(12)).foregroundStyle(.white)
+                .fixedSize(horizontal: false, vertical: true)
         }
-        .padding(3)
-        .background(Theme.inset, in: RoundedRectangle(cornerRadius: 9))
-        .overlay(RoundedRectangle(cornerRadius: 9).stroke(Theme.line, lineWidth: 1))
+        .padding(.horizontal, 16).padding(.vertical, 12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.inset.opacity(0.97), in: RoundedRectangle(cornerRadius: 11))
+        .overlay(RoundedRectangle(cornerRadius: 11).stroke(Theme.gold.opacity(0.35), lineWidth: 1))
     }
 }
 
@@ -985,106 +949,6 @@ struct ErrorBanner: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Theme.accent.opacity(0.12), in: RoundedRectangle(cornerRadius: 11))
         .overlay(RoundedRectangle(cornerRadius: 11).stroke(Theme.accent.opacity(0.35), lineWidth: 1))
-    }
-}
-
-// MARK: - Result card
-
-struct ResultCard: View {
-    @ObservedObject var model: MergeModel
-    @State private var preview: CIImage?
-
-    var body: some View {
-        VStack(spacing: 18) {
-            VStack(spacing: 0) {
-                ZStack(alignment: .topTrailing) {
-                    Group {
-                        if let preview {
-                            // Render the exported gain-map file as true EDR (same
-                            // path as the live preview) so the result matches it —
-                            // a plain thumbnail would show only the flat SDR base.
-                            EDRMetalView(image: preview)
-                        } else {
-                            LinearGradient(stops: [
-                                .init(color: Color(hex: 0x3A2D22), location: 0),
-                                .init(color: Color(hex: 0x8A5A32), location: 0.38),
-                                .init(color: Theme.gold, location: 0.70),
-                                .init(color: Color(hex: 0xFFF6E6), location: 1.0),
-                            ], startPoint: .topLeading, endPoint: .bottomTrailing)
-                        }
-                    }
-                    .frame(height: 230).frame(maxWidth: .infinity).clipped()
-
-                    Text("HDR ✓")
-                        .font(Theme.mono(11, .semibold)).tracking(1.2)
-                        .foregroundStyle(Theme.inset)
-                        .padding(.horizontal, 11).padding(.vertical, 6)
-                        .background(LinearGradient(colors: [Color(hex: 0xF6E4C0), Theme.gold],
-                                                   startPoint: .top, endPoint: .bottom),
-                                    in: RoundedRectangle(cornerRadius: 7))
-                        .shadow(color: Theme.gold.opacity(0.5), radius: 10)
-                        .padding(14)
-                }
-                readoutBar
-            }
-            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 14).stroke(Theme.line, lineWidth: 1))
-            .shadow(color: .black.opacity(0.5), radius: 22, y: 12)
-
-            HStack(spacing: 12) {
-                Button("Merge another") { model.reset() }
-                    .buttonStyle(GMButton(kind: .ghost))
-                Button("Reveal in Finder") { reveal() }
-                    .buttonStyle(GMButton(kind: .primary))
-            }
-        }
-        .onAppear(perform: loadPreview)
-    }
-
-    private var readoutBar: some View {
-        HStack(spacing: 26) {
-            stat("Peak boost", value: model.readout.map { fmt($0.peakBoost) } ?? "—", unit: "×")
-            stat("Headroom", value: model.readout.map { fmt($0.stops) } ?? "—", unit: " stops")
-            stat("Target peak", value: model.readout.map { String($0.targetNits) } ?? "—", unit: " nits")
-            Spacer()
-            VStack(alignment: .trailing, spacing: 2) {
-                Text(model.outputURL?.lastPathComponent ?? "—")
-                    .font(Theme.ui(12.5, .medium)).foregroundStyle(.white)
-                    .lineLimit(1).truncationMode(.middle)
-                Text(model.outputURL?.deletingLastPathComponent().path ?? "")
-                    .font(Theme.mono(10.5)).foregroundStyle(Theme.stoneDim)
-                    .lineLimit(1).truncationMode(.head)
-            }
-        }
-        .padding(.horizontal, 20).padding(.vertical, 16)
-        .background(Theme.inset)
-    }
-
-    private func stat(_ key: String, value: String, unit: String) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(key.uppercased()).font(Theme.ui(10)).tracking(1)
-                .foregroundStyle(Theme.stoneDim)
-            (Text(value).foregroundStyle(Theme.gold)
-             + Text(unit).foregroundStyle(Theme.stoneDim).font(Theme.mono(11)))
-                .font(Theme.mono(16, .medium))
-        }
-    }
-
-    private func fmt(_ d: Double) -> String { String(format: "%.2f", d) }
-
-    private func reveal() {
-        guard let url = model.outputURL else { return }
-        NSWorkspace.shared.activateFileViewerSelecting([url])
-    }
-
-    private func loadPreview() {
-        guard let url = model.outputURL else { return }
-        Task.detached(priority: .userInitiated) {
-            // Decode applying the gain map so the result shows real HDR (EDR),
-            // matching the live preview — not the SDR fallback.
-            let img = CIImage(contentsOf: url, options: [.expandToHDR: true])
-            await MainActor.run { self.preview = img }
-        }
     }
 }
 

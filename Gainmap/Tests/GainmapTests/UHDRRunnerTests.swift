@@ -234,20 +234,9 @@ final class UHDRRunnerTests: XCTestCase {
 
     // MARK: Live preview responds to the slider
 
-    func testBloomPreviewBrightensWithStrength() {
-        // A black frame with a bright highlight patch.
-        let black = CIImage(color: .black).cropped(to: CGRect(x: 0, y: 0, width: 64, height: 64))
-        let patch = CIImage(color: CIColor(red: 0.95, green: 0.95, blue: 0.95))
-            .cropped(to: CGRect(x: 20, y: 20, width: 24, height: 24))
-        let base = patch.composited(over: black)
-
-        let low = mean(BloomPreview.bloom(base, strength: 1.5))
-        let high = mean(BloomPreview.bloom(base, strength: 3.5))
-        XCTAssertGreaterThan(high, low, "Stronger pop must make the preview visibly brighter")
-        XCTAssertGreaterThan(low, 0)
-    }
-
-    func testBloomPreviewRespondsToFullParams() {
+    /// The proxy preview IS AutoHDR.bloomCIImage (the exact graph the export
+    /// renders), so it must respond visibly to the look params.
+    func testProxyPreviewRespondsToParams() throws {
         let black = CIImage(color: .black).cropped(to: CGRect(x: 0, y: 0, width: 96, height: 96))
         let midHighlight = CIImage(color: CIColor(red: 0.72, green: 0.66, blue: 0.58))
             .cropped(to: CGRect(x: 20, y: 20, width: 56, height: 56))
@@ -262,9 +251,9 @@ final class UHDRRunnerTests: XCTestCase {
         visible.spread = 0.02
         visible.peak = 4.0
 
-        let low = mean(BloomPreview.bloom(base, params: subtle))
-        let high = mean(BloomPreview.bloom(base, params: visible))
-        XCTAssertGreaterThan(high, low + 0.01, "Full HDR-look params must visibly affect the SDR tuning preview")
+        let low = mean(try XCTUnwrap(AutoHDR.bloomCIImage(base: base, params: subtle)))
+        let high = mean(try XCTUnwrap(AutoHDR.bloomCIImage(base: base, params: visible)))
+        XCTAssertGreaterThan(high, low + 0.01, "look params must visibly affect the live preview")
     }
 
     /// Mean brightness of a CIImage via CIAreaAverage → 1×1 readback.
@@ -282,5 +271,38 @@ final class UHDRRunnerTests: XCTestCase {
                            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
         bm.draw(cg, in: CGRect(x: 0, y: 0, width: 1, height: 1))
         return (Double(px[0]) + Double(px[1]) + Double(px[2])) / 3 / 255
+    }
+}
+
+// MARK: - Queue intake (drop feedback + double-merge guard)
+
+final class QueueIntakeTests: XCTestCase {
+
+    func testMergedOutputNameDetected() {
+        XCTAssertTrue(UHDRRunner.nameLooksLikeMergedOutput(
+            URL(fileURLWithPath: "/tmp/wedding 042_UltraHDR.jpg")))
+        XCTAssertFalse(UHDRRunner.nameLooksLikeMergedOutput(
+            URL(fileURLWithPath: "/tmp/wedding 042.jpg")))
+        // The suffix must be at the END of the basename, not merely present.
+        XCTAssertFalse(UHDRRunner.nameLooksLikeMergedOutput(
+            URL(fileURLWithPath: "/tmp/x_UltraHDR_final.jpg")))
+    }
+
+    func testDropNoticeSilentWhenNothingSkipped() {
+        XCTAssertNil(MergeModel.dropNoticeText(tiffCount: 0, otherCount: 0))
+    }
+
+    func testDropNoticeExplainsSkippedTIFFs() {
+        let one = MergeModel.dropNoticeText(tiffCount: 1, otherCount: 0)
+        XCTAssertNotNil(one)
+        XCTAssertTrue(one!.contains("TIFF"))
+        let many = MergeModel.dropNoticeText(tiffCount: 3, otherCount: 0)
+        XCTAssertTrue(many!.contains("3"))
+    }
+
+    func testDropNoticeForOtherTypes() {
+        let out = MergeModel.dropNoticeText(tiffCount: 0, otherCount: 2)
+        XCTAssertNotNil(out)
+        XCTAssertTrue(out!.contains("JPEG"))
     }
 }

@@ -4,7 +4,7 @@
 //
 //  The Legacy Lab flask + camera-aperture emblem, ported from the canonical
 //  brand SVG into SwiftUI. `GainmapEmblem` is the header/icon mark (rings +
-//  flask + Gainmap's HDR-luminance liquid + aperture swirl). `ApertureIris` is
+//  flask + Gainmap's HDR-luminance liquid + aperture swirl).
 //  the larger central "fusion point" that spins while a merge runs.
 //
 //  All geometry is authored in the brand's 200×200 viewBox and scaled to the
@@ -113,45 +113,3 @@ struct GainmapAddEmblem: View {
     }
 }
 
-// MARK: - ApertureIris (center fusion point)
-
-/// The six curved aperture blades, drawn to fill the view's frame.
-private struct ApertureBlades: Shape {
-    func path(in rect: CGRect) -> Path {
-        let s = min(rect.width, rect.height) / 200
-        var p = Path()
-        for i in 0..<6 {
-            var blade = Path()
-            blade.move(to: CGPoint(x: 0, y: -40))
-            blade.addQuadCurve(to: CGPoint(x: 20, y: 2), control: CGPoint(x: 24, y: -20))
-            let t = CGAffineTransform(rotationAngle: Double(i) * .pi / 3)
-                .concatenating(CGAffineTransform(translationX: 100, y: 100))
-                .concatenating(CGAffineTransform(scaleX: s, y: s))
-            p.addPath(blade.applying(t))
-        }
-        return p
-    }
-}
-
-struct ApertureIris: View {
-    var spinning: Bool
-
-    var body: some View {
-        TimelineView(.animation(paused: !spinning)) { timeline in
-            let t = timeline.date.timeIntervalSinceReferenceDate
-            let angle = spinning ? (t.truncatingRemainder(dividingBy: 1.1) / 1.1) * 360 : 0
-            ZStack {
-                Circle()
-                    .stroke(Theme.stoneFaint, lineWidth: 2)
-                    .padding(6)
-                ApertureBlades()
-                    .stroke(Theme.accent, style: StrokeStyle(lineWidth: 3.5, lineCap: .round))
-                    .rotationEffect(.degrees(angle))
-                Circle()
-                    .fill(Theme.accent)
-                    .frame(width: 18, height: 18)
-            }
-            .shadow(color: Theme.accent.opacity(0.35), radius: 7)
-        }
-    }
-}

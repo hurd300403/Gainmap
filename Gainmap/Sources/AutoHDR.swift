@@ -109,13 +109,6 @@ enum AutoHDR {
         return p
     }
 
-    /// The intensity implied by a look (glow-anchored), so the macro slider can
-    /// reflect a manually-edited or saved-default look.
-    static func intensity(of p: BloomParams, signature s: BloomParams = signatureLook) -> Double {
-        guard s.glow > 0 else { return 1 }
-        return min(1, max(0, p.glow / s.glow))
-    }
-
     // MARK: Pure math (unit-tested)
 
     static func smoothstep(_ e0: Double, _ e1: Double, _ x: Double) -> Double {
@@ -127,6 +120,44 @@ enum AutoHDR {
     /// sRGB EOTF (gamma → linear) for a normalized channel.
     static func srgbToLinear(_ c: Double) -> Double {
         c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4)
+    }
+
+    // MARK: Color spaces (gamut-matched render targets)
+
+    /// The extended-linear space the HDR buffer is rendered into — matched to the
+    /// job's gamut so `--cgamut` describes the pixels truthfully.
+    static func linearSpace(for g: Gamut) -> CGColorSpace {
+        switch g {
+        case .rec709:    return CGColorSpace(name: CGColorSpace.extendedLinearSRGB)!
+        case .displayP3: return CGColorSpace(name: CGColorSpace.extendedLinearDisplayP3)!
+        case .rec2020:   return CGColorSpace(name: CGColorSpace.extendedLinearITUR_2020)!
+        }
+    }
+
+    /// The display (gamma) space the bake-on SDR JPEG is written in — matched to
+    /// the SOURCE's profile so a P3 photo isn't silently squeezed to sRGB and
+    /// `--sgamut` agrees with the embedded ICC (a mismatch hard-fails the tool).
+    static func gammaSpace(for g: Gamut) -> CGColorSpace {
+        switch g {
+        case .rec709:    return CGColorSpace(name: CGColorSpace.sRGB)!
+        case .displayP3: return CGColorSpace(name: CGColorSpace.displayP3)!
+        case .rec2020:   return CGColorSpace(name: CGColorSpace.itur_2020)!
+        }
+    }
+
+    /// The source photo's identity metadata, re-attached to derived JPEGs.
+    /// Core Image's JPEG writer drops ALL properties — without this, the bake-on
+    /// SDR base (which libultrahdr passes through into the final export) would
+    /// ship stripped of copyright, credits, GPS, and orientation.
+    static func carriedProperties(from src: CGImageSource) -> [CFString: Any] {
+        guard let all = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any] else { return [:] }
+        var out: [CFString: Any] = [:]
+        for key in [kCGImagePropertyOrientation, kCGImagePropertyExifDictionary,
+                    kCGImagePropertyIPTCDictionary, kCGImagePropertyTIFFDictionary,
+                    kCGImagePropertyGPSDictionary] {
+            if let v = all[key] { out[key] = v }
+        }
+        return out
     }
 
     // MARK: Synthesis (side-effecting; call off the main thread)
@@ -204,7 +235,7 @@ enum AutoHDR {
     }
 
     /// Build the bloom-as-HDR rendition and render it to the engine's RGBA f16 buffer.
-    static func synthesize(from sdrURL: URL, params p: BloomParams) throws -> RawBuffer {
+    static func synthesize(from sdrURL: URL, params p: BloomParams, gamut: Gamut = .rec709) throws -> RawBuffer {
         guard let src = CGImageSourceCreateWithURL(sdrURL as CFURL, nil),
               let cg = CGImageSourceCreateImageAtIndex(src, 0, nil) else {
             throw SynthError.decode
@@ -216,7 +247,7 @@ enum AutoHDR {
         }
 
         var data = Data(count: w * h * 8)
-        let cs = CGColorSpace(name: CGColorSpace.extendedLinearSRGB)!
+        let cs = linearSpace(for: gamut)
         data.withUnsafeMutableBytes { ptr in
             ciContext.render(hdr, toBitmap: ptr.baseAddress!, rowBytes: w * 8,
                              bounds: bounds, format: .RGBAh, colorSpace: cs)
@@ -235,15 +266,15 @@ enum AutoHDR {
     /// bloomed look, NOT pixel-identical to the input (that's the trade-off).
     struct UltraHDRInputs { let hdr: RawBuffer; let sdrJPEG: URL }
 
-    static func synthesizeInputs(from sdrURL: URL, params p: BloomParams) throws -> UltraHDRInputs {
+    static func synthesizeInputs(from sdrURL: URL, params p: BloomParams, gamut: Gamut = .rec709) throws -> UltraHDRInputs {
         guard let src = CGImageSourceCreateWithURL(sdrURL as CFURL, nil),
               let cg = CGImageSourceCreateImageAtIndex(src, 0, nil) else { throw SynthError.decode }
         let w = cg.width, h = cg.height
         let bounds = CGRect(x: 0, y: 0, width: w, height: h)
         guard let hdr = bloomCIImage(base: CIImage(cgImage: cg), params: p) else { throw SynthError.context }
 
-        // Full-range HDR buffer (RGBA f16, extended-linear).
-        let linCS = CGColorSpace(name: CGColorSpace.extendedLinearSRGB)!
+        // Full-range HDR buffer (RGBA f16, extended-linear, gamut-matched).
+        let linCS = linearSpace(for: gamut)
         var data = Data(count: w * h * 8)
         data.withUnsafeMutableBytes { ptr in
             ciContext.render(hdr, toBitmap: ptr.baseAddress!, rowBytes: w * 8,
@@ -256,15 +287,24 @@ enum AutoHDR {
         // Bloomed SDR primary: the bloom folded into [0,1] with a soft highlight
         // shoulder (identity below the knee so the glow passes through unchanged;
         // highlights roll off instead of hard-clipping ~42% of a bright frame to
-        // flat white). Written as a real sRGB-gamma JPEG.
+        // flat white). Written as a gamma JPEG in the SOURCE's gamut, then
+        // re-wrapped with the source photo's metadata (orientation, EXIF/IPTC/
+        // TIFF/GPS) — AddImageFromSource copies the compressed bitstream, so the
+        // metadata attach is lossless.
         guard let sdrImg = sdrShoulderKernel.apply(extent: bounds, arguments: [hdr, 0.85])?
             .cropped(to: bounds) else { throw SynthError.context }
         let sdrURLout = FileManager.default.temporaryDirectory
             .appendingPathComponent("gainmap-sdr-\(UUID().uuidString).jpg")
-        let srgb = CGColorSpace(name: CGColorSpace.sRGB)!
         let q = CIImageRepresentationOption(rawValue: kCGImageDestinationLossyCompressionQuality as String)
-        try ciContext.writeJPEGRepresentation(of: sdrImg, to: sdrURLout, colorSpace: srgb,
-                                              options: [q: 0.95])
+        guard let jpeg = ciContext.jpegRepresentation(of: sdrImg, colorSpace: gammaSpace(for: gamut),
+                                                      options: [q: 0.95]),
+              let wrapped = CGImageSourceCreateWithData(jpeg as CFData, nil),
+              let dest = CGImageDestinationCreateWithURL(sdrURLout as CFURL,
+                                                         UTType.jpeg.identifier as CFString, 1, nil)
+        else { throw SynthError.context }
+        CGImageDestinationAddImageFromSource(dest, wrapped, 0,
+                                             carriedProperties(from: src) as CFDictionary)
+        guard CGImageDestinationFinalize(dest) else { throw SynthError.context }
 
         return UltraHDRInputs(hdr: RawBuffer(url: hdrURL, width: w, height: h), sdrJPEG: sdrURLout)
     }

@@ -118,10 +118,15 @@ final class PreviewRenderer: ObservableObject {
     // Bumped on every request(); the accurate pass only applies if it's still the
     // current generation, so a slow stale render can't overwrite a fresh proxy.
     private var generation = 0
+
+    deinit {
+        // The settled preview keeps its decoded file alive (lazy CIImage);
+        // reclaim it when the renderer goes away instead of waiting for macOS
+        // to purge the temp directory.
+        if let f = lastFile { try? FileManager.default.removeItem(at: f) }
+    }
     // Latest inputs, so a base-load that finishes later renders with current values.
     private var curParams = AutoHDR.BloomParams()
-    private var curCgamut: Gamut = .rec709
-    private var curSgamut: Gamut = .rec709
     private var curBake = false
 
     /// Two-stage preview for real-time scrubbing:
@@ -133,11 +138,10 @@ final class PreviewRenderer: ObservableObject {
     ///
     /// Both stages use the SAME params, so the live proxy can't show a different
     /// look than the file actually saves.
-    func request(sdr: URL?, params: AutoHDR.BloomParams,
-                 cgamut: Gamut = .rec709, sgamut: Gamut = .rec709, bake: Bool = false) {
+    func request(sdr: URL?, params: AutoHDR.BloomParams, bake: Bool = false) {
         // Stash the latest inputs so a base-load that finishes later renders with
-        // CURRENT params/gamut, not whatever they were when the load kicked off.
-        curParams = params; curCgamut = cgamut; curSgamut = sgamut; curBake = bake
+        // CURRENT params, not whatever they were when the load kicked off.
+        curParams = params; curBake = bake
         generation &+= 1
         guard let sdr else {
             loadTask?.cancel(); accurateTask?.cancel()
@@ -179,7 +183,7 @@ final class PreviewRenderer: ObservableObject {
     private func renderCurrent() {
         guard let sdr = baseURL else { return }
         renderProxy(params: curParams)
-        scheduleAccurate(sdr: sdr, params: curParams, cgamut: curCgamut, sgamut: curSgamut, bake: curBake, gen: generation)
+        scheduleAccurate(sdr: sdr, params: curParams, bake: curBake, gen: generation)
     }
 
     /// Instant: build the bloom CIImage graph (cheap) and hand it to the EDR view.
@@ -192,14 +196,13 @@ final class PreviewRenderer: ObservableObject {
     /// Debounced: replace the proxy with the real exported gain-map file, which
     /// uses the same `params` as the proxy — so the file matches it exactly.
     private func scheduleAccurate(sdr: URL, params: AutoHDR.BloomParams,
-                                  cgamut: Gamut, sgamut: Gamut, bake: Bool, gen: Int) {
+                                  bake: Bool, gen: Int) {
         accurateTask?.cancel()
         rendering = true
         accurateTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 200_000_000)   // settle after last change
             if Task.isCancelled { return }
-            let (ci, file) = await Self.renderExport(sdr: sdr, params: params,
-                                                     cgamut: cgamut, sgamut: sgamut, bake: bake)
+            let (ci, file) = await Self.renderExport(sdr: sdr, params: params, bake: bake)
             if Task.isCancelled { return }
             await MainActor.run {
                 guard let self else { return }
@@ -230,24 +233,28 @@ final class PreviewRenderer: ObservableObject {
     }
 
     nonisolated private static func renderExport(sdr: URL, params: AutoHDR.BloomParams,
-                                                 cgamut: Gamut, sgamut: Gamut, bake: Bool) async -> (CIImage?, URL?) {
+                                                 bake: Bool) async -> (CIImage?, URL?) {
         await Task.detached(priority: .userInitiated) { () -> (CIImage?, URL?) in
             guard let smallSDR = AutoHDR.downscaledJPEG(of: sdr, maxDim: 1600),
                   let tool = try? UHDRRunner.bundledToolURL() else { return (nil, nil) }
+            // Same per-photo ICC-matched gamut as the real merge (a --sgamut that
+            // disagrees with the JPEG's embedded profile hard-fails the tool, so a
+            // fixed sRGB flag would break the settled preview for P3 photos).
+            let gamut = Gamut.detect(of: smallSDR)
             let out = FileManager.default.temporaryDirectory
                 .appendingPathComponent("gm-preview-\(UUID().uuidString).jpg")
             var cleanup: [URL] = [smallSDR]
             let job: UHDRRunner.Job
             if bake {
-                guard let inputs = try? AutoHDR.synthesizeInputs(from: smallSDR, params: params) else { return (nil, nil) }
+                guard let inputs = try? AutoHDR.synthesizeInputs(from: smallSDR, params: params, gamut: gamut) else { return (nil, nil) }
                 cleanup += [inputs.hdr.url, inputs.sdrJPEG]
                 job = UHDRRunner.Job(hdr: .raw(inputs.hdr.url, w: inputs.hdr.width, h: inputs.hdr.height),
-                                     sdr: inputs.sdrJPEG, out: out, cgamut: cgamut, sgamut: sgamut)
+                                     sdr: inputs.sdrJPEG, out: out, cgamut: gamut, sgamut: gamut)
             } else {
-                guard let buf = try? AutoHDR.synthesize(from: smallSDR, params: params) else { return (nil, nil) }
+                guard let buf = try? AutoHDR.synthesize(from: smallSDR, params: params, gamut: gamut) else { return (nil, nil) }
                 cleanup.append(buf.url)
                 job = UHDRRunner.Job(hdr: .raw(buf.url, w: buf.width, h: buf.height), sdr: smallSDR,
-                                     out: out, cgamut: cgamut, sgamut: sgamut)
+                                     out: out, cgamut: gamut, sgamut: gamut)
             }
             let outcome = await UHDRRunner().run(job, toolURL: tool)
             for u in cleanup { try? FileManager.default.removeItem(at: u) }
@@ -263,10 +270,6 @@ final class PreviewRenderer: ObservableObject {
 struct HDRPreviewPane: View {
     let sdrURL: URL?
     let params: AutoHDR.BloomParams
-    /// Gamuts threaded through so the settled preview matches the saved file's
-    /// color (the accurate stage encodes with these; default rec709/sRGB).
-    var cgamut: Gamut = .rec709
-    var sgamut: Gamut = .rec709
     /// Bake the soft bloom into the SDR base (vs HDR-only glow) — affects the
     /// settled render so the preview reflects the chosen export mode.
     var bake: Bool = false
@@ -296,7 +299,7 @@ struct HDRPreviewPane: View {
     @State private var holdTask: Task<Void, Never>?
     @State private var graceTask: Task<Void, Never>?
 
-    private let holdDuration: TimeInterval = 1.6     // press → lock
+    private let holdDuration: TimeInterval = 1.0     // press → lock
     private let graceDelay: TimeInterval = 0.15      // ring stays hidden this long (pure peeks never flash it)
 
     private var locked: Bool { holdState == .locked }
@@ -394,14 +397,12 @@ struct HDRPreviewPane: View {
         // dead-looking control (the SDR base doesn't change with HDR params) —
         // auto-unlock back to HDR so the change is visible.
         .onChange(of: params) { _, _ in resetHold(); rerender() }
-        .onChange(of: cgamut) { _, _ in resetHold(); rerender() }
-        .onChange(of: sgamut) { _, _ in resetHold(); rerender() }
         .onChange(of: bake) { _, _ in resetHold(); rerender() }
         .onAppear { rerender() }
     }
 
     private func rerender() {
-        renderer.request(sdr: sdrURL, params: params, cgamut: cgamut, sgamut: sgamut, bake: bake)
+        renderer.request(sdr: sdrURL, params: params, bake: bake)
     }
 
     // MARK: Hold-to-lock helpers
@@ -502,6 +503,7 @@ struct HDRPreviewPane: View {
                 }
                 .buttonStyle(.plain)
                 .help(expanded ? "Dock preview back inline" : "Expand preview to the side")
+                .accessibilityLabel(expanded ? "Dock preview back inline" : "Expand preview")
             }
         }
         .padding(10)

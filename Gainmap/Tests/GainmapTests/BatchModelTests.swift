@@ -79,11 +79,11 @@ final class BatchModelTests: XCTestCase {
         // Dial the look on photo A.
         m.bloom.glow = 1.3
         XCTAssertEqual(m.runningLook.glow, 1.3, accuracy: 1e-9)
-        XCTAssertEqual(m.items[0].look?.glow, 1.3)   // A now has its own look
-        // Move to B (untouched) — it should arrive at A's dialed look.
+        // Move to B — leaving A commits the dialed look onto it (the commit
+        // happens on LEAVE, not per slider tick, to avoid 60 Hz items churn).
         m.selectNext()
-        XCTAssertEqual(m.bloom.glow, 1.3, accuracy: 1e-9)
-        XCTAssertNil(m.items[1].look)                // still inheriting until tweaked
+        XCTAssertEqual(m.items[0].look?.glow, 1.3)   // A keeps its own look
+        XCTAssertEqual(m.bloom.glow, 1.3, accuracy: 1e-9)  // B arrives pre-dialed
     }
 
     func testTweakingKeepsPerPhotoLook() {
@@ -92,8 +92,8 @@ final class BatchModelTests: XCTestCase {
         m.bloom.glow = 1.3            // A = 1.3
         m.selectNext()
         m.bloom.glow = 0.5           // B = 0.5 (now customized)
+        m.selectPrevious()           // back to A (leaving B commits 0.5 onto it)
         XCTAssertEqual(m.items[1].look?.glow, 0.5)
-        m.selectPrevious()           // back to A
         XCTAssertEqual(m.bloom.glow, 1.3, accuracy: 1e-9)   // A unchanged
         m.selectNext()               // back to B
         XCTAssertEqual(m.bloom.glow, 0.5, accuracy: 1e-9)   // B remembered
@@ -126,12 +126,12 @@ final class BatchModelTests: XCTestCase {
         m.addFiles([url("a"), url("b")])
         // Turn bake ON for photo A only.
         m.bloom.bakeGlowIntoSDR = true
-        XCTAssertEqual(m.items[0].look?.bakeGlowIntoSDR, true)
-        // Move to B and turn it OFF; A must be unaffected.
+        // Move to B (commits A's look) and turn it OFF; A must be unaffected.
         m.selectNext()
+        XCTAssertEqual(m.items[0].look?.bakeGlowIntoSDR, true)
         m.bloom.bakeGlowIntoSDR = false
+        m.selectPrevious()   // commits B's look on leave
         XCTAssertEqual(m.items[1].look?.bakeGlowIntoSDR, false)
-        m.selectPrevious()
         XCTAssertTrue(m.bloom.bakeGlowIntoSDR, "photo A keeps its own bake setting")
     }
 

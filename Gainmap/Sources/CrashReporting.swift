@@ -78,12 +78,17 @@ enum CrashReporting {
     }
 
     /// Strip usernames / file paths so events carry no client or project names.
+    /// Redaction consumes the WHOLE path tail, terminating at a quote or newline —
+    /// not whitespace — because shoot folders contain spaces ("Client Names/…").
+    /// uhdrtool quotes paths in its error lines, so quote-terminated matching is
+    /// exact there; in unquoted prose it may over-consume to end-of-line, which is
+    /// the right failure mode (over-redact rather than leak).
     static func redact(_ s: String) -> String {
         var o = s
         let rules: [(String, String)] = [
-            (#"/Users/[^/\s"']+"#,   "/Users/<redacted>"),
             (#"file:///Users/[^\s"']+"#, "file:///Users/<redacted>"),
-            (#"/Volumes/[^/\s"']+"#, "/Volumes/<redacted>"),
+            (#"/Users/[^"'\n]+"#,   "/Users/<redacted>"),
+            (#"/Volumes/[^"'\n]+"#, "/Volumes/<redacted>"),
         ]
         for (pat, rep) in rules {
             o = o.replacingOccurrences(of: pat, with: rep, options: .regularExpression)

@@ -74,6 +74,7 @@ struct FilmstripCell: View {
                     .buttonStyle(.plain)
                     .padding(4)
                     .help("Remove from queue")
+                    .accessibilityLabel("Remove \(item.sdrURL.lastPathComponent) from queue")
                 }
             }
             .shadow(color: .black.opacity(selected ? 0.4 : 0.25),
@@ -155,10 +156,14 @@ struct AddTile: View {
 
     private func handleDrop(_ providers: [NSItemProvider]) -> Bool {
         var urls = [URL?](repeating: nil, count: providers.count)
+        let lock = NSLock()   // loadObject callbacks land on arbitrary threads
         let group = DispatchGroup()
         for (i, p) in providers.enumerated() {
             group.enter()
-            _ = p.loadObject(ofClass: URL.self) { u, _ in urls[i] = u; group.leave() }
+            _ = p.loadObject(ofClass: URL.self) { u, _ in
+                lock.lock(); urls[i] = u; lock.unlock()
+                group.leave()
+            }
         }
         group.notify(queue: .main) { onPick(urls.compactMap { $0 }) }
         return true

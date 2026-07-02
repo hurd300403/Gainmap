@@ -2,8 +2,9 @@
 //  GainmapApp.swift
 //  Gainmap — a Legacy Lab instrument.
 //
-//  Fuses a Lightroom SDR edit + its HDR edit into one UltraHDR (ISO 21496-1)
-//  gain-map JPEG, by driving the bundled `uhdrtool` (libultrahdr) helper.
+//  Turns an SDR JPEG into an UltraHDR (ISO 21496-1) gain-map JPEG — synthesized
+//  highlight glow on HDR screens, clean fallback everywhere else — by driving
+//  the bundled `uhdrtool` (libultrahdr) helper.
 //
 
 import SwiftUI
@@ -27,6 +28,7 @@ struct GainmapApp: App {
     var body: some Scene {
         Window("Gainmap", id: "main") {
             ContentView()
+                .modifier(IntelUnsupportedNotice())
                 .modifier(FirstRunCrashNotice())
                 .modifier(VersionGateOverlay(gate: versionGate, updater: updaterController.updater))
                 .task { await versionGate.check() }
@@ -77,6 +79,28 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
         .frame(width: 420, height: 160)
+    }
+}
+
+// MARK: - Intel notice
+
+/// uhdrtool ships arm64-only, so on an Intel Mac every merge would die with a
+/// cryptic exit code. Say it plainly once at launch instead.
+struct IntelUnsupportedNotice: ViewModifier {
+    @State private var present = false
+    func body(content: Content) -> some View {
+        content
+            .onAppear {
+                #if arch(x86_64)
+                present = true
+                #endif
+            }
+            .alert("Apple Silicon required", isPresented: $present) {
+                Button("OK") {}
+            } message: {
+                Text("Gainmap's HDR engine is built for Apple Silicon (M-series) Macs. "
+                     + "On this Intel Mac, merges will not work.")
+            }
     }
 }
 

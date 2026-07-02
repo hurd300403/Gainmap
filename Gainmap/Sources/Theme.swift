@@ -28,7 +28,7 @@ enum Theme {
     static let warn      = Color(hex: 0xF0A03C)   // amber — boost/overblow warnings
     static let stone     = Color(hex: 0xDAD7CE)
     static let stoneDim  = Color(hex: 0xDAD7CE).opacity(0.45)
-    static let stoneFaint = Color(hex: 0xDAD7CE).opacity(0.16)
+    static let stoneFaint = Color(hex: 0xDAD7CE).opacity(0.32)   // was 0.16 — unreadable at small sizes
     static let line      = Color(hex: 0xDAD7CE).opacity(0.10)
 
     // MARK: Fonts

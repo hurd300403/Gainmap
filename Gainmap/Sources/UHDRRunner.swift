@@ -16,6 +16,49 @@
 //
 
 import Foundation
+import ImageIO
+import AppKit
+
+// MARK: - Child-process lifetime
+
+/// Terminates bundled-tool children when the app quits, so quitting mid-merge
+/// can't orphan uhdrtool to keep writing files after the window is gone.
+final class ToolReaper: @unchecked Sendable {
+    static let shared = ToolReaper()
+    private let lock = NSLock()
+    private var procs: [ObjectIdentifier: Process] = [:]
+
+    private init() {
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification, object: nil, queue: nil
+        ) { [weak self] _ in self?.terminateAll() }
+    }
+
+    func register(_ p: Process) { lock.lock(); procs[ObjectIdentifier(p)] = p; lock.unlock() }
+    func unregister(_ p: Process) { lock.lock(); procs.removeValue(forKey: ObjectIdentifier(p)); lock.unlock() }
+    func terminateAll() {
+        lock.lock(); let ps = Array(procs.values); procs.removeAll(); lock.unlock()
+        for p in ps where p.isRunning { p.terminate() }
+    }
+}
+
+/// Hands a Process across the Task-cancellation boundary: whichever side gets
+/// there first wins (cancel-before-launch still terminates right after launch).
+private final class ProcessBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var proc: Process?
+    private var wantsTermination = false
+
+    func set(_ p: Process) {
+        lock.lock(); proc = p; let t = wantsTermination; lock.unlock()
+        if t, p.isRunning { p.terminate() }
+    }
+    func terminate() {
+        lock.lock(); wantsTermination = true; let p = proc; lock.unlock()
+        if let p, p.isRunning { p.terminate() }
+    }
+    var terminated: Bool { lock.lock(); defer { lock.unlock() }; return wantsTermination }
+}
 
 // MARK: - Color gamut
 
@@ -45,6 +88,27 @@ enum Gamut: Int, CaseIterable, Identifiable {
         case .displayP3: return "Display P3"
         case .rec2020: return "Rec.2020"
         }
+    }
+
+    /// Pure mapping from an ICC profile name to the closest libultrahdr gamut.
+    static func matching(profileName: String) -> Gamut {
+        let n = profileName.lowercased()
+        if n.contains("p3") { return .displayP3 }
+        if n.contains("2020") || n.contains("2100") { return .rec2020 }
+        return .rec709
+    }
+
+    /// Best-effort gamut of an image's embedded ICC profile. libultrahdr
+    /// HARD-FAILS when --sgamut disagrees with the profile in the JPEG
+    /// ("configured color gamut does not match with color gamut specified in
+    /// icc box"), so a Display P3 export from Lightroom would refuse to merge
+    /// at all under a fixed sRGB flag. Defaults to Rec.709/sRGB when there is
+    /// no readable profile (untagged JPEGs are treated as sRGB everywhere).
+    static func detect(of url: URL) -> Gamut {
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any],
+              let name = props[kCGImagePropertyProfileName] as? String else { return .rec709 }
+        return matching(profileName: name)
     }
 }
 
@@ -140,6 +204,27 @@ struct UHDRRunner {
             .appendingPathComponent("\(base)_UltraHDR.jpg")
     }
 
+    /// Pure check: does the FILENAME carry our own export suffix? (Unit-tested.)
+    static func nameLooksLikeMergedOutput(_ url: URL) -> Bool {
+        url.deletingPathExtension().lastPathComponent.hasSuffix("_UltraHDR")
+    }
+
+    /// True when a file already looks like an UltraHDR export — our `_UltraHDR`
+    /// name suffix, or an embedded gain map ImageIO can see. Merging such a file
+    /// again would bloom the bloom, so the UI warns before double-processing.
+    static func looksLikeMergedOutput(_ url: URL) -> Bool {
+        if nameLooksLikeMergedOutput(url) { return true }
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else { return false }
+        if CGImageSourceCopyAuxiliaryDataInfoAtIndex(src, 0, kCGImageAuxiliaryDataTypeHDRGainMap) != nil {
+            return true
+        }
+        if #available(macOS 15.0, *),
+           CGImageSourceCopyAuxiliaryDataInfoAtIndex(src, 0, kCGImageAuxiliaryDataTypeISOGainMap) != nil {
+            return true
+        }
+        return false
+    }
+
     /// Parse the `clamps: peak=… (… stops)  K=…  L=…` line from stderr.
     /// Returns nil if the line isn't present (e.g. an early failure).
     static func parseClamps(_ stderr: String) -> ClampReadout? {
@@ -201,6 +286,8 @@ struct UHDRRunner {
     // MARK: Execution (the only side-effecting method)
 
     /// Run uhdrtool for `job`. Runs off the main actor; safe to `await` from UI.
+    /// Task cancellation terminates the child promptly and removes the partial
+    /// output; app quit terminates it via ToolReaper.
     func run(_ job: Job, toolURL: URL? = nil) async -> RunOutcome {
         let tool: URL
         do {
@@ -209,31 +296,49 @@ struct UHDRRunner {
             return .failure(message: (error as? LocalizedError)?.errorDescription ?? "\(error)")
         }
 
-        return await withCheckedContinuation { cont in
-            // Process I/O (blocking reads + waitUntilExit) runs off the main
-            // thread so the UI stays responsive during a merge.
-            DispatchQueue.global(qos: .userInitiated).async {
-                let proc = Process()
-                proc.executableURL = tool
-                proc.arguments = Self.arguments(for: job)
+        let box = ProcessBox()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { cont in
+                // Process I/O (blocking reads + waitUntilExit) runs off the main
+                // thread so the UI stays responsive during a merge.
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let proc = Process()
+                    proc.executableURL = tool
+                    proc.arguments = Self.arguments(for: job)
 
-                let errPipe = Pipe()
-                proc.standardError = errPipe
-                proc.standardOutput = Pipe()  // discard stdout (developer hooks only)
+                    let errPipe = Pipe()
+                    proc.standardError = errPipe
+                    // Discard stdout via the null device — an unread Pipe() would fill
+                    // its 64KB buffer and deadlock the tool (blocked write → no exit →
+                    // readDataToEndOfFile on stderr never returns) if uhdrtool ever
+                    // grew stdout logging.
+                    proc.standardOutput = FileHandle.nullDevice
 
-                do {
-                    try proc.run()
-                } catch {
-                    cont.resume(returning: .failure(message: "Could not launch uhdrtool: \(error.localizedDescription)"))
-                    return
+                    do {
+                        try proc.run()
+                    } catch {
+                        cont.resume(returning: .failure(message: "Could not launch uhdrtool: \(error.localizedDescription)"))
+                        return
+                    }
+                    ToolReaper.shared.register(proc)
+                    box.set(proc)   // late-binding: a cancel that already happened fires now
+
+                    let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+                    proc.waitUntilExit()
+                    ToolReaper.shared.unregister(proc)
+
+                    if box.terminated {
+                        try? FileManager.default.removeItem(at: job.out)   // partial write
+                        cont.resume(returning: .failure(message: "Stopped."))
+                        return
+                    }
+                    let stderr = String(data: errData, encoding: .utf8) ?? ""
+                    cont.resume(returning: Self.parseOutcome(
+                        exitCode: proc.terminationStatus, stderr: stderr, output: job.out))
                 }
-
-                let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-                proc.waitUntilExit()
-                let stderr = String(data: errData, encoding: .utf8) ?? ""
-                cont.resume(returning: Self.parseOutcome(
-                    exitCode: proc.terminationStatus, stderr: stderr, output: job.out))
             }
+        } onCancel: {
+            box.terminate()
         }
     }
 }
