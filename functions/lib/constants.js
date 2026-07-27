@@ -23,15 +23,22 @@ const DEFAULT_QUOTA_BYTES = 5 * 1024 * 1024 * 1024;
 const DEFAULT_MAX_USERS = 200;
 
 /**
- * Two deadlines (r6):
- *  - START_WINDOW: how long the client has to BEGIN the upload. Storage rules
- *    check `request.time < startBefore` at upload start and never again.
- *  - LEASE: how long the reserved bytes stay charged against the quota.
- *    A resumable session can live ~7 days, so the lease is 7d + 1d margin,
- *    measured from startBefore (not from now).
+ * Single deadline (r7 — probe-proven): Cloud Storage evaluates rules at
+ * FINALIZE, not at resumable-session start, so a reservation carries one
+ * COMPLETION deadline: `expiresAt = now + LEASE`. A resumable session can
+ * live ~7 days, so the lease is 7d + 1d margin. Storage rules check
+ * `request.time < expiresAt`; a finalize-time 403 means the lease expired
+ * mid-upload and the client re-reserves (idempotent refresh) and retries.
+ * Evidence: Gainmap/scripts/spike/P0-PROBE-RESULTS.md.
  */
-const DEFAULT_START_WINDOW_SEC = 30 * 60;
 const DEFAULT_LEASE_SEC = 8 * 24 * 60 * 60;
+
+/**
+ * maintenance releases a reservation's capacity only this long AFTER
+ * `expiresAt` — margin for a finalize that squeaks in at the deadline and
+ * whose reconciler event is still in flight.
+ */
+const RESERVATION_RELEASE_GRACE_MS = 60 * 60 * 1000;
 
 /** Tombstones are physically purged after this long. */
 const TOMBSTONE_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
@@ -96,8 +103,8 @@ module.exports = {
   MAX_OBJECT_BYTES,
   DEFAULT_QUOTA_BYTES,
   DEFAULT_MAX_USERS,
-  DEFAULT_START_WINDOW_SEC,
   DEFAULT_LEASE_SEC,
+  RESERVATION_RELEASE_GRACE_MS,
   TOMBSTONE_RETENTION_MS,
   GC_CANDIDATE_AGE_MS,
   RECENT_AUTH_SEC,

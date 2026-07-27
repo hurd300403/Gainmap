@@ -12,7 +12,7 @@
  *   photo create against a `deleting` blob; per-group rev == old + 1;
  *   client hard-DELETE denied everywhere; kill switch blocks creates/updates but
  *   allows tombstone-only updates; schemaVersion 2 rejected;
- *   Storage: unreserved / wrong-size / expired-window / wrong-type / bad-tier
+ *   Storage: unreserved / wrong-size / expired-lease / wrong-type / bad-tier
  *   rejected, matching reservation allowed, client delete denied.
  */
 import { test, before, after } from 'node:test';
@@ -74,7 +74,7 @@ let crossServiceSupported = false;
 const XS_SKIP_REASON =
   'Storage emulator did not evaluate cross-service firestore.get(). ' +
   'Covering test: the P0 real-project reservation-lifecycle probe ' +
-  '(start upload -> pass startBefore -> complete) against gainmap-production.';
+  '(reserve -> upload -> finalize past expiresAt -> 403) on a probe project.';
 
 function xsSkip(t) {
   if (crossServiceSupported) return false;
@@ -336,7 +336,7 @@ test('usage/** and reservations/** are readable but never client-writable', asyn
   await assertFails(
     setDoc(doc(db, `users/alice/reservations/originals_${HASH_NEW}`), {
       byteSize: 10,
-      startBefore: T(Date.now() + 60000),
+      expiresAt: T(Date.now() + 60000),
     })
   );
 });
@@ -635,7 +635,7 @@ test('kill switch still allows tombstone-only updates (always able to delete / l
 // ===========================================================================
 const aliceStorage = () => testEnv.authenticatedContext('alice').storage();
 
-async function seedReservation({ tier = 'originals', hash, byteSize, startBeforeMs }) {
+async function seedReservation({ tier = 'originals', hash, byteSize, expiresAtMs }) {
   await testEnv.withSecurityRulesDisabled(async (ctx) => {
     const db = ctx.firestore();
     await setDoc(doc(db, `users/alice/reservations/${tier}_${hash}`), {
@@ -644,8 +644,7 @@ async function seedReservation({ tier = 'originals', hash, byteSize, startBefore
       tier,
       byteSize,
       createdAt: Timestamp.now(),
-      startBefore: Timestamp.fromMillis(startBeforeMs),
-      releaseAfter: Timestamp.fromMillis(startBeforeMs + 8 * 24 * 3600 * 1000),
+      expiresAt: Timestamp.fromMillis(expiresAtMs),
     });
   });
 }
@@ -658,7 +657,7 @@ test('Storage: upload with a matching, unexpired reservation is allowed', async 
   await seed();
   await testEnv.clearStorage();
   const hash = hashOf(0x101);
-  await seedReservation({ hash, byteSize: 16, startBeforeMs: Date.now() + 600_000 });
+  await seedReservation({ hash, byteSize: 16, expiresAtMs: Date.now() + 600_000 });
   await assertSucceeds(
     uploadBytes(ref(aliceStorage(), `users/alice/originals/${hash}.jpg`), bytes(16), JPEG)
   );
@@ -679,19 +678,19 @@ test('Storage: reservation byteSize must match the object exactly', async (t) =>
   await seed();
   await testEnv.clearStorage();
   const hash = hashOf(0x103);
-  await seedReservation({ hash, byteSize: 16, startBeforeMs: Date.now() + 600_000 });
+  await seedReservation({ hash, byteSize: 16, expiresAtMs: Date.now() + 600_000 });
   await assertFails(
     uploadBytes(ref(aliceStorage(), `users/alice/originals/${hash}.jpg`), bytes(32), JPEG)
   );
 });
 
-test('Storage: an expired start window is rejected (capacity lease is irrelevant here)', async (t) => {
+test('Storage: an expired lease is rejected at finalize', async (t) => {
   if (xsSkip(t)) return;
   await seed();
   await testEnv.clearStorage();
   const hash = hashOf(0x104);
-  // startBefore in the past, releaseAfter still days away — the upload must still fail.
-  await seedReservation({ hash, byteSize: 16, startBeforeMs: Date.now() - 5_000 });
+  // expiresAt in the past — rules evaluate at finalize, so this upload fails.
+  await seedReservation({ hash, byteSize: 16, expiresAtMs: Date.now() - 5_000 });
   await assertFails(
     uploadBytes(ref(aliceStorage(), `users/alice/originals/${hash}.jpg`), bytes(16), JPEG)
   );
@@ -702,7 +701,7 @@ test('Storage: reservations are scoped per tier', async (t) => {
   await seed();
   await testEnv.clearStorage();
   const hash = hashOf(0x105);
-  await seedReservation({ tier: 'thumbs', hash, byteSize: 16, startBeforeMs: Date.now() + 600_000 });
+  await seedReservation({ tier: 'thumbs', hash, byteSize: 16, expiresAtMs: Date.now() + 600_000 });
   await assertSucceeds(
     uploadBytes(ref(aliceStorage(), `users/alice/thumbs/${hash}.jpg`), bytes(16), JPEG)
   );
@@ -716,7 +715,7 @@ test('Storage: wrong contentType is rejected', async (t) => {
   await seed();
   await testEnv.clearStorage();
   const hash = hashOf(0x106);
-  await seedReservation({ hash, byteSize: 16, startBeforeMs: Date.now() + 600_000 });
+  await seedReservation({ hash, byteSize: 16, expiresAtMs: Date.now() + 600_000 });
   await assertFails(
     uploadBytes(ref(aliceStorage(), `users/alice/originals/${hash}.jpg`), bytes(16), {
       contentType: 'image/heic',
@@ -729,11 +728,11 @@ test('Storage: tier allowlist and file-name shape are enforced', async (t) => {
   await seed();
   await testEnv.clearStorage();
   const hash = hashOf(0x107);
-  await seedReservation({ tier: 'exports', hash, byteSize: 16, startBeforeMs: Date.now() + 600_000 });
+  await seedReservation({ tier: 'exports', hash, byteSize: 16, expiresAtMs: Date.now() + 600_000 });
   await assertFails(
     uploadBytes(ref(aliceStorage(), `users/alice/exports/${hash}.jpg`), bytes(16), JPEG)
   );
-  await seedReservation({ hash: 'notahash', byteSize: 16, startBeforeMs: Date.now() + 600_000 });
+  await seedReservation({ hash: 'notahash', byteSize: 16, expiresAtMs: Date.now() + 600_000 });
   await assertFails(
     uploadBytes(ref(aliceStorage(), 'users/alice/originals/notahash.jpg'), bytes(16), JPEG)
   );
@@ -744,7 +743,7 @@ test('Storage: the kill switch blocks uploads even with a valid reservation', as
   await seed({ syncEnabled: false });
   await testEnv.clearStorage();
   const hash = hashOf(0x108);
-  await seedReservation({ hash, byteSize: 16, startBeforeMs: Date.now() + 600_000 });
+  await seedReservation({ hash, byteSize: 16, expiresAtMs: Date.now() + 600_000 });
   await assertFails(
     uploadBytes(ref(aliceStorage(), `users/alice/originals/${hash}.jpg`), bytes(16), JPEG)
   );
@@ -755,7 +754,7 @@ test('Storage: a stranger cannot upload into or read another user prefix', async
   await seed();
   await testEnv.clearStorage();
   const hash = hashOf(0x109);
-  await seedReservation({ hash, byteSize: 16, startBeforeMs: Date.now() + 600_000 });
+  await seedReservation({ hash, byteSize: 16, expiresAtMs: Date.now() + 600_000 });
   const bobSt = testEnv.authenticatedContext('bob').storage();
   await assertFails(
     uploadBytes(ref(bobSt, `users/alice/originals/${hash}.jpg`), bytes(16), JPEG)

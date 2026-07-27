@@ -67,13 +67,17 @@ service firebase.storage {
       }
 
       // `reservation` and `flags` are the ONLY two cross-service reads.
-      // startBefore is the *authorization window* to BEGIN an upload; the separate
-      // capacity lease (releaseAfter) is enforced by maintenance, not here, because
-      // Storage rules are evaluated at upload start and never again at finalize.
+      // PROBE-PROVEN (P0-PROBE-RESULTS.md): these rules are evaluated at
+      // FINALIZE — object creation — not when a resumable session starts. So
+      // expiresAt is a COMPLETION deadline: the upload's final byte must land
+      // before it. Client contract: a 403 here means the lease expired
+      // mid-upload; the client re-reserves (idempotent refresh, which even
+      // revives a still-open session — probe E2) and retries. Capacity is
+      // released by maintenance only after expiresAt + grace.
       function reservationOK(reservation, flags) {
         return flags.data.syncEnabled == true
                && reservation.data.byteSize == request.resource.size
-               && request.time < reservation.data.startBefore;
+               && request.time < reservation.data.expiresAt;
       }
 
       allow read: if isOwner();

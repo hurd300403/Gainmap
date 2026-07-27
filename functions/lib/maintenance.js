@@ -6,6 +6,7 @@ const {
   TIERS,
   TOMBSTONE_RETENTION_MS,
   GC_CANDIDATE_AGE_MS,
+  RESERVATION_RELEASE_GRACE_MS,
   reservationId,
   objectName,
   num,
@@ -15,7 +16,7 @@ const {
  * Scheduled maintenance (every 24 h). Four independent passes; each is written so
  * a failure in one does not prevent the others from running.
  *
- *  1. releaseExpiredReservations — capacity leases past `releaseAfter`
+ *  1. releaseExpiredReservations — capacity leases past `expiresAt` + grace
  *  2. purgeTombstones            — sessions/photos deleted > 30 days ago
  *  3. blobGC                     — three-state, two-pass: active -> gcCandidate -> deleting
  *  4. recomputeUsage             — heal bytesUsed/objectCount drift from bucket reality
@@ -25,15 +26,16 @@ const {
 // 1. Capacity-lease release
 // ---------------------------------------------------------------------------
 /**
- * Releases reservations only after `releaseAfter` (NOT `startBefore`): an upload
- * that legitimately started at the last minute of its authorization window may
- * still take the full resumable-session lifetime to finish, and its bytes must
- * stay charged until then.
+ * Releases reservations only after `expiresAt` + a one-hour grace: expiresAt is
+ * the COMPLETION deadline Storage rules enforce at finalize (r7, probe-proven),
+ * and the grace covers a finalize that lands right at the deadline whose
+ * reconciler event is still in flight. Until then the bytes stay charged.
  */
-async function releaseExpiredReservations({ db, now }) {
+async function releaseExpiredReservations({ db, now, graceMs = RESERVATION_RELEASE_GRACE_MS }) {
+  const cutoff = Timestamp.fromMillis(now.toMillis() - graceMs);
   const snap = await db
     .collectionGroup('reservations')
-    .where('releaseAfter', '<', now)
+    .where('expiresAt', '<', cutoff)
     .get();
 
   let released = 0;

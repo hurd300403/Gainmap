@@ -3,7 +3,7 @@
   "fieldOverrides": [
     {
       "collectionGroup": "reservations",
-      "fieldPath": "releaseAfter",
+      "fieldPath": "expiresAt",
       "indexes": [
         { "order": "ASCENDING", "queryScope": "COLLECTION" },
         { "order": "ASCENDING", "queryScope": "COLLECTION_GROUP" }

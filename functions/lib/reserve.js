@@ -8,7 +8,6 @@ const {
   TIERS,
   MAX_OBJECT_BYTES,
   DEFAULT_QUOTA_BYTES,
-  DEFAULT_START_WINDOW_SEC,
   DEFAULT_LEASE_SEC,
   HASH_RE,
   reservationId,
@@ -17,26 +16,20 @@ const {
 } = require('./constants');
 
 /**
- * Resolve the two reservation deadlines.
+ * Resolve the reservation lease (the single deadline: expiresAt = now + lease).
  *
- * Overrides live in config/testing {startWindowSec, leaseSec} and are honoured
- * ONLY when the runtime project is not gainmap-production. Rationale: the P0
- * real-project reservation-lifecycle probe and CI both need to watch a window
- * expire without literally waiting 30 minutes / 8 days, but a client-reachable
- * knob that shortens (or lengthens) capacity leases in production would be a
- * quota-evasion lever. The document is server-owned (firestore.rules denies all
- * client writes to config/**) *and* inert in production — belt and braces.
+ * The override lives in config/testing {leaseSec} and is honoured ONLY when the
+ * runtime project is not gainmap-production. Rationale: the P0 real-project
+ * reservation-lifecycle probe and CI both need to watch a lease expire without
+ * literally waiting 8 days, but a client-reachable knob that shortens (or
+ * lengthens) capacity leases in production would be a quota-evasion lever. The
+ * document is server-owned (firestore.rules denies all client writes to
+ * config/**) *and* inert in production — belt and braces.
  */
-function resolveDeadlines(testingData, projectId) {
+function resolveLeaseSec(testingData, projectId) {
   const isProd = projectId === PRODUCTION_PROJECT;
   const t = (!isProd && testingData) || {};
-  const startWindowSec =
-    Number.isFinite(t.startWindowSec) && t.startWindowSec > 0
-      ? t.startWindowSec
-      : DEFAULT_START_WINDOW_SEC;
-  const leaseSec =
-    Number.isFinite(t.leaseSec) && t.leaseSec > 0 ? t.leaseSec : DEFAULT_LEASE_SEC;
-  return { startWindowSec, leaseSec };
+  return Number.isFinite(t.leaseSec) && t.leaseSec > 0 ? t.leaseSec : DEFAULT_LEASE_SEC;
 }
 
 function validate(data) {
@@ -62,16 +55,20 @@ function validate(data) {
 /**
  * reserveUpload core — the ONLY place quota arithmetic happens.
  *
- * Storage rules check only "a matching reservation exists and its start window is
- * still open"; the capacity accounting is here, inside a transaction, so
- * concurrent uploads cannot race past the quota.
+ * Storage rules check only "a matching, unexpired reservation exists" — and
+ * they check it at FINALIZE (probe-proven; P0-PROBE-RESULTS.md), so expiresAt
+ * is a COMPLETION deadline. The capacity accounting is here, inside a
+ * transaction, so concurrent uploads cannot race past the quota.
  *
  * Idempotency: re-reserving the same (contentHash, tier, byteSize) atomically
- * refreshes BOTH deadlines — startBefore = now + START_WINDOW and
- * releaseAfter = startBefore + LEASE — and never double-counts reservedBytes.
+ * refreshes expiresAt = now + LEASE and never double-counts reservedBytes.
  *
- * @returns {Promise<{reservationId, objectName, byteSize, startBefore:number,
- *                    releaseAfter:number, refreshed:boolean}>}
+ * CLIENT CONTRACT: a 403 at finalize means the lease expired mid-upload. The
+ * client re-reserves (this refresh even revives a still-open resumable
+ * session — probe E2) and retries the upload.
+ *
+ * @returns {Promise<{reservationId, objectName, byteSize, expiresAt:number,
+ *                    refreshed:boolean}>}
  */
 async function reserveUploadCore({ db, uid, data, now, projectId }) {
   if (typeof uid !== 'string' || uid.length === 0) {
@@ -103,14 +100,12 @@ async function reserveUploadCore({ db, uid, data, now, projectId }) {
       throw new HttpsError('permission-denied', 'This account is not admitted to sync.');
     }
 
-    const { startWindowSec, leaseSec } = resolveDeadlines(
+    const leaseSec = resolveLeaseSec(
       testingSnap && testingSnap.exists ? testingSnap.data() : null,
       projectId
     );
 
-    const nowMs = now.toMillis();
-    const startBeforeMs = nowMs + startWindowSec * 1000;
-    const releaseAfterMs = startBeforeMs + leaseSec * 1000; // lease runs FROM the window end
+    const expiresAtMs = now.toMillis() + leaseSec * 1000;
 
     const quotaBytes = num(userSnap.get('quotaBytes')) || DEFAULT_QUOTA_BYTES;
     const bytesUsed = usageSnap.exists ? num(usageSnap.get('bytesUsed')) : 0;
@@ -138,8 +133,7 @@ async function reserveUploadCore({ db, uid, data, now, projectId }) {
         tier,
         byteSize,
         createdAt: resSnap.exists ? resSnap.get('createdAt') || now : now,
-        startBefore: Timestamp.fromMillis(startBeforeMs),
-        releaseAfter: Timestamp.fromMillis(releaseAfterMs),
+        expiresAt: Timestamp.fromMillis(expiresAtMs),
       },
       { merge: true }
     );
@@ -160,11 +154,10 @@ async function reserveUploadCore({ db, uid, data, now, projectId }) {
       reservationId: resId,
       objectName: objectName(uid, tier, contentHash),
       byteSize,
-      startBefore: startBeforeMs,
-      releaseAfter: releaseAfterMs,
+      expiresAt: expiresAtMs,
       refreshed,
     };
   });
 }
 
-module.exports = { reserveUploadCore, resolveDeadlines, validate };
+module.exports = { reserveUploadCore, resolveLeaseSec, validate };

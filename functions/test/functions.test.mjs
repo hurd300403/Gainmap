@@ -210,7 +210,7 @@ test('admitSyncUser rejects an empty uid (unauthenticated caller)', async () => 
 const reserve = (data, atMs = NOW0) =>
   reserveUploadCore({ db, uid: UID, data, now: now(atMs), projectId: PROJECT_ID });
 
-test('reserveUpload writes both deadlines and charges reservedBytes once', async () => {
+test('reserveUpload writes the completion deadline and charges reservedBytes once', async () => {
   await seedFlags();
   await seedUser();
   const r = await reserve({ contentHash: HASH, tier: 'originals', byteSize: 1000 });
@@ -218,32 +218,30 @@ test('reserveUpload writes both deadlines and charges reservedBytes once', async
   assert.equal(r.reservationId, `originals_${HASH}`);
   assert.equal(r.objectName, `users/${UID}/originals/${HASH}.jpg`);
   assert.equal(r.refreshed, false);
-  assert.equal(r.startBefore, NOW0 + 30 * 60 * 1000);
-  assert.equal(r.releaseAfter, r.startBefore + 8 * 24 * 3600 * 1000);
+  assert.equal(r.expiresAt, NOW0 + 8 * 24 * 3600 * 1000);
   assert.equal((await usage()).reservedBytes, 1000);
 });
 
-test('reserveUpload refresh extends BOTH deadlines and never double-counts', async () => {
+test('reserveUpload refresh extends expiresAt and never double-counts', async () => {
   await seedFlags();
   await seedUser();
   const first = await reserve({ contentHash: HASH, tier: 'originals', byteSize: 1000 }, NOW0);
   assert.equal((await usage()).reservedBytes, 1000);
 
-  const laterMs = NOW0 + 20 * 60 * 1000; // 20 min later, still inside the window
+  const laterMs = NOW0 + 20 * 60 * 1000; // 20 min later, lease still live
   const second = await reserve({ contentHash: HASH, tier: 'originals', byteSize: 1000 }, laterMs);
 
   assert.equal(second.refreshed, true);
-  assert.ok(second.startBefore > first.startBefore, 'startBefore must move forward');
-  assert.ok(second.releaseAfter > first.releaseAfter, 'releaseAfter must move forward too');
-  assert.equal(second.startBefore, laterMs + 30 * 60 * 1000);
-  assert.equal(second.releaseAfter, second.startBefore + 8 * 24 * 3600 * 1000);
+  assert.ok(second.expiresAt > first.expiresAt, 'expiresAt must move forward');
+  assert.equal(second.expiresAt, laterMs + 8 * 24 * 3600 * 1000);
 
   // the whole point: reservedBytes is unchanged
   assert.equal((await usage()).reservedBytes, 1000);
 
   const stored = (await db.doc(`users/${UID}/reservations/originals_${HASH}`).get()).data();
-  assert.equal(stored.startBefore.toMillis(), second.startBefore);
-  assert.equal(stored.releaseAfter.toMillis(), second.releaseAfter);
+  assert.equal(stored.expiresAt.toMillis(), second.expiresAt);
+  assert.equal(stored.startBefore, undefined, 'two-deadline fields must not linger');
+  assert.equal(stored.releaseAfter, undefined, 'two-deadline fields must not linger');
 });
 
 test('reserveUpload enforces the quota with a typed resource-exhausted error', async () => {
@@ -302,16 +300,15 @@ test('reserveUpload requires an admitted user and validates its arguments', asyn
   );
 });
 
-test('config/testing deadline overrides apply off-production and are inert on it', async () => {
+test('config/testing lease override applies off-production and is inert on it', async () => {
   await seedFlags();
   await seedUser();
-  await seedTesting({ startWindowSec: 5, leaseSec: 60 });
+  await seedTesting({ leaseSec: 60 });
 
   const shortened = await reserve({ contentHash: HASH, tier: 'originals', byteSize: 10 });
-  assert.equal(shortened.startBefore, NOW0 + 5000);
-  assert.equal(shortened.releaseAfter, NOW0 + 5000 + 60_000);
+  assert.equal(shortened.expiresAt, NOW0 + 60_000);
 
-  // Same document, production project id => defaults, override ignored.
+  // Same document, production project id => default, override ignored.
   const prod = await reserveUploadCore({
     db,
     uid: UID,
@@ -319,8 +316,7 @@ test('config/testing deadline overrides apply off-production and are inert on it
     now: now(NOW0),
     projectId: 'gainmap-production',
   });
-  assert.equal(prod.startBefore, NOW0 + 30 * 60 * 1000);
-  assert.equal(prod.releaseAfter, prod.startBefore + 8 * 24 * 3600 * 1000);
+  assert.equal(prod.expiresAt, NOW0 + 8 * 24 * 3600 * 1000);
 });
 
 // ===========================================================================
@@ -499,19 +495,22 @@ test('objects outside the synced layout are ignored', async () => {
 // ===========================================================================
 // maintenance
 // ===========================================================================
-test('maintenance releases a lease only after releaseAfter, never at startBefore', async () => {
+test('maintenance releases a lease only after expiresAt + grace, never at expiresAt', async () => {
   await seedFlags();
   await seedUser();
-  await seedTesting({ startWindowSec: 60, leaseSec: 600 });
+  await seedTesting({ leaseSec: 600 });
   const r = await reserve({ contentHash: HASH, tier: 'originals', byteSize: 400 });
   assert.equal((await usage()).reservedBytes, 400);
 
-  // Past startBefore but inside the capacity lease: the bytes stay charged.
-  let out = await releaseExpiredReservations({ db, now: now(r.startBefore + 1000) });
+  const GRACE = 60 * 60 * 1000; // default RESERVATION_RELEASE_GRACE_MS
+
+  // Past expiresAt but inside the grace hour: a finalize that squeaked in at
+  // the deadline may still have its reconciler event in flight — stay charged.
+  let out = await releaseExpiredReservations({ db, now: now(r.expiresAt + 1000) });
   assert.equal(out.released, 0);
   assert.equal((await usage()).reservedBytes, 400);
 
-  out = await releaseExpiredReservations({ db, now: now(r.releaseAfter + 1000) });
+  out = await releaseExpiredReservations({ db, now: now(r.expiresAt + GRACE + 1000) });
   assert.equal(out.released, 1);
   assert.equal((await usage()).reservedBytes, 0);
   assert.equal((await db.doc(`users/${UID}/reservations/originals_${HASH}`).get()).exists, false);
