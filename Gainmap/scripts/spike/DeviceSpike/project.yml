@@ -30,4 +30,6 @@ targets:
         CLANG_CXX_LANGUAGE_STANDARD: "c++17"
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_NSPhotoLibraryUsageDescription: "S2 spike verifies a saved HDR photo survives the Photos round trip."
+        INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription: "S2 spike saves one test HDR photo to your library."
         TARGETED_DEVICE_FAMILY: "1"

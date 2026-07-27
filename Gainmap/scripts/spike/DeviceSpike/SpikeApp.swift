@@ -2,6 +2,8 @@
 //  (captured via `devicectl device process launch --console`) and on screen.
 import SwiftUI
 import CryptoKit
+import Photos
+import ImageIO
 
 @main
 struct SpikeApp: App {
@@ -12,10 +14,90 @@ struct SpikeApp: App {
 
 struct SpikeView: View {
     @State private var report = "running…"
+    @State private var s2Report = ""
     var body: some View {
-        ScrollView { Text(report).font(.system(.footnote, design: .monospaced)).padding() }
-            .task { report = await Task.detached { runProbes() }.value }
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                Text(report).font(.system(.footnote, design: .monospaced))
+                Button("Run S2 Photos round-trip") {
+                    s2Report = "S2 running…"
+                    Task { s2Report = await runS2() }
+                }.buttonStyle(.borderedProminent)
+                Text(s2Report).font(.system(.footnote, design: .monospaced))
+            }.padding()
+        }
+        .task { report = await Task.detached { runProbes() }.value }
     }
+}
+
+// S2: save a real UltraHDR export to Photos, re-fetch its bytes, verify the
+// gain map survives. The load-bearing unknown of the whole iOS export story.
+func runS2() async -> String {
+    var lines = ["=== S2 PHOTOS ROUND-TRIP ==="]
+    guard let fixURL = Bundle.main.url(forResource: "s2-fixture", withExtension: "jpg"),
+          let original = try? Data(contentsOf: fixURL) else { return "S2: missing fixture" }
+    let origHash = SHA256.hash(data: original).map { String(format: "%02x", $0) }.joined()
+    lines.append("orig: \(original.count) bytes sha \(String(origHash.prefix(16)))…")
+
+    let auth = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
+    guard auth == .authorized || auth == .limited else { return "S2: photo permission denied (\(auth.rawValue))" }
+
+    var localID: String?
+    do {
+        try await PHPhotoLibrary.shared().performChanges {
+            let req = PHAssetCreationRequest.forAsset()
+            let opts = PHAssetResourceCreationOptions()
+            opts.shouldMoveFile = false
+            opts.originalFilename = "s2-fixture.jpg"
+            req.addResource(with: .photo, fileURL: fixURL, options: opts)
+            localID = req.placeholderForCreatedAsset?.localIdentifier
+        }
+    } catch { return "S2: save failed — \(error.localizedDescription)" }
+    guard let id = localID,
+          let asset = PHAsset.fetchAssets(withLocalIdentifiers: [id], options: nil).firstObject else {
+        return "S2: created asset not found"
+    }
+    lines.append("saved asset \(String(id.prefix(12)))…")
+
+    let resources = PHAssetResource.assetResources(for: asset)
+    lines.append("resources: " + resources.map { "\($0.type.rawValue):\($0.originalFilename)" }.joined(separator: " "))
+    guard let photoRes = resources.first(where: { $0.type == .photo }) else { return "S2: no .photo resource" }
+
+    var fetched = Data()
+    do {
+        let opts = PHAssetResourceRequestOptions()
+        opts.isNetworkAccessAllowed = true
+        try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
+            PHAssetResourceManager.default().requestData(for: photoRes, options: opts) { chunk in
+                fetched.append(chunk)
+            } completionHandler: { err in
+                if let err { c.resume(throwing: err) } else { c.resume() }
+            }
+        }
+    } catch { return "S2: re-fetch failed — \(error.localizedDescription)" }
+
+    let fetchedHash = SHA256.hash(data: fetched).map { String(format: "%02x", $0) }.joined()
+    lines.append("fetched: \(fetched.count) bytes sha \(String(fetchedHash.prefix(16)))…")
+    lines.append(fetchedHash == origHash ? "BYTES: IDENTICAL ✅" : "BYTES: DIFFER ⚠️")
+
+    // Gain-map survival on the ROUND-TRIPPED bytes (both dialects).
+    if let src = CGImageSourceCreateWithData(fetched as CFData, nil) {
+        var iso = false
+        if #available(iOS 18.0, *) {
+            iso = CGImageSourceCopyAuxiliaryDataInfoAtIndex(src, 0, kCGImageAuxiliaryDataTypeISOGainMap) != nil
+        }
+        let apple = CGImageSourceCopyAuxiliaryDataInfoAtIndex(src, 0, kCGImageAuxiliaryDataTypeHDRGainMap) != nil
+        lines.append("ISO 21496-1 gain map: \(iso ? "PRESENT ✅" : "MISSING ❌")")
+        lines.append("Apple/HDR gain map:  \(apple ? "present" : "absent")")
+        lines.append((fetchedHash == origHash || iso) ? "S2/RESULT: PASS" : "S2/RESULT: FAIL")
+    } else {
+        lines.append("S2/RESULT: FAIL (fetched bytes not decodable)")
+    }
+    lines.append("Now open Photos and confirm the image visibly glows (HDR) on this screen.")
+    lines.append("=== S2 DONE ===")
+    let out = lines.joined(separator: "\n")
+    print(out); fflush(stdout)
+    return out
 }
 
 func runProbes() -> String {
