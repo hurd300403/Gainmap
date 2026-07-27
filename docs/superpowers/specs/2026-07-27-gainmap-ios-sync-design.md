@@ -1,4 +1,6 @@
-# Gainmap iOS + Firebase Session Sync — Implementation Plan (r6)
+# Gainmap iOS + Firebase Session Sync — Implementation Plan (r7)
+
+> **r7 (2026-07-27, post-probe):** the real-project probe FALSIFIED the two-deadline reservation design — Cloud Storage evaluates rules at **finalize**, not at resumable-session start, so `startBefore` was a completion deadline in disguise (any upload slower than 30 min would 403 after its bytes were spent). Replaced by **single-deadline semantics**: reservation carries only `expiresAt = now + 8 days`; Storage rules check reservation match + `request.time < expiresAt` (still 2 gets); maintenance releases capacity after `expiresAt + 1h`. A finalize-time 403 = lease expired mid-upload → client re-reserves (idempotent refresh; the probe's E2 shows a refresh even revives an open session) and retries. Also probe-discovered, production-critical: **`roles/firebaserules.firestoreServiceAgent` must be granted to `service-<projectNumber>@firebase-rules.iam.gserviceaccount.com`** or every cross-service `firestore.get()` in Storage rules fails (bare 403; invisible to the emulator, which doesn't enforce IAM). Granted on gainmap-production 2026-07-27. Evidence: `Gainmap/scripts/spike/P0-PROBE-RESULTS.md`. Sections below referring to `startBefore`/`releaseAfter` are superseded by this note.
 
 ## Context
 
