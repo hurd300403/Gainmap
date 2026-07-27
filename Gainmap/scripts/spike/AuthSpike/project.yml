@@ -1,0 +1,89 @@
+name: AuthSpike
+options:
+  bundleIdPrefix: com.legacylab
+  deploymentTarget:
+    iOS: "17.0"
+    macOS: "14.0"
+packages:
+  Firebase:
+    url: https://github.com/firebase/firebase-ios-sdk
+    from: "11.0.0"
+  GoogleSignIn:
+    url: https://github.com/google/GoogleSignIn-iOS
+    from: "8.0.0"
+
+# S3 auth spike. Deliberately uses the REAL App IDs (com.legacylab.gainmap /
+# .ios) — the point is proving sign-in against the production App ID
+# capabilities Sam enabled: Sign in with Apple (grouped), Keychain Sharing.
+targets:
+  AuthSpikeMac:
+    type: application
+    platform: macOS
+    sources:
+      - AuthSpikeApp.swift
+      - AuthModel.swift
+      - path: MacResources
+        buildPhase: resources
+    dependencies:
+      - package: Firebase
+        product: FirebaseAuth
+      - package: Firebase
+        product: FirebaseAppCheck
+      - package: GoogleSignIn
+        product: GoogleSignIn
+    info:
+      path: MacInfo.plist
+      properties:
+        GIDClientID: 937169591841-ibfut223q9cfsta6nr0hkv280bks0d3j.apps.googleusercontent.com
+        CFBundleURLTypes:
+          - CFBundleURLSchemes:
+              - com.googleusercontent.apps.937169591841-ibfut223q9cfsta6nr0hkv280bks0d3j
+    entitlements:
+      path: AuthSpikeMac.entitlements
+      properties:
+        com.apple.security.app-sandbox: false
+        com.apple.developer.applesignin: [Default]
+        keychain-access-groups:
+          - $(AppIdentifierPrefix)com.legacylab.gainmap
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.legacylab.gainmap
+        DEVELOPMENT_TEAM: S8HQ5TEYDE
+        CODE_SIGN_STYLE: Automatic
+        ENABLE_HARDENED_RUNTIME: YES
+
+  AuthSpikeIOS:
+    type: application
+    platform: iOS
+    sources:
+      - AuthSpikeApp.swift
+      - AuthModel.swift
+      - path: IOSResources
+        buildPhase: resources
+    dependencies:
+      - package: Firebase
+        product: FirebaseAuth
+      - package: Firebase
+        product: FirebaseAppCheck
+      - package: GoogleSignIn
+        product: GoogleSignIn
+    info:
+      path: IOSInfo.plist
+      properties:
+        GIDClientID: 937169591841-4orvoj00fj3b8qha03g5ls2jq51a3sj7.apps.googleusercontent.com
+        CFBundleURLTypes:
+          - CFBundleURLSchemes:
+              - com.googleusercontent.apps.937169591841-4orvoj00fj3b8qha03g5ls2jq51a3sj7
+        UILaunchScreen: {}
+    entitlements:
+      path: AuthSpikeIOS.entitlements
+      properties:
+        com.apple.developer.applesignin: [Default]
+        keychain-access-groups:
+          - $(AppIdentifierPrefix)com.legacylab.gainmap
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.legacylab.gainmap.ios
+        DEVELOPMENT_TEAM: S8HQ5TEYDE
+        CODE_SIGN_STYLE: Automatic
+        TARGETED_DEVICE_FAMILY: "1"
