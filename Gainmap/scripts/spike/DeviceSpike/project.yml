@@ -1,0 +1,33 @@
+name: DeviceSpike
+options:
+  bundleIdPrefix: com.legacylab
+  deploymentTarget:
+    iOS: "17.0"
+targets:
+  DeviceSpike:
+    type: application
+    platform: iOS
+    sources:
+      - path: SpikeApp.swift
+      - path: SpikeRender.swift
+      - path: SpikeBridge.h
+      - path: SpikeBridge.mm
+      - path: ../../../../upstream/src/encoder.cpp
+      - path: ../../../../upstream/src/encoder.h
+      - path: ../../../../upstream/src/tiff_reader.h
+      - path: Resources
+        buildPhase: resources
+    dependencies:
+      - framework: ../../../Vendor/GainmapUHDR.xcframework
+        embed: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.legacylab.gainmap.spike
+        DEVELOPMENT_TEAM: S8HQ5TEYDE
+        CODE_SIGN_STYLE: Automatic
+        SWIFT_OBJC_BRIDGING_HEADER: SpikeBridge.h
+        HEADER_SEARCH_PATHS: "$(SRCROOT)/../../../../upstream/src"
+        CLANG_CXX_LANGUAGE_STANDARD: "c++17"
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        TARGETED_DEVICE_FAMILY: "1"

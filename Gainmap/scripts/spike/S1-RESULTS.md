@@ -76,8 +76,40 @@ d4a9ffafddc0c2c683d82a6d9b0d7c7a97caf532674d0e75c86007289a90e668  ios-arm64/libG
 44369e99f8e52813e8118cf0f793c6d47e577fb212ceec9a730c7efed6b0b9b7  macos-arm64/libGainmapUHDR.a
 ```
 
-## 6. Open items (S1 not closed until these are recorded)
+## 6. Open items
 
-- [x] §5 determinism result — PASS (above)
-- [ ] One `parity-device` encode on a physical iPhone (needs the device; binary is built)
-- [ ] `bloomCIImage` Mac-vs-device f16 max-abs-diff → sets the CI-parity tolerance for P2's test ladder
+- [x] §5 determinism result — PASS
+- [x] Physical-device encode — PASS (§7)
+- [x] Mac-vs-device render diff — PASS, tolerance recorded (§7)
+
+**S1 CLOSED 2026-07-27. All exit criteria met.**
+
+## 7. Physical device (iPhone 15 Pro, A17 Pro) — PASS on both probes
+
+Vehicle: `DeviceSpike/` — minimal iOS app (XcodeGen + `xcodebuild
+-allowProvisioningUpdates` automatic signing, installed/launched via
+`devicectl`; no Xcode UI needed). Bundles the §2 fixtures + the Mac reference
+render; compiles `encoder.cpp` + links the ios-arm64 xcframework slice via an
+ObjC++ bridge; `SpikeRender.swift` is a verbatim copy of AutoHDR's bloom
+pipeline so both sides run the identical CI graph.
+(XcodeGen gotcha: targets have no `resources:` key — bundle resources go under
+`sources:` with `buildPhase: resources`, else they're silently dropped.)
+
+**Probe A — encode parity on device:** clamps `peak=4.527 (2.18 stops) K=4.754
+L=919` (identical to Mac/sim/CLI); output SHA-256
+`91d2ed7b988d29c19c227a2e3a177677f551de6d8d805f5521be76d7451594cc` ==
+the Mac CLI's bytes. **Byte-identical across Mac, simulator, and device.**
+
+**Probe B — cross-GPU render (1600×1066, signature-look params, extendedLinearSRGB f16):**
+
+```
+maxAbsDiff  0.006836      (linear, pipeline ceiling 4.5)
+meanAbsDiff 0.00094371
+PSNR        70.65 dB      (plan threshold: > 60 dB → PASS)
+```
+
+**Adopted CI-parity tolerance for the P2+ test ladder (with margin):
+maxAbsDiff ≤ 0.01 linear AND PSNR ≥ 65 dB.** Screenshot evidence in the
+2026-07-27 session; regenerate fixtures via `inprocess-parity.cpp gen`, sips
+(1600px from `mockups/hdr-samples/p1_sdr.jpg`), and `refrender` (SpikeRender +
+refrender-main.swift, swiftc on macOS).
