@@ -64,8 +64,10 @@ function validate(data) {
  * refreshes expiresAt = now + LEASE and never double-counts reservedBytes.
  *
  * CLIENT CONTRACT: a 403 at finalize means the lease expired mid-upload. The
- * client re-reserves (this refresh even revives a still-open resumable
- * session — probe E2) and retries the upload.
+ * client re-reserves and STARTS A NEW upload session — a denied finalize
+ * terminates the old resumable session (re-probe R2b: reusing it returns 400
+ * "Upload has already been terminated"). Refreshing BEFORE a denied finalize
+ * keeps a still-open session usable (probe E2).
  *
  * @returns {Promise<{reservationId, objectName, byteSize, expiresAt:number,
  *                    refreshed:boolean}>}

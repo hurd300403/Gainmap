@@ -71,9 +71,10 @@ service firebase.storage {
       // FINALIZE — object creation — not when a resumable session starts. So
       // expiresAt is a COMPLETION deadline: the upload's final byte must land
       // before it. Client contract: a 403 here means the lease expired
-      // mid-upload; the client re-reserves (idempotent refresh, which even
-      // revives a still-open session — probe E2) and retries. Capacity is
-      // released by maintenance only after expiresAt + grace.
+      // mid-upload; the client re-reserves (idempotent refresh) and starts a
+      // NEW upload session — a denied finalize terminates the old one
+      // (re-probe R2b). Capacity is released by maintenance only after
+      // expiresAt + grace.
       function reservationOK(reservation, flags) {
         return flags.data.syncEnabled == true
                && reservation.data.byteSize == request.resource.size

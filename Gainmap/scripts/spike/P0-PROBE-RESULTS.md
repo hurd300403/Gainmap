@@ -181,3 +181,41 @@ Project left provisioned (useful for S3) with **`config/flags.syncEnabled = fals
 
 **P0 probe result: assertion E FAILED — the reservation state machine needs a design change
 before P4 builds on it. All other assertions PASS.**
+
+---
+
+## Re-probe (r7 single-deadline design) — 2026-07-27 21:40Z
+
+After the E failure the backend was reworked to single-deadline reservations
+(`expiresAt = now + lease`; commit `cdfcc8e`) and redeployed to this probe project
+(`config/testing.leaseSec = 120`). All assertions PASS:
+
+| # | Assertion | Result |
+|---|---|---|
+| R1 | reserve → start resumable → wait past `expiresAt` (+30 s) → finalize | **PASS — 403** |
+| R2a | re-reserve after the 403 is an idempotent refresh (`refreshed: true`, new `expiresAt`) | **PASS** |
+| R2b | reusing the 403-terminated session | **PASS — 400 "Upload has already been terminated"** |
+| R2c | re-reserve → NEW resumable session → finalize | **PASS — 200** |
+| R3 | control: fresh reserve → immediate upload inside the lease | **PASS — 200** |
+| R4 | reservation doc carries `expiresAt`; no `startBefore`/`releaseAfter` remain | **PASS** |
+
+```
+21:40:11.551  reserveUpload (200000 B)   expiresAt=21:42:11.317 (120s lease)
+21:40:11.888  resumable session START    HTTP 200, upload URL captured
+21:42:42.340  finalize (31s past lease)  HTTP 403                          <- R1
+21:42:42.729  re-reserve                 refreshed:true, new expiresAt     <- R2a
+21:42:42.829  finalize, SAME session     HTTP 400 "already terminated"     <- R2b
+21:42:44.021  finalize, NEW session      HTTP 200                          <- R2c
+```
+
+**New platform fact (R2b), refining the original E2:** a rules-DENIED finalize
+terminates the resumable session. E2's "refresh revives the session" holds only when
+the refresh lands BEFORE a denied finalize. Client contract, final form: on a
+finalize 403, re-reserve and start a NEW upload session (do not retry the old URL).
+
+Probe uid `b3Qv0wNxeggCYX1nBAgJHduSWIL2`; script `reprobe.mjs` (session scratchpad,
+not committed — hardcodes the throwaway project's web API key). Project re-parked:
+`syncEnabled=false`, `signupsOpen=false`.
+
+**Re-probe verdict: the r7 single-deadline design is verified against the real
+platform. P0 backend is clear to deploy to gainmap-production.**
