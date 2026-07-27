@@ -104,8 +104,10 @@ fi
 command -v firebase >/dev/null 2>&1 || {
   echo "ERROR: firebase CLI not found (npm i -g firebase-tools)." >&2; exit 1; }
 
+# ${CONFIG_ARGS[@]+...}: macOS bash 3.2 treats expanding an EMPTY array as an
+# unbound variable under `set -u`; this idiom expands to nothing instead.
 firebase emulators:exec \
   --project demo-gainmap \
   --only auth,firestore,storage \
-  "${CONFIG_ARGS[@]}" \
+  ${CONFIG_ARGS[@]+"${CONFIG_ARGS[@]}"} \
   "node --test --test-reporter=spec --test-concurrency=1 $SUITES"
