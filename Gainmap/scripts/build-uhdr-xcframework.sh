@@ -13,6 +13,10 @@
 #   UHDR_SRC=<path>  override the libultrahdr source checkout
 set -euo pipefail
 
+# Deterministic archives: without this, ar/libtool embed member mtimes and
+# two identical builds hash differently, making reproducibility unverifiable.
+export ZERO_AR_DATE=1
+
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 PIN=13a058f452d846e43d4691f6885eeeaa8b0ea8d0
 UHDR_SRC="${UHDR_SRC:-$ROOT/build/_deps/libultrahdr-src}"
