@@ -1,0 +1,277 @@
+rules_version = '2';
+
+// ============================================================================
+// Gainmap sync — Firestore security rules (P0)
+// Spec: docs/superpowers/specs/2026-07-27-gainmap-ios-sync-design.md
+//       ("Security rules", "Quota — reservation state machine")
+//
+// Invariants enforced here (all load-bearing — do not relax without a spec change):
+//   * owner-only; every client write also requires users/{uid}.syncAdmitted == true
+//   * users/{uid} client CREATE is denied outright — admitSyncUser (Admin SDK) provisions it
+//   * server-owned fields are client-unwritable, with SPLIT create/update branches
+//   * schemaVersion must be an int in [1, MAX_SCHEMA_VERSION]  (schemaVersion 2 => reject)
+//   * createdAt / contentHash immutable once set
+//   * photo `look` is a map or literal null (null == "inherit")
+//   * per-group revision invariant: touching any field of a mutable group requires
+//     newRev == oldRev + 1 (a missing old rev counts as 0)
+//   * photo creates referencing a blob whose state == 'deleting' are REJECTED
+//     (closes the GC recheck-then-reference race)
+//   * `allow delete: if false` on EVERY client-facing document — clients only ever
+//     write `deletedAt` tombstones; physical deletion is Admin-SDK-only
+//   * kill switch: config/flags.syncEnabled must be true for creates and for updates,
+//     EXCEPT tombstone-only updates (users can always delete and always leave)
+//
+// Document-access budget (Firestore hard limit: 10 get()/exists() per operation).
+// Worst case is a photo CREATE:
+//     [1] exists(users/{uid})            \_ admitted()
+//     [2] get(users/{uid})               /
+//     [3] get(config/flags)               -- syncEnabled()
+//     [4] exists(users/{uid}/blobs/{h})  \_ blobNotDeleting()
+//     [5] get(users/{uid}/blobs/{h})     /
+//   => 5 of 10. Every other operation is <= 3.
+//
+// Fail-closed note: syncEnabled() dereferences config/flags. If that document is
+// missing the get() errors and the write is DENIED. config/flags is seeded by the
+// P0 provisioning runbook and is a hard dependency of the Storage rules too (which
+// cannot express a "missing doc" fallback within their 2-firestore.get() ceiling),
+// so both services fail the same way rather than disagreeing. Tombstone-only
+// updates short-circuit BEFORE syncEnabled() is evaluated, so "always able to
+// delete / always able to leave" survives even a deleted flags document.
+// ============================================================================
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ---------------------------------------------------------------- consts
+    function MAX_SCHEMA_VERSION() { return 1; }
+
+    // Mutable field groups on photos/{photoId}
+    function PHOTO_LOOK_FIELDS()  { return ['look', 'lookRev', 'lookBy', 'lookMut']; }
+    function PHOTO_ORDER_FIELDS() { return ['orderKey', 'orderRev', 'orderBy', 'orderMut']; }
+    // Mutable field groups on sessions/{sessionId}
+    function SESSION_TITLE_FIELDS() { return ['title', 'titleRev', 'titleBy', 'titleMut']; }
+    function SESSION_RL_FIELDS()    { return ['runningLook', 'sameLookForAll', 'rlRev', 'rlBy', 'rlMut']; }
+    // Shared delete/tombstone group (photos AND sessions)
+    function DEL_FIELDS() { return ['deletedAt', 'delRev', 'delBy', 'delMut']; }
+    // The exact key set a tombstone-only update may touch (allowed under the kill switch)
+    function TOMBSTONE_ONLY_KEYS() { return ['deletedAt', 'delRev', 'delBy', 'delMut', 'updatedAt']; }
+
+    // Server-owned, client-unwritable
+    function SERVER_USER_FIELDS() { return ['quotaBytes', 'syncAdmitted', 'entitlement']; }
+    function SERVER_BLOB_FIELDS() { return ['renditions', 'state', 'gcCandidateAt']; }
+
+    // ---------------------------------------------------------------- identity
+    function signedIn() { return request.auth != null; }
+    function isOwner(uid) { return signedIn() && request.auth.uid == uid; }
+
+    function userPath(uid) { return /databases/$(database)/documents/users/$(uid); }
+
+    // get() #1 + #2 — sync admission gate. Every client write requires it.
+    function admitted(uid) {
+      return exists(userPath(uid)) && get(userPath(uid)).data.syncAdmitted == true;
+    }
+
+    // get() #3 — kill switch (config/flags.syncEnabled).
+    function syncEnabled() {
+      return get(/databases/$(database)/documents/config/flags).data.syncEnabled == true;
+    }
+
+    // DORMANT patron-entitlement hook (spec: "Patron gating", task #316).
+    // Ships returning true so no behaviour depends on it today; activation is a
+    // one-line change here plus a custom-claim setter Cloud Function.
+    function entitled() {
+      return true;
+      // return request.auth.token.patron == true;  // <- dormant patron claim
+    }
+
+    // ---------------------------------------------------------------- shape
+    function versionOK() {
+      return request.resource.data.schemaVersion is int
+             && request.resource.data.schemaVersion >= 1
+             && request.resource.data.schemaVersion <= MAX_SCHEMA_VERSION();
+    }
+
+    function changedKeys() {
+      return request.resource.data.diff(resource.data).affectedKeys();
+    }
+    function touched(fields) { return changedKeys().hasAny(fields); }
+    function untouched(fields) { return !changedKeys().hasAny(fields); }
+
+    // "Immutable once set": may be written at create time, never changed afterwards.
+    function immutableOnceSet(field) {
+      return !(field in resource.data) || !changedKeys().hasAny([field]);
+    }
+
+    // ---------------------------------------------------------------- revisions
+    // Per-group invariant. `fields` MUST include the group's rev/by/mut metadata so
+    // that bumping metadata alone is gated too.
+    function oldRev(revField) { return resource.data.get(revField, 0); }
+    function newRev(revField) { return request.resource.data.get(revField, 0); }
+    function revOK(fields, revField) {
+      return !touched(fields)
+             || (newRev(revField) is int
+                 && oldRev(revField) is int
+                 && newRev(revField) == oldRev(revField) + 1);
+    }
+
+    // ---------------------------------------------------------------- kill switch
+    // A tombstone-only update touches nothing outside the del group (+ updatedAt).
+    // Evaluated BEFORE syncEnabled() at every call site so it short-circuits.
+    function tombstoneOnly() {
+      return changedKeys().hasOnly(TOMBSTONE_ONLY_KEYS());
+    }
+
+    // ---------------------------------------------------------------- photo shape
+    // `look` is a BloomParams map, or literal null meaning "inherit the session look".
+    function lookOK(d) {
+      return !('look' in d) || d.look == null || d.look is map;
+    }
+
+    function hashOK(h) { return h is string && h.matches('^[0-9a-f]{64}$'); }
+
+    // get() #4 + #5 — the GC race closer: a photo may not be created pointing at a
+    // blob that maintenance has already committed to deleting.
+    function blobNotDeleting(uid, hash) {
+      return !exists(/databases/$(database)/documents/users/$(uid)/blobs/$(hash))
+             || get(/databases/$(database)/documents/users/$(uid)/blobs/$(hash))
+                  .data.get('state', 'active') != 'deleting';
+    }
+
+    // ========================================================================
+    // config/** — publicly readable (kill switch, signup flags, client config),
+    // server-write-only.
+    // ========================================================================
+    match /config/{docId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // ========================================================================
+    // deletedAccounts/{uid} — deletion markers, deliberately OUTSIDE the user tree
+    // so recursiveDelete(users/{uid}) cannot remove its own guard. TTL ~30 days.
+    // Server-only in both directions.
+    // ========================================================================
+    match /deletedAccounts/{uid} {
+      allow read: if false;
+      allow write: if false;
+    }
+
+    // ========================================================================
+    // users/{uid}
+    // ========================================================================
+    match /users/{uid} {
+      allow read: if isOwner(uid);
+
+      // CREATE denied outright: admitSyncUser (Admin SDK) is the only provisioner.
+      // This is what makes the signup cap authoritative.
+      allow create: if false;
+
+      allow update: if isOwner(uid)
+                    && admitted(uid)
+                    && entitled()
+                    && versionOK()
+                    && syncEnabled()
+                    && untouched(SERVER_USER_FIELDS())
+                    && immutableOnceSet('createdAt');
+
+      allow delete: if false;   // deleteAccount (Admin SDK) only
+
+      // -------------------------------------------------- usage (CF-owned ledger)
+      match /usage/{docId} {
+        allow read: if isOwner(uid);
+        allow write: if false;  // usageReconciler / reserveUpload / maintenance only
+      }
+
+      // -------------------------------------------------- reservations (CF-owned)
+      match /reservations/{reservationId} {
+        allow read: if isOwner(uid);
+        allow write: if false;  // reserveUpload / usageReconciler / maintenance only
+      }
+
+      // -------------------------------------------------- blobs
+      // Client creates a shell {schemaVersion, contentHash, byteSize, createdAt}.
+      // renditions.* / state / gcCandidateAt are written ONLY by the server.
+      match /blobs/{contentHash} {
+        allow read: if isOwner(uid);
+
+        allow create: if isOwner(uid)
+                      && admitted(uid)
+                      && entitled()
+                      && versionOK()
+                      && syncEnabled()
+                      && hashOK(contentHash)
+                      && request.resource.data.contentHash == contentHash
+                      && !request.resource.data.keys().hasAny(SERVER_BLOB_FIELDS());
+
+        allow update: if isOwner(uid)
+                      && admitted(uid)
+                      && entitled()
+                      && versionOK()
+                      && syncEnabled()
+                      && untouched(SERVER_BLOB_FIELDS())
+                      && immutableOnceSet('contentHash')
+                      && immutableOnceSet('createdAt');
+
+        allow delete: if false;  // maintenance (Admin SDK) only
+      }
+
+      // -------------------------------------------------- sessions
+      match /sessions/{sessionId} {
+        allow read: if isOwner(uid);
+
+        allow create: if isOwner(uid)
+                      && admitted(uid)
+                      && entitled()
+                      && versionOK()
+                      && syncEnabled();
+
+        allow update: if isOwner(uid)
+                      && admitted(uid)
+                      && entitled()
+                      && versionOK()
+                      && (tombstoneOnly() || syncEnabled())
+                      && immutableOnceSet('createdAt')
+                      && revOK(SESSION_TITLE_FIELDS(), 'titleRev')
+                      && revOK(SESSION_RL_FIELDS(), 'rlRev')
+                      && revOK(DEL_FIELDS(), 'delRev');
+
+        allow delete: if false;  // tombstones only; maintenance purges
+
+        // ------------------------------------------------ photos
+        match /photos/{photoId} {
+          allow read: if isOwner(uid);
+
+          allow create: if isOwner(uid)
+                        && admitted(uid)
+                        && entitled()
+                        && versionOK()
+                        && syncEnabled()
+                        && lookOK(request.resource.data)
+                        && hashOK(request.resource.data.contentHash)
+                        && blobNotDeleting(uid, request.resource.data.contentHash);
+
+          allow update: if isOwner(uid)
+                        && admitted(uid)
+                        && entitled()
+                        && versionOK()
+                        && (tombstoneOnly() || syncEnabled())
+                        && lookOK(request.resource.data)
+                        && immutableOnceSet('createdAt')
+                        && immutableOnceSet('contentHash')
+                        && revOK(PHOTO_LOOK_FIELDS(), 'lookRev')
+                        && revOK(PHOTO_ORDER_FIELDS(), 'orderRev')
+                        && revOK(DEL_FIELDS(), 'delRev');
+
+          allow delete: if false;  // tombstones only; maintenance purges
+        }
+      }
+    }
+
+    // ========================================================================
+    // Everything else is closed.
+    // ========================================================================
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

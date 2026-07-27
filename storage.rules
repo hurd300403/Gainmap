@@ -1,0 +1,101 @@
+rules_version = '2';
+
+// ============================================================================
+// Gainmap sync — Cloud Storage security rules (P0)
+// Spec: docs/superpowers/specs/2026-07-27-gainmap-ios-sync-design.md
+//       ("Quota — reservation state machine" step 2, "Security rules / Storage")
+//
+// Object layout (content-addressed, immutable):
+//     users/{uid}/{tier}/{contentHash}.jpg      tier in originals|thumbs|proxies
+//
+// RESERVATION DOC ID SCHEME  (must stay in lockstep with
+//  functions/lib/constants.js -> reservationId(tier, contentHash)):
+//
+//     users/{uid}/reservations/{tier}_{contentHash}
+//
+// The id is derivable from {tier} and {fileName} alone — which is the whole point:
+// these rules can compute it without a second lookup. `contentHash` is the file
+// name with its extension stripped, and nameOK() pins the file name to
+// ^[0-9a-f]{64}[.]jpg$ so the derivation is total.
+//
+// CREATE ONLY. update and delete are denied for every client:
+//   * objects are content-addressed and immutable, so update is meaningless
+//   * clients never GC — physical deletion happens exclusively via the Admin SDK
+//     (maintenance / deleteAccount / usageReconciler), which bypasses rules.
+//
+// EXACTLY TWO firestore.get() calls on the create path — the hard ceiling for
+// cross-service reads. Both are passed as arguments to reservationOK() so each
+// document is fetched once and only once; no `let`, no repeated call sites.
+//
+// Fail-closed: if either config/flags or the reservation document is missing, the
+// firestore.get() yields null, dereferencing it errors, and the upload is DENIED.
+// Quota arithmetic deliberately lives ONLY in reserveUpload (a transaction) — these
+// rules just check that a matching, unexpired authorization exists.
+// ============================================================================
+
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    match /users/{uid}/{tier}/{fileName} {
+
+      function isOwner() {
+        return request.auth != null && request.auth.uid == uid;
+      }
+
+      function tierOK() {
+        return tier in ['originals', 'thumbs', 'proxies'];
+      }
+
+      // Pins the name so contentHash() below is a total function.
+      function nameOK() {
+        return fileName.matches('^[0-9a-f]{64}[.]jpg$');
+      }
+
+      function contentHash() {
+        return fileName.split('[.]')[0];
+      }
+
+      // See "RESERVATION DOC ID SCHEME" above.
+      function reservationId() {
+        return tier + '_' + contentHash();
+      }
+
+      function payloadOK() {
+        return request.resource.contentType == 'image/jpeg'
+               && request.resource.size > 0
+               && request.resource.size < 64 * 1024 * 1024;   // 64 MB hard cap
+      }
+
+      // `reservation` and `flags` are the ONLY two cross-service reads.
+      // startBefore is the *authorization window* to BEGIN an upload; the separate
+      // capacity lease (releaseAfter) is enforced by maintenance, not here, because
+      // Storage rules are evaluated at upload start and never again at finalize.
+      function reservationOK(reservation, flags) {
+        return flags.data.syncEnabled == true
+               && reservation.data.byteSize == request.resource.size
+               && request.time < reservation.data.startBefore;
+      }
+
+      allow read: if isOwner();
+
+      allow create: if isOwner()
+                    && tierOK()
+                    && nameOK()
+                    && payloadOK()
+                    && reservationOK(
+                         // firestore.get() #1 of 2
+                         firestore.get(/databases/(default)/documents/users/$(uid)/reservations/$(reservationId())),
+                         // firestore.get() #2 of 2
+                         firestore.get(/databases/(default)/documents/config/flags)
+                       );
+
+      allow update: if false;   // content-addressed immutability
+      allow delete: if false;   // no client GC — Admin SDK only
+    }
+
+    // Everything outside the per-user tree is closed.
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

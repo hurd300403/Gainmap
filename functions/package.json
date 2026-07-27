@@ -1,0 +1,21 @@
+{
+  "name": "gainmap-functions",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Gainmap sync backend — admission, upload reservations, usage reconciliation, maintenance, account deletion",
+  "main": "index.js",
+  "engines": {
+    "node": "20"
+  },
+  "scripts": {
+    "test": "node --test --test-reporter=spec test/rules.test.mjs test/functions.test.mjs"
+  },
+  "dependencies": {
+    "firebase-admin": "^13.0.2",
+    "firebase-functions": "^6.1.1"
+  },
+  "devDependencies": {
+    "@firebase/rules-unit-testing": "^4.0.1",
+    "firebase": "^11.1.0"
+  }
+}
