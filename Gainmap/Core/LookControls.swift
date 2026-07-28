@@ -21,13 +21,22 @@ public struct LookControlsPanel: View {
     /// SDR fallback doesn't surprise anyone) — the host app owns that modal.
     var onGlowInSDRInfo: () -> Void
 
-    @State private var showAdvancedLook = false
+    // Disclosure state is OWNED BY THE HOST (bound in), not the panel: on the
+    // Mac the panel is torn down whenever the queue empties, and panel-local
+    // @State would reset Advanced/group disclosure between batches — 1.5 kept
+    // it for the whole session, so the host holds it at session lifetime.
+    @Binding var showAdvancedLook: Bool
     // Which advanced groups are expanded. All open by default so nothing is hidden
     // on first look; the grouping (not the collapse) is what tames the complexity.
-    @State private var expandedGroups: Set<String> = ["glow", "color", "hdr"]
+    @Binding var expandedGroups: Set<String>
 
-    public init(model: MergeModel, onGlowInSDRInfo: @escaping () -> Void) {
+    public init(model: MergeModel,
+                showAdvancedLook: Binding<Bool>,
+                expandedGroups: Binding<Set<String>>,
+                onGlowInSDRInfo: @escaping () -> Void) {
         self.model = model
+        self._showAdvancedLook = showAdvancedLook
+        self._expandedGroups = expandedGroups
         self.onGlowInSDRInfo = onGlowInSDRInfo
     }
 

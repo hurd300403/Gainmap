@@ -14,6 +14,11 @@ import GainmapCore
 
 struct ContentView: View {
     @StateObject private var model = MergeModel()
+    // Look-panel disclosure state lives HERE (session lifetime), not in the
+    // panel: the panel is torn down when the queue empties, and these must
+    // survive the "clear the strip, start the next batch" cycle (1.5 behavior).
+    @State private var showAdvancedLook = false
+    @State private var expandedGroups: Set<String> = ["glow", "color", "hdr"]
     @State private var window: NSWindow?
     @State private var shareHover = false
     @State private var showShareModal = false
@@ -65,6 +70,8 @@ struct ContentView: View {
                                 firstRunHowto.padding(.top, 14)
                             } else {
                                 LookControlsPanel(model: model,
+                                                  showAdvancedLook: $showAdvancedLook,
+                                                  expandedGroups: $expandedGroups,
                                                   onGlowInSDRInfo: { showGlowInSDRInfo = true })
                                     .padding(.top, 14)
                                 autoResultStrip

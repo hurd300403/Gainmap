@@ -52,12 +52,8 @@ targets:
         PRODUCT_MODULE_NAME: GainmapCore
         PRODUCT_BUNDLE_IDENTIFIER: com.legacylab.gainmap.core
         GENERATE_INFOPLIST_FILE: YES
-        ENABLE_MODULE_VERIFIER: NO
-        # Same DSN plumbing as the app: empty in Debug, real for Release.
-        SENTRY_DSN: ""
-      configs:
-        Release:
-          SENTRY_DSN: "https://553956a1d0e59a781e1ec7dedeee33ba@o4510926726365184.ingest.us.sentry.io/4511583301795840"
+        # No SENTRY_DSN here: CrashReporting reads it from Bundle.main — the
+        # APP target's Info.plist — so the framework needs no DSN plumbing.
 
   Gainmap:
     type: application
@@ -104,6 +100,29 @@ targets:
           # gainmap project in the sam-hurd-photo Sentry org.
           SENTRY_DSN: "https://553956a1d0e59a781e1ec7dedeee33ba@o4510926726365184.ingest.us.sentry.io/4511583301795840"
 
+  # Dev-only P1 demo shell: GainmapCore running on a physical iPhone (shared
+  # LookControlsPanel + AutoHDR engine + an EDR Metal preview twin). Throwaway —
+  # replaced by the real GainmapIOS target in P5.
+  CoreDemo:
+    type: application
+    platform: iOS
+    dependencies:
+      - target: GainmapCore
+        embed: true
+    sources:
+      - path: Demo/CoreDemo
+    settings:
+      base:
+        PRODUCT_NAME: CoreDemo
+        # Reuses the registered iOS App ID (same as the S3 AuthSpikeIOS install,
+        # which this replaces on-device).
+        PRODUCT_BUNDLE_IDENTIFIER: com.legacylab.gainmap.ios
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_CFBundleDisplayName: Gainmap Demo
+        TARGETED_DEVICE_FAMILY: "1"
+        LD_RUNPATH_SEARCH_PATHS: "@executable_path/Frameworks"
+
   GainmapCoreTests:
     type: bundle.unit-test
     supportedDestinations: [macOS, iOS]
@@ -128,6 +147,13 @@ schemes:
       config: Debug
       targets:
         - GainmapCoreTests
+
+  CoreDemo:
+    build:
+      targets:
+        CoreDemo: all
+    run:
+      config: Debug
 
   Gainmap:
     build:
