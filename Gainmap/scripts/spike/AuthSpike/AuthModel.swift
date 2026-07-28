@@ -53,7 +53,22 @@ final class AuthModel: ObservableObject {
         }
     }
 
-    // MARK: Sign in with Apple (nonce flow)
+    // MARK: Sign in with Apple — macOS web flow
+    // Developer ID distribution does NOT support the applesignin entitlement
+    // (S3 finding), so the Mac goes through Firebase's browser-based OAuth flow.
+
+    // FirebaseAuth's own web flow is `#if os(iOS)`-gated (SDK finding), so the
+    // Mac needs a hand-rolled ASWebAuthenticationSession against appleid.apple.com,
+    // then OAuthProvider.credential(withProviderID:idToken:rawNonce:) — which IS
+    // cross-platform. That flow requires a Services ID in the Apple portal;
+    // stubbed until it exists.
+    #if os(macOS)
+    func appleWebSignIn() {
+        say("APPLE/web flow not yet wired — needs the Services ID + return-URL portal setup.")
+    }
+    #endif
+
+    // MARK: Sign in with Apple — native nonce flow (iOS)
 
     func prepareAppleRequest(_ request: ASAuthorizationAppleIDRequest) {
         let nonce = Self.randomNonce()

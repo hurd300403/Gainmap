@@ -7,6 +7,13 @@
 	<key>teamID</key>
 	<string>S8HQ5TEYDE</string>
 	<key>signingStyle</key>
-	<string>automatic</string>
+	<string>manual</string>
+	<key>signingCertificate</key>
+	<string>38FED0F232826AF0D22DF117CE055D78F0823FAC</string>
+	<key>provisioningProfiles</key>
+	<dict>
+		<key>com.legacylab.gainmap</key>
+		<string>Gainmap Developer ID</string>
+	</dict>
 </dict>
 </plist>

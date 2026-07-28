@@ -36,12 +36,18 @@ struct SpikeView: View {
                 Text(hint).font(.footnote).foregroundStyle(.orange)
             }
 
+            #if os(macOS)
+            // Developer ID builds cannot carry the applesignin entitlement, so
+            // the Mac uses Firebase's web flow instead of the native button.
+            Button("Sign in with Apple (web flow)") { model.appleWebSignIn() }
+            #else
             SignInWithAppleButton(.signIn) { request in
                 model.prepareAppleRequest(request)
             } onCompletion: { result in
                 model.handleAppleCompletion(result)
             }
             .frame(width: 240, height: 36)
+            #endif
 
             Button("Sign in with Google") {
                 #if os(macOS)

@@ -38,11 +38,14 @@ targets:
         CFBundleURLTypes:
           - CFBundleURLSchemes:
               - com.googleusercontent.apps.937169591841-ibfut223q9cfsta6nr0hkv280bks0d3j
+              # Firebase web-flow callback (encoded Firebase app id of the Mac app)
+              - app-1-937169591841-ios-a590122fbc85424c7d0d60
+    # No applesignin here: Sign in with Apple is NOT a supported capability for
+    # Developer ID distribution (S3 finding) — the Mac uses Firebase's web flow.
     entitlements:
       path: AuthSpikeMac.entitlements
       properties:
         com.apple.security.app-sandbox: false
-        com.apple.developer.applesignin: [Default]
         keychain-access-groups:
           - $(AppIdentifierPrefix)com.legacylab.gainmap
     settings:
