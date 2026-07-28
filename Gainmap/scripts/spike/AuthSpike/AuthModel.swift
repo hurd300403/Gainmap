@@ -14,6 +14,16 @@ import FirebaseCore
 import FirebaseAuth
 import GoogleSignIn
 
+#if os(macOS)
+import AppKit
+
+final class WebAuthPresenter: NSObject, ASWebAuthenticationPresentationContextProviding {
+    func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
+        NSApp.keyWindow ?? NSApp.windows.first ?? ASPresentationAnchor()
+    }
+}
+#endif
+
 final class AuthModel: ObservableObject {
     @Published var lines: [String] = []
     @Published var uid: String?
@@ -58,13 +68,82 @@ final class AuthModel: ObservableObject {
     // (S3 finding), so the Mac goes through Firebase's browser-based OAuth flow.
 
     // FirebaseAuth's own web flow is `#if os(iOS)`-gated (SDK finding), so the
-    // Mac needs a hand-rolled ASWebAuthenticationSession against appleid.apple.com,
-    // then OAuthProvider.credential(withProviderID:idToken:rawNonce:) — which IS
-    // cross-platform. That flow requires a Services ID in the Apple portal;
-    // stubbed until it exists.
+    // Mac hand-rolls it: ASWebAuthenticationSession -> appleid.apple.com ->
+    // intercept the https redirect -> id_token from the fragment ->
+    // OAuthProvider.appleCredential (cross-platform). Scope-less on purpose:
+    // Apple requires response_mode=form_post when name/email scopes are asked
+    // for, and form_post can't be intercepted client-side. Whether the id_token
+    // still carries the email claim is an empirical S3 question — watch the log.
     #if os(macOS)
+    private static let servicesID = "com.legacylab.gainmap.auth"
+    private static let returnHost = "gainmap-production.firebaseapp.com"
+    private static let returnPath = "/__/auth/handler"
+
+    private let webPresenter = WebAuthPresenter()
+    private var webSession: ASWebAuthenticationSession?
+    private var webState: String?
+
     func appleWebSignIn() {
-        say("APPLE/web flow not yet wired — needs the Services ID + return-URL portal setup.")
+        guard #available(macOS 14.4, *) else {
+            say("APPLE/web flow needs macOS 14.4+ (https callback interception)")
+            return
+        }
+        let rawNonce = Self.randomNonce()
+        currentNonce = rawNonce
+        let hashedNonce = SHA256.hash(data: Data(rawNonce.utf8))
+            .map { String(format: "%02x", $0) }.joined()
+        let state = Self.randomNonce(length: 16)
+        webState = state
+
+        var c = URLComponents(string: "https://appleid.apple.com/auth/authorize")!
+        c.queryItems = [
+            .init(name: "client_id", value: Self.servicesID),
+            .init(name: "redirect_uri", value: "https://\(Self.returnHost)\(Self.returnPath)"),
+            .init(name: "response_type", value: "code id_token"),
+            .init(name: "response_mode", value: "fragment"),
+            .init(name: "state", value: state),
+            .init(name: "nonce", value: hashedNonce),
+        ]
+        say("APPLE/web flow: opening appleid.apple.com…")
+        let session = ASWebAuthenticationSession(
+            url: c.url!,
+            callback: .https(host: Self.returnHost, path: Self.returnPath)
+        ) { [weak self] url, error in
+            self?.handleAppleWebCallback(url: url, error: error, rawNonce: rawNonce)
+        }
+        session.presentationContextProvider = webPresenter
+        webSession = session
+        session.start()
+    }
+
+    private func handleAppleWebCallback(url: URL?, error: Error?, rawNonce: String) {
+        webSession = nil
+        if let error {
+            say("APPLE/web flow failed: \(error.localizedDescription)")
+            return
+        }
+        guard let url, let fragment = URLComponents(url: url, resolvingAgainstBaseURL: false)?.fragment else {
+            say("APPLE/web flow: callback URL has no fragment — got \(url?.absoluteString.prefix(120) ?? "nil")")
+            return
+        }
+        var params: [String: String] = [:]
+        for pair in fragment.components(separatedBy: "&") {
+            let kv = pair.components(separatedBy: "=")
+            guard kv.count == 2 else { continue }
+            params[kv[0]] = kv[1].removingPercentEncoding ?? kv[1]
+        }
+        guard params["state"] == webState else {
+            say("APPLE/web flow: state mismatch — rejecting")
+            return
+        }
+        guard let idToken = params["id_token"] else {
+            say("APPLE/web flow: no id_token in fragment (keys: \(params.keys.joined(separator: ",")))")
+            return
+        }
+        say("APPLE/web flow: id_token received (\(idToken.count) chars)")
+        let credential = OAuthProvider.appleCredential(
+            withIDToken: idToken, rawNonce: rawNonce, fullName: nil)
+        signIn(with: credential, label: "APPLE")
     }
     #endif
 
