@@ -123,6 +123,35 @@ final class UHDRInProcessTests: XCTestCase {
         }
     }
 
+    // MARK: Cancellation (the REAL encoder, not a seam stub)
+
+    /// P2 regression (review finding): cancellation must be live inside the
+    /// encoder itself — a detached task would never see it. A cancelled task
+    /// gets .failure("Stopped.") and no output file.
+    func testCancelledTaskStopsRealEncoderAndWritesNothing() async throws {
+        let hdr = try fixture("golden-512", "rawf16")
+        let sdrData = try fixture("golden-512-sdr", "jpg")
+        let dir = FileManager.default.temporaryDirectory
+        let sdrURL = dir.appendingPathComponent("\(UUID().uuidString).jpg")
+        let outURL = dir.appendingPathComponent("\(UUID().uuidString)_UltraHDR.jpg")
+        try sdrData.write(to: sdrURL)
+        defer {
+            try? FileManager.default.removeItem(at: sdrURL)
+            try? FileManager.default.removeItem(at: outURL)
+        }
+        let job = UHDRRunner.Job(
+            hdr: .rawBuffer(AutoHDR.RawBuffer(data: hdr, width: 512, height: 512)),
+            sdr: sdrURL, out: outURL)
+
+        let run = Task { await InProcessEncoder.run(job) }
+        run.cancel()   // cancel immediately — any boundary check must catch it
+        let outcome = await run.value
+
+        XCTAssertEqual(outcome, .failure(message: "Stopped."))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: outURL.path),
+                       "a stopped encode must not leave an output file")
+    }
+
     // MARK: The seam end-to-end (InProcessEncoder behind runTool)
 
     func testInProcessEncoderRunWritesOutputAndReadout() async throws {

@@ -404,7 +404,10 @@ public final class MergeModel: ObservableObject {
         }
     }
 
-    /// Stop the batch after the in-flight photo (which also gets terminated).
+    /// Stop the batch after the in-flight photo. The in-process encoder can't
+    /// be interrupted mid-flight (the CLI child could be SIGTERM'd) — a photo
+    /// already encoding finishes, but its result is DISCARDED and the photo
+    /// restored, so a Stop never changes any file.
     public func stopExportAll() { exportTask?.cancel() }
 
     /// Merge the batch, in order. SAME-LOOK on: every photo, all with the shared
@@ -451,29 +454,33 @@ public final class MergeModel: ObservableObject {
             try? FileManager.default.removeItem(at: tempOut)
             return
         }
-        switch outcome {
-        case .success(_, let readout):
-            do {
-                try Self.atomicallyPlace(tempOut, at: finalOut)
-                items[idx].status = .done
-                items[idx].outputURL = finalOut
-                items[idx].readout = readout
-                items[idx].error = nil
-            } catch {
-                try? FileManager.default.removeItem(at: tempOut)
-                items[idx].status = .error
-                items[idx].error = "Couldn't move the finished file into place: \(error.localizedDescription)"
-            }
-        case .failure(let message):
+        if Task.isCancelled {
+            // Stopped — whether the run failed fast OR finished anyway (the
+            // in-process encoder can't be interrupted mid-flight, so a late
+            // SUCCESS can arrive after Stop): discard whatever it produced and
+            // restore exactly what this photo was before the run (a
+            // re-exported .done keeps its previously saved file).
             try? FileManager.default.removeItem(at: tempOut)
-            if Task.isCancelled {
-                // Stopped, not failed: restore exactly what this photo was
-                // before the run (a re-exported .done keeps its saved file).
-                items[idx].status = prior.status == .merging ? .pending : prior.status
-                items[idx].outputURL = prior.outputURL
-                items[idx].readout = prior.readout
-                items[idx].error = prior.error
-            } else {
+            items[idx].status = prior.status == .merging ? .pending : prior.status
+            items[idx].outputURL = prior.outputURL
+            items[idx].readout = prior.readout
+            items[idx].error = prior.error
+        } else {
+            switch outcome {
+            case .success(_, let readout):
+                do {
+                    try Self.atomicallyPlace(tempOut, at: finalOut)
+                    items[idx].status = .done
+                    items[idx].outputURL = finalOut
+                    items[idx].readout = readout
+                    items[idx].error = nil
+                } catch {
+                    try? FileManager.default.removeItem(at: tempOut)
+                    items[idx].status = .error
+                    items[idx].error = "Couldn't move the finished file into place: \(error.localizedDescription)"
+                }
+            case .failure(let message):
+                try? FileManager.default.removeItem(at: tempOut)
                 items[idx].status = .error
                 items[idx].error = message
             }

@@ -21,6 +21,11 @@ options:
 
 settings:
   base:
+    # Apple Silicon only. Merges have NEVER worked on Intel (uhdrtool ships
+    # arm64-only; the app shows "Apple Silicon required" at launch), and the
+    # vendored GainmapUHDR.xcframework has no x86_64 slice — a universal
+    # Release archive fails to link (P2 review finding).
+    ARCHS: arm64
     DEVELOPMENT_TEAM: S8HQ5TEYDE
     SWIFT_VERSION: "5.0"
     MARKETING_VERSION: "1.6"

@@ -71,6 +71,34 @@ final class MergeStateMachineTests: XCTestCase {
         XCTAssertEqual(m.pendingCount, 1)
     }
 
+    /// P2 regression (review finding): the in-process encoder can't be
+    /// interrupted mid-flight, so a Stop can race a COMPLETING encode — the
+    /// late success must be discarded and the photo restored, never committed
+    /// over the user's previous export.
+    func testLateSuccessAfterStopIsDiscardedAndPriorFileKept() async throws {
+        let m = stubbedModel { job in .success(output: job.out, readout: nil) }
+        m.addFiles([url("a")])
+        await m.mergeItem(m.items[0].id)                       // first export saved
+        let finalOut = UHDRRunner.defaultOutputURL(forSDR: url("a"))
+        let original = try Data(contentsOf: finalOut)
+
+        // Re-export whose tool ignores cancellation and still "finishes".
+        m.runTool = { job in
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            try? Data("late-new-bytes".utf8).write(to: job.out)
+            return .success(output: job.out, readout: nil)
+        }
+        let itemID = m.items[0].id
+        let run = Task { await m.mergeItem(itemID) }
+        try await Task.sleep(nanoseconds: 50_000_000)          // encode "in flight"
+        run.cancel()                                           // Stop
+        await run.value
+
+        XCTAssertEqual(m.items[0].status, .done, "restored to its prior saved state")
+        XCTAssertEqual(try Data(contentsOf: finalOut), original,
+                       "a stopped re-export must never replace the previous good file")
+    }
+
     func testFailedMergeMarksErrorWithToolMessage() async {
         let m = stubbedModel { _ in .failure(message: "cannot open SDR JPEG") }
         m.addFiles([url("a")])

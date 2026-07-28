@@ -63,52 +63,59 @@ public enum UHDREncoding {
 }
 
 /// The in-process encoder: computeClamps + libultrahdr encode via the
-/// GMUltraHDR bridge, writing the result where the job asked. Runs detached —
-/// an encode is seconds of CPU and must never block the main actor.
+/// GMUltraHDR bridge, writing the result where the job asked.
+///
+/// Runs INLINE in the caller's task — nonisolated async, so it executes on the
+/// concurrent executor (off the main actor) WITHOUT Task.detached. Detaching
+/// here would sever cancellation inheritance and turn Stop into a no-op
+/// mid-encode (P2 review finding): a detached task never sees the parent's
+/// cancel, so a "stopped" batch could keep committing finished encodes.
 enum InProcessEncoder {
 
     static func run(_ job: UHDRRunner.Job) async -> RunOutcome {
-        // Cancellation is honored BEFORE the encode starts and before the
-        // output is written — unlike the CLI child, the encode itself can't be
-        // interrupted mid-flight, so these are the cancellation points.
+        // The encode itself can't be interrupted mid-flight (unlike the CLI
+        // child, which Stop could SIGTERM), so cancellation is honored at the
+        // boundaries: before the encode, before the write, and after the write
+        // (discarding the file) — a Stop never lets a result stand.
         if Task.isCancelled { return .failure(message: "Stopped.") }
-        let j = job
-        return await Task.detached(priority: .userInitiated) { () -> RunOutcome in
-            let hdrData: Data
-            let w: Int, h: Int
-            switch j.hdr {
-            case .rawBuffer(let buf):
-                hdrData = buf.data; w = buf.width; h = buf.height
-            case .raw(let url, let rw, let rh):
-                guard let d = try? Data(contentsOf: url) else {
-                    return .failure(message: "cannot open --raw-hdr '\(url.path)'")
-                }
-                hdrData = d; w = rw; h = rh
-            case .tiff:
-                return .failure(message: "TIFF input isn't supported by the in-process encoder.")
+        let hdrData: Data
+        let w: Int, h: Int
+        switch job.hdr {
+        case .rawBuffer(let buf):
+            hdrData = buf.data; w = buf.width; h = buf.height
+        case .raw(let url, let rw, let rh):
+            guard let d = try? Data(contentsOf: url) else {
+                return .failure(message: "cannot open --raw-hdr '\(url.path)'")
             }
-            guard let sdrData = try? Data(contentsOf: j.sdr) else {
-                return .failure(message: "cannot open SDR JPEG '\(j.sdr.path)'")
-            }
-            if Task.isCancelled { return .failure(message: "Stopped.") }
+            hdrData = d; w = rw; h = rh
+        case .tiff:
+            return .failure(message: "TIFF input isn't supported by the in-process encoder.")
+        }
+        guard let sdrData = try? Data(contentsOf: job.sdr) else {
+            return .failure(message: "cannot open SDR JPEG '\(job.sdr.path)'")
+        }
+        if Task.isCancelled { return .failure(message: "Stopped.") }
 
-            do {
-                var clamps: GMUHDRClamps?
-                let out = try GMUltraHDR.encode(
-                    hdrData, width: w, height: h, sdrJPEG: sdrData,
-                    cgamut: j.cgamut.rawValue, sgamut: j.sgamut.rawValue,
-                    clamps: &clamps)
-                if Task.isCancelled { return .failure(message: "Stopped.") }
-                try out.write(to: j.out)
-                let readout = clamps.map {
-                    ClampReadout(peakBoost: $0.peakBoost, stops: $0.stops,
-                                 maxBoost: $0.maxBoost, targetNits: $0.targetNits)
-                }
-                return .success(output: j.out, readout: readout)
-            } catch {
-                // Bridge errors carry the CLI's verbatim messages.
-                return .failure(message: (error as NSError).localizedDescription)
+        do {
+            var clamps: GMUHDRClamps?
+            let out = try GMUltraHDR.encode(
+                hdrData, width: w, height: h, sdrJPEG: sdrData,
+                cgamut: job.cgamut.rawValue, sgamut: job.sgamut.rawValue,
+                clamps: &clamps)
+            if Task.isCancelled { return .failure(message: "Stopped.") }
+            try out.write(to: job.out)
+            if Task.isCancelled {
+                try? FileManager.default.removeItem(at: job.out)
+                return .failure(message: "Stopped.")
             }
-        }.value
+            let readout = clamps.map {
+                ClampReadout(peakBoost: $0.peakBoost, stops: $0.stops,
+                             maxBoost: $0.maxBoost, targetNits: $0.targetNits)
+            }
+            return .success(output: job.out, readout: readout)
+        } catch {
+            // Bridge errors carry the CLI's verbatim messages.
+            return .failure(message: (error as NSError).localizedDescription)
+        }
     }
 }
