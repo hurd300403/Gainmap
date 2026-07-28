@@ -236,8 +236,7 @@ final class PreviewRenderer: ObservableObject {
     nonisolated private static func renderExport(sdr: URL, params: AutoHDR.BloomParams,
                                                  bake: Bool) async -> (CIImage?, URL?) {
         await Task.detached(priority: .userInitiated) { () -> (CIImage?, URL?) in
-            guard let smallSDR = AutoHDR.downscaledJPEG(of: sdr, maxDim: 1600),
-                  let tool = try? UHDRRunner.bundledToolURL() else { return (nil, nil) }
+            guard let smallSDR = AutoHDR.downscaledJPEG(of: sdr, maxDim: 1600) else { return (nil, nil) }
             // Same per-photo ICC-matched gamut as the real merge (a --sgamut that
             // disagrees with the JPEG's embedded profile hard-fails the tool, so a
             // fixed sRGB flag would break the settled preview for P3 photos).
@@ -248,16 +247,17 @@ final class PreviewRenderer: ObservableObject {
             let job: UHDRRunner.Job
             if bake {
                 guard let inputs = try? AutoHDR.synthesizeInputs(from: smallSDR, params: params, gamut: gamut) else { return (nil, nil) }
-                cleanup += [inputs.hdr.url, inputs.sdrJPEG]
-                job = UHDRRunner.Job(hdr: .raw(inputs.hdr.url, w: inputs.hdr.width, h: inputs.hdr.height),
+                cleanup.append(inputs.sdrJPEG)
+                job = UHDRRunner.Job(hdr: .rawBuffer(inputs.hdr),
                                      sdr: inputs.sdrJPEG, out: out, cgamut: gamut, sgamut: gamut)
             } else {
                 guard let buf = try? AutoHDR.synthesize(from: smallSDR, params: params, gamut: gamut) else { return (nil, nil) }
-                cleanup.append(buf.url)
-                job = UHDRRunner.Job(hdr: .raw(buf.url, w: buf.width, h: buf.height), sdr: smallSDR,
+                job = UHDRRunner.Job(hdr: .rawBuffer(buf), sdr: smallSDR,
                                      out: out, cgamut: gamut, sgamut: gamut)
             }
-            let outcome = await UHDRRunner().run(job, toolURL: tool)
+            // Same seam as real exports (in-process by default, CLI rollback
+            // flag honored) — the settled preview IS the shipping encode path.
+            let outcome = await UHDREncoding.run(job)
             for u in cleanup { try? FileManager.default.removeItem(at: u) }
             guard case .success(let o, _) = outcome else { return (nil, nil) }
             // Decode with the gain map applied (true HDR), kept lazy → keep the file.

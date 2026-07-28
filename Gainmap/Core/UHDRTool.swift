@@ -133,6 +133,9 @@ public struct UHDRRunner {
     public enum HDRSource: Equatable {
         case tiff(URL)
         case raw(URL, w: Int, h: Int)
+        /// In-memory buffer (P2): consumed directly by the in-process encoder;
+        /// the CLI rollback path stages it to a temp file first.
+        case rawBuffer(AutoHDR.RawBuffer)
     }
 
     /// A merge job: validated inputs + chosen gamuts + destination.
@@ -164,6 +167,8 @@ public struct UHDRRunner {
             args = ["--hdr", url.path]
         case .raw(let url, let w, let h):
             args = ["--raw-hdr", url.path, "--raw-w", String(w), "--raw-h", String(h)]
+        case .rawBuffer:
+            preconditionFailure("stage the in-memory buffer to a file (UHDREncoding.runViaCLI) before building CLI argv")
         }
         args += [
             "--sdr", job.sdr.path,

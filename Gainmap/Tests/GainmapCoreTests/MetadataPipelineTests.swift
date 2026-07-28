@@ -91,7 +91,6 @@ final class MetadataPipelineTests: XCTestCase {
                                                   params: AutoHDR.signatureLook,
                                                   gamut: .displayP3)
         addTeardownBlock {
-            try? FileManager.default.removeItem(at: inputs.hdr.url)
             try? FileManager.default.removeItem(at: inputs.sdrJPEG)
         }
 

@@ -38,11 +38,10 @@ final class SameLookForAllTests: XCTestCase {
                                 = { .success(output: $0.out, readout: nil) }) -> MergeModel {
         let m = MergeModel()
         m.synthesizeBuffer = { sdr, _, _ in
-            AutoHDR.RawBuffer(url: sdr.appendingPathExtension("raw"), width: 4, height: 4)
+            AutoHDR.RawBuffer(data: Data(), width: 4, height: 4)
         }
         m.synthesizeBakeInputs = { sdr, _, _ in
-            AutoHDR.UltraHDRInputs(hdr: AutoHDR.RawBuffer(url: sdr.appendingPathExtension("raw"),
-                                                          width: 4, height: 4),
+            AutoHDR.UltraHDRInputs(hdr: AutoHDR.RawBuffer(data: Data(), width: 4, height: 4),
                                    sdrJPEG: sdr)
         }
         m.runTool = { job in
@@ -88,7 +87,7 @@ final class SameLookForAllTests: XCTestCase {
         let m = stubbedModel()
         m.synthesizeBuffer = { sdr, look, _ in
             seenLooks[sdr.lastPathComponent] = look.glow
-            return AutoHDR.RawBuffer(url: sdr.appendingPathExtension("raw"), width: 4, height: 4)
+            return AutoHDR.RawBuffer(data: Data(), width: 4, height: 4)
         }
         m.addFiles([url("a"), url("b")])
         m.bloom.glow = 0.3
@@ -118,7 +117,7 @@ final class SameLookForAllTests: XCTestCase {
             runLooks.append(look.glow)
             // Sabotage: mutate the live look mid-batch — the snapshot must win.
             Task { @MainActor in m?.bloom.glow = 0.1 }
-            return AutoHDR.RawBuffer(url: sdr.appendingPathExtension("raw"), width: 4, height: 4)
+            return AutoHDR.RawBuffer(data: Data(), width: 4, height: 4)
         }
         await m.exportAll()
 
@@ -215,8 +214,7 @@ final class SameLookForAllTests: XCTestCase {
         let m = stubbedModel()
         m.synthesizeBakeInputs = { sdr, _, _ in
             bakeCalls.append(sdr.lastPathComponent)
-            return AutoHDR.UltraHDRInputs(hdr: AutoHDR.RawBuffer(url: sdr.appendingPathExtension("raw"),
-                                                                 width: 4, height: 4),
+            return AutoHDR.UltraHDRInputs(hdr: AutoHDR.RawBuffer(data: Data(), width: 4, height: 4),
                                           sdrJPEG: sdr)
         }
         m.addFiles([url("a"), url("b")])

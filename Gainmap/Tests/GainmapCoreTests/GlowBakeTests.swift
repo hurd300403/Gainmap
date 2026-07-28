@@ -52,7 +52,6 @@ final class GlowBakeTests: XCTestCase {
     private func bake(_ sdr: URL, _ p: AutoHDR.BloomParams) throws -> URL {
         let inputs = try AutoHDR.synthesizeInputs(from: sdr, params: p)
         addTeardownBlock {
-            try? FileManager.default.removeItem(at: inputs.hdr.url)
             try? FileManager.default.removeItem(at: inputs.sdrJPEG)
         }
         return inputs.sdrJPEG

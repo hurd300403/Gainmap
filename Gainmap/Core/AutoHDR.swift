@@ -170,9 +170,12 @@ public enum AutoHDR {
 
     // MARK: Synthesis (side-effecting; call off the main thread)
 
-    public struct RawBuffer {
-        public let url: URL; public let width: Int; public let height: Int
-        public init(url: URL, width: Int, height: Int) { self.url = url; self.width = width; self.height = height }
+    /// An in-memory interleaved RGBA f16 rendition. Data-backed since P2: the
+    /// buffer flows straight to the in-process encoder with no temp file (the
+    /// CLI rollback path stages it to disk itself).
+    public struct RawBuffer: Equatable {
+        public let data: Data; public let width: Int; public let height: Int
+        public init(data: Data, width: Int, height: Int) { self.data = data; self.width = width; self.height = height }
     }
 
     enum SynthError: LocalizedError {
@@ -282,10 +285,7 @@ public enum AutoHDR {
             ciContext.render(hdr, toBitmap: ptr.baseAddress!, rowBytes: w * 8,
                              bounds: bounds, format: .RGBAh, colorSpace: cs)
         }
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("gainmap-\(UUID().uuidString).rawf16")
-        try data.write(to: url)
-        return RawBuffer(url: url, width: w, height: h)
+        return RawBuffer(data: data, width: w, height: h)
     }
 
     /// The two inputs uhdrtool needs for the bake-on gain map: the full-range HDR
@@ -313,10 +313,6 @@ public enum AutoHDR {
             ciContext.render(hdr, toBitmap: ptr.baseAddress!, rowBytes: w * 8,
                              bounds: bounds, format: .RGBAh, colorSpace: linCS)
         }
-        let hdrURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("gainmap-\(UUID().uuidString).rawf16")
-        try data.write(to: hdrURL)
-
         // SDR primary: the original edit + only the soft haze (screen blend — no
         // headroom lift, no peak, no shoulder), so the fallback's tonality stays
         // exactly as exported. Written as a gamma JPEG in the SOURCE's gamut, then
@@ -338,7 +334,7 @@ public enum AutoHDR {
                                              carriedProperties(from: src) as CFDictionary)
         guard CGImageDestinationFinalize(dest) else { throw SynthError.context }
 
-        return UltraHDRInputs(hdr: RawBuffer(url: hdrURL, width: w, height: h), sdrJPEG: sdrURLout)
+        return UltraHDRInputs(hdr: RawBuffer(data: data, width: w, height: h), sdrJPEG: sdrURLout)
     }
 }
 

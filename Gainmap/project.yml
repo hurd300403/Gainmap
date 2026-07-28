@@ -41,17 +41,31 @@ targets:
     supportedDestinations: [macOS, iOS]
     sources:
       - path: Core
+      # Obj-C++ bridge over the encoder core (public header -> module).
+      - path: Bridge
+      # The uhdrtool encoder core compiles INTO the framework (P2): histogram
+      # clamps + memory encode, linking the vendored libultrahdr xcframework.
+      - path: ../upstream/src/encoder.cpp
     dependencies:
       # Sentry rides in Core (CrashReporting lives there); the app gets it
       # transitively.
       - package: Sentry
         product: Sentry
+      # libultrahdr + libjpeg-turbo static slices (S1 artifact, pinned 13a058f).
+      - framework: Vendor/GainmapUHDR.xcframework
+        embed: false
     settings:
       base:
         PRODUCT_NAME: GainmapCore
         PRODUCT_MODULE_NAME: GainmapCore
         PRODUCT_BUNDLE_IDENTIFIER: com.legacylab.gainmap.core
         GENERATE_INFOPLIST_FILE: YES
+        CLANG_CXX_LANGUAGE_STANDARD: "c++17"
+        # encoder.h/tiff_reader.h + ultrahdr_api.h (the slices' Headers are
+        # identical, so one slice's dir serves every destination).
+        HEADER_SEARCH_PATHS:
+          - "$(SRCROOT)/../upstream/src"
+          - "$(SRCROOT)/Vendor/GainmapUHDR.xcframework/macos-arm64/Headers"
         # No SENTRY_DSN here: CrashReporting reads it from Bundle.main — the
         # APP target's Info.plist — so the framework needs no DSN plumbing.
 
@@ -128,6 +142,12 @@ targets:
     supportedDestinations: [macOS, iOS]
     sources:
       - path: Tests/GainmapCoreTests
+        excludes: ["Fixtures/**"]
+      # Golden parity fixtures (input rawf16 + SDR JPEG + the CLI's exact
+      # output bytes) — folder ref in the test bundle.
+      - path: Tests/GainmapCoreTests/Fixtures
+        type: folder
+        buildPhase: resources
     dependencies:
       - target: GainmapCore
     settings:

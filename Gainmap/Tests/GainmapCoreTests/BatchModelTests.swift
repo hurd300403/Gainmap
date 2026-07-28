@@ -211,8 +211,7 @@ final class BatchModelTests: XCTestCase {
     /// Peak (R-B) of the synthesized HDR buffer — positive = warmer glow.
     private func redMinusBluePeak(of sdr: URL, params: AutoHDR.BloomParams) throws -> Float {
         let buf = try AutoHDR.synthesize(from: sdr, params: params)
-        defer { try? FileManager.default.removeItem(at: buf.url) }
-        let data = try Data(contentsOf: buf.url)
+        let data = buf.data
         // RGBA f16, 8 bytes/pixel.
         return data.withUnsafeBytes { raw -> Float in
             let halfs = raw.bindMemory(to: UInt16.self)

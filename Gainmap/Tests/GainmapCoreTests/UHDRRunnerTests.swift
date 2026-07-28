@@ -141,8 +141,7 @@ final class UHDRRunnerTests: XCTestCase {
         var high = low;                   high.glow = 1.3
         let bLow = try AutoHDR.synthesize(from: jpg, params: low)
         let bHigh = try AutoHDR.synthesize(from: jpg, params: high)
-        defer { try? FileManager.default.removeItem(at: bLow.url); try? FileManager.default.removeItem(at: bHigh.url) }
-        let mLow = maxHalf(bLow.url), mHigh = maxHalf(bHigh.url)
+        let mLow = maxHalf(bLow.data), mHigh = maxHalf(bHigh.data)
         XCTAssertGreaterThan(mLow, 1.0, "any glow should push highlights past SDR white")
         XCTAssertGreaterThan(mHigh, mLow + 0.1, "more Glow must produce a meaningfully brighter export")
     }
@@ -154,14 +153,12 @@ final class UHDRRunnerTests: XCTestCase {
         var tight = open;                 tight.threshold = 0.95
         let bOpen = try AutoHDR.synthesize(from: jpg, params: open)
         let bTight = try AutoHDR.synthesize(from: jpg, params: tight)
-        defer { try? FileManager.default.removeItem(at: bOpen.url); try? FileManager.default.removeItem(at: bTight.url) }
         // Lower threshold (more of the frame glows) must produce a stronger lift.
-        XCTAssertGreaterThan(maxHalf(bOpen.url), maxHalf(bTight.url) + 0.1)
+        XCTAssertGreaterThan(maxHalf(bOpen.data), maxHalf(bTight.data) + 0.1)
     }
 
-    /// Max half-float channel value in a raw RGBA f16 buffer file.
-    private func maxHalf(_ url: URL) -> Float {
-        guard let d = try? Data(contentsOf: url) else { return -1 }
+    /// Max half-float channel value in a raw RGBA f16 buffer.
+    private func maxHalf(_ d: Data) -> Float {
         var m: Float = 0
         d.withUnsafeBytes { raw in
             let u = raw.bindMemory(to: UInt16.self)

@@ -38,11 +38,10 @@ final class MergeStateMachineTests: XCTestCase {
     private func stubbedModel(outcome: @escaping @Sendable (UHDRRunner.Job) -> RunOutcome) -> MergeModel {
         let m = MergeModel()
         m.synthesizeBuffer = { sdr, _, _ in
-            AutoHDR.RawBuffer(url: sdr.appendingPathExtension("raw"), width: 4, height: 4)
+            AutoHDR.RawBuffer(data: Data(), width: 4, height: 4)
         }
         m.synthesizeBakeInputs = { sdr, _, _ in
-            AutoHDR.UltraHDRInputs(hdr: AutoHDR.RawBuffer(url: sdr.appendingPathExtension("raw"),
-                                                          width: 4, height: 4),
+            AutoHDR.UltraHDRInputs(hdr: AutoHDR.RawBuffer(data: Data(), width: 4, height: 4),
                                    sdrJPEG: sdr)
         }
         m.runTool = { job in
@@ -108,7 +107,7 @@ final class MergeStateMachineTests: XCTestCase {
         let m = stubbedModel { job in .success(output: job.out, readout: nil) }
         m.synthesizeBuffer = { sdr, look, _ in
             seenLook = look
-            return AutoHDR.RawBuffer(url: sdr.appendingPathExtension("raw"), width: 4, height: 4)
+            return AutoHDR.RawBuffer(data: Data(), width: 4, height: 4)
         }
         m.addFiles([url("a")])
         m.bloom.glow = 1.11   // dialed but not yet committed (commit is on-leave)

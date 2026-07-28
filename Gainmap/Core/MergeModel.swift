@@ -500,17 +500,11 @@ public final class MergeModel: ObservableObject {
         if let i = items.firstIndex(where: { $0.id == id }) { items[i].status = s }
     }
 
-    // Test seams — the real implementations render Core Image + spawn uhdrtool,
-    // so the merge state machine can be unit-tested without either. The CLI
-    // runner only exists on macOS; the iOS default fails loudly until the
-    // in-process encoder (P2) takes over this seam.
-    #if os(macOS)
-    var runTool: @Sendable (UHDRRunner.Job) async -> RunOutcome = { await UHDRRunner().run($0) }
-    #else
-    var runTool: @Sendable (UHDRRunner.Job) async -> RunOutcome = { _ in
-        .failure(message: "The HDR encoder isn't available on this platform yet.")
-    }
-    #endif
+    // Test seams — the real implementations render Core Image + run the
+    // encoder, so the merge state machine can be unit-tested without either.
+    // The default routes through UHDREncoding: in-process everywhere (P2),
+    // with the macOS CLI kept one release behind a rollback flag.
+    var runTool: @Sendable (UHDRRunner.Job) async -> RunOutcome = { await UHDREncoding.run($0) }
     var synthesizeBuffer: @Sendable (URL, AutoHDR.BloomParams, Gamut) throws -> AutoHDR.RawBuffer =
         { try AutoHDR.synthesize(from: $0, params: $1, gamut: $2) }
     var synthesizeBakeInputs: @Sendable (URL, AutoHDR.BloomParams, Gamut) throws -> AutoHDR.UltraHDRInputs =
@@ -532,21 +526,18 @@ public final class MergeModel: ObservableObject {
                 let inputs = try await Task.detached(priority: .userInitiated) {
                     try synthInputs(sdr, look, gamut)
                 }.value
-                let job = UHDRRunner.Job(hdr: .raw(inputs.hdr.url, w: inputs.hdr.width, h: inputs.hdr.height),
+                let job = UHDRRunner.Job(hdr: .rawBuffer(inputs.hdr),
                                          sdr: inputs.sdrJPEG, out: out, cgamut: gamut, sgamut: gamut)
                 let outcome = await runTool(job)
-                try? FileManager.default.removeItem(at: inputs.hdr.url)
                 try? FileManager.default.removeItem(at: inputs.sdrJPEG)
                 return outcome
             } else {
                 let buf = try await Task.detached(priority: .userInitiated) {
                     try synthBuffer(sdr, look, gamut)
                 }.value
-                let job = UHDRRunner.Job(hdr: .raw(buf.url, w: buf.width, h: buf.height),
+                let job = UHDRRunner.Job(hdr: .rawBuffer(buf),
                                          sdr: sdr, out: out, cgamut: gamut, sgamut: gamut)
-                let outcome = await runTool(job)
-                try? FileManager.default.removeItem(at: buf.url)
-                return outcome
+                return await runTool(job)
             }
         } catch {
             return .failure(message: (error as? LocalizedError)?.errorDescription ?? "\(error)")

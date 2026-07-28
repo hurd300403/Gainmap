@@ -41,6 +41,10 @@ float halfToFloat(uint16_t h) {
     return f;
 }
 
+bool isNaNHalf(uint16_t h) {
+    return ((h >> 10) & 0x1fu) == 0x1fu && (h & 0x3ffu) != 0;
+}
+
 // Round half-to-even at `decimals` places, matching Python's built-in round().
 double roundHalfEven(double x, int decimals) {
     double scale = std::pow(10.0, decimals);
@@ -57,10 +61,10 @@ double roundHalfEven(double x, int decimals) {
 // Read width/height from a JPEG's first SOF marker, without a full decode. This
 // is only for an actionable dimension-mismatch check; the bytes still pass
 // through to libultrahdr untouched. Returns false if no SOF is found.
-bool jpegDimensions(const std::vector<uint8_t>& b, int& w, int& h) {
-    if (b.size() < 4 || b[0] != 0xff || b[1] != 0xd8) return false;  // SOI
+bool jpegDimensions(const uint8_t* b, size_t size, int& w, int& h) {
+    if (size < 4 || b[0] != 0xff || b[1] != 0xd8) return false;  // SOI
     size_t i = 2;
-    while (i + 9 < b.size()) {
+    while (i + 9 < size) {
         if (b[i] != 0xff) { ++i; continue; }
         uint8_t marker = b[i + 1];
         if (marker == 0xd8 || marker == 0xd9 || (marker >= 0xd0 && marker <= 0xd7)) {
@@ -70,7 +74,7 @@ bool jpegDimensions(const std::vector<uint8_t>& b, int& w, int& h) {
         // SOF0..SOF15 except DHT(c4)/JPGn(c8)/DAC(cc) carry frame dimensions.
         if (marker >= 0xc0 && marker <= 0xcf &&
             marker != 0xc4 && marker != 0xc8 && marker != 0xcc) {
-            if (i + 9 >= b.size()) return false;
+            if (i + 9 >= size) return false;
             h = (int(b[i + 5]) << 8) | b[i + 6];
             w = (int(b[i + 7]) << 8) | b[i + 8];
             return true;
@@ -97,22 +101,8 @@ double percentileLinear(std::vector<float>& values, double q) {
     return vlo + frac * (vhi - vlo);
 }
 
-}  // namespace
-
-Clamps computeClamps(const HdrImage& img, double percentile, double margin) {
-    // Population = all R,G,B samples (negatives already clipped to 0 by the
-    // reader); alpha is excluded. Mirrors np.clip(img, 0, None) flattened.
-    std::vector<float> rgb;
-    rgb.reserve(static_cast<size_t>(img.width) * img.height * 3);
-    const size_t pixels = static_cast<size_t>(img.width) * img.height;
-    for (size_t p = 0; p < pixels; ++p) {
-        rgb.push_back(halfToFloat(img.rgba_f16[p * 4 + 0]));
-        rgb.push_back(halfToFloat(img.rgba_f16[p * 4 + 1]));
-        rgb.push_back(halfToFloat(img.rgba_f16[p * 4 + 2]));
-    }
-
+Clamps clampsFromPeak(double peak, double margin) {
     Clamps c;
-    double peak = rgb.empty() ? 1.0 : percentileLinear(rgb, percentile);
     if (peak < 1.0) peak = 1.0;                  // never below SDR white
     c.peak_boost = peak;
     c.stops = std::log2(peak);
@@ -122,26 +112,95 @@ Clamps computeClamps(const HdrImage& img, double percentile, double margin) {
     return c;
 }
 
-bool encodeUltraHdr(const HdrImage& hdr, const Clamps& clamps,
-                    const std::string& sdrJpegPath, int hdrCgamut, int sdrCgamut,
-                    const std::string& outPath, std::string& error) {
-    // --- read the SDR JPEG bytes (passed through untouched; never decoded) ---
-    std::FILE* jf = std::fopen(sdrJpegPath.c_str(), "rb");
-    if (!jf) { error = "cannot open SDR JPEG '" + sdrJpegPath + "'"; return false; }
-    std::fseek(jf, 0, SEEK_END);
-    long jsize = std::ftell(jf);
-    std::fseek(jf, 0, SEEK_SET);
-    if (jsize <= 0) { std::fclose(jf); error = "SDR JPEG is empty"; return false; }
-    std::vector<uint8_t> jpeg(static_cast<size_t>(jsize));
-    size_t jgot = std::fread(jpeg.data(), 1, jpeg.size(), jf);
-    std::fclose(jf);
-    if (jgot != jpeg.size()) { error = "short read on SDR JPEG"; return false; }
+}  // namespace
+
+Clamps computeClamps(const RawF16View& img, double percentile, double margin) {
+    // Samples are halfs: a bit-pattern histogram gives EXACT order statistics —
+    // each distinct half value is one bin, converted back through the same
+    // halfToFloat the reference used. Population = all R,G,B samples (alpha
+    // excluded), NaN samples excluded (the reference's NaN ordering was UB).
+    std::vector<uint32_t> bins(65536, 0);
+    const size_t pixels = static_cast<size_t>(img.width) * img.height;
+    const uint16_t* p = img.rgba_f16;
+    for (size_t i = 0; i < pixels; ++i, p += 4) {
+        ++bins[p[0]];
+        ++bins[p[1]];
+        ++bins[p[2]];
+    }
+
+    struct Entry { float v; uint64_t c; };
+    std::vector<Entry> entries;
+    entries.reserve(1024);
+    uint64_t n = 0;
+    for (uint32_t bits = 0; bits < 65536; ++bits) {
+        uint32_t c = bins[bits];
+        if (c == 0 || isNaNHalf(static_cast<uint16_t>(bits))) continue;
+        entries.push_back({halfToFloat(static_cast<uint16_t>(bits)), c});
+        n += c;
+    }
+    if (n == 0) return clampsFromPeak(1.0, margin);
+    std::sort(entries.begin(), entries.end(),
+              [](const Entry& a, const Entry& b) { return a.v < b.v; });
+
+    // np.percentile(method='linear'): virtual index into the sorted population.
+    double peak;
+    if (n == 1) {
+        peak = entries.front().v;
+    } else {
+        double virt = (percentile / 100.0) * static_cast<double>(n - 1);
+        uint64_t lo = static_cast<uint64_t>(std::floor(virt));
+        double frac = virt - static_cast<double>(lo);
+
+        // Walk cumulative counts to the order statistics at index lo and lo+1.
+        double vlo = 0, vhi = 0;
+        uint64_t seen = 0;
+        for (size_t i = 0; i < entries.size(); ++i) {
+            uint64_t next = seen + entries[i].c;
+            if (lo < next && seen <= lo) {
+                vlo = entries[i].v;
+                vhi = (lo + 1 < next) ? entries[i].v
+                    : (i + 1 < entries.size() ? entries[i + 1].v : entries[i].v);
+                break;
+            }
+            seen = next;
+        }
+        peak = (frac == 0.0) ? vlo : vlo + frac * (vhi - vlo);
+    }
+    return clampsFromPeak(peak, margin);
+}
+
+Clamps computeClamps(const HdrImage& img, double percentile, double margin) {
+    RawF16View v{img.rgba_f16.data(), img.width, img.height};
+    return computeClamps(v, percentile, margin);
+}
+
+Clamps computeClampsReference(const RawF16View& img, double percentile, double margin) {
+    // The original implementation: materialize every R,G,B sample as a float
+    // (w*h*3*4 bytes) and take the percentile via nth_element. Kept as the
+    // parity oracle only — see the clamps-selftest harness mode.
+    std::vector<float> rgb;
+    rgb.reserve(static_cast<size_t>(img.width) * img.height * 3);
+    const size_t pixels = static_cast<size_t>(img.width) * img.height;
+    for (size_t p = 0; p < pixels; ++p) {
+        rgb.push_back(halfToFloat(img.rgba_f16[p * 4 + 0]));
+        rgb.push_back(halfToFloat(img.rgba_f16[p * 4 + 1]));
+        rgb.push_back(halfToFloat(img.rgba_f16[p * 4 + 2]));
+    }
+    double peak = rgb.empty() ? 1.0 : percentileLinear(rgb, percentile);
+    return clampsFromPeak(peak, margin);
+}
+
+bool encodeUltraHdrToMemory(const RawF16View& hdr, const Clamps& clamps,
+                            const uint8_t* sdrJpeg, size_t sdrJpegSize,
+                            int hdrCgamut, int sdrCgamut,
+                            std::vector<uint8_t>& out, std::string& error) {
+    if (!sdrJpeg || sdrJpegSize == 0) { error = "SDR JPEG is empty"; return false; }
 
     // Dimension precondition (design E1): the SDR JPEG and HDR buffer come from
     // the same photo and must match. Surface a mismatch as an actionable error
     // rather than letting it fail opaquely inside libultrahdr.
     int sw = 0, sh = 0;
-    if (jpegDimensions(jpeg, sw, sh)) {
+    if (jpegDimensions(sdrJpeg, sdrJpegSize, sw, sh)) {
         if (sw != hdr.width || sh != hdr.height) {
             char buf[160];
             std::snprintf(buf, sizeof(buf),
@@ -170,7 +229,7 @@ bool encodeUltraHdr(const HdrImage& hdr, const Clamps& clamps,
     raw.range = UHDR_CR_FULL_RANGE;
     raw.w = static_cast<unsigned int>(hdr.width);
     raw.h = static_cast<unsigned int>(hdr.height);
-    raw.planes[UHDR_PLANE_PACKED] = const_cast<uint16_t*>(hdr.rgba_f16.data());
+    raw.planes[UHDR_PLANE_PACKED] = const_cast<uint16_t*>(hdr.rgba_f16);
     raw.stride[UHDR_PLANE_PACKED] = static_cast<unsigned int>(hdr.width);  // pixels, not bytes
     raw.planes[1] = raw.planes[2] = nullptr;
     raw.stride[1] = raw.stride[2] = 0;
@@ -178,9 +237,9 @@ bool encodeUltraHdr(const HdrImage& hdr, const Clamps& clamps,
     // --- SDR compressed descriptor (E3) --------------------------------------
     uhdr_compressed_image_t sdr;
     std::memset(&sdr, 0, sizeof(sdr));
-    sdr.data = jpeg.data();
-    sdr.data_sz = jpeg.size();
-    sdr.capacity = jpeg.size();
+    sdr.data = const_cast<uint8_t*>(sdrJpeg);
+    sdr.data_sz = sdrJpegSize;
+    sdr.capacity = sdrJpegSize;
     sdr.cg = gamutFromInt(sdrCgamut);  // 0 sRGB(BT.709) / 1 P3 / 2 Rec.2020(BT.2100)
     sdr.ct = UHDR_CT_UNSPECIFIED;   // JPEG carries its own transfer
     sdr.range = UHDR_CR_UNSPECIFIED;
@@ -211,21 +270,47 @@ bool encodeUltraHdr(const HdrImage& hdr, const Clamps& clamps,
     e = uhdr_encode(enc);
     if (e.error_code != UHDR_CODEC_OK) return fail("encode", e);
 
-    uhdr_compressed_image_t* out = uhdr_get_encoded_stream(enc);
-    if (!out || !out->data || out->data_sz == 0) {
+    uhdr_compressed_image_t* stream = uhdr_get_encoded_stream(enc);
+    if (!stream || !stream->data || stream->data_sz == 0) {
         error = "encoder returned an empty stream";
         uhdr_release_encoder(enc);
         return false;
     }
 
+    const uint8_t* sd = static_cast<const uint8_t*>(stream->data);
+    out.assign(sd, sd + stream->data_sz);
+    uhdr_release_encoder(enc);
+    return true;
+}
+
+bool encodeUltraHdr(const HdrImage& hdr, const Clamps& clamps,
+                    const std::string& sdrJpegPath, int hdrCgamut, int sdrCgamut,
+                    const std::string& outPath, std::string& error) {
+    // --- read the SDR JPEG bytes (passed through untouched; never decoded) ---
+    std::FILE* jf = std::fopen(sdrJpegPath.c_str(), "rb");
+    if (!jf) { error = "cannot open SDR JPEG '" + sdrJpegPath + "'"; return false; }
+    std::fseek(jf, 0, SEEK_END);
+    long jsize = std::ftell(jf);
+    std::fseek(jf, 0, SEEK_SET);
+    if (jsize <= 0) { std::fclose(jf); error = "SDR JPEG is empty"; return false; }
+    std::vector<uint8_t> jpeg(static_cast<size_t>(jsize));
+    size_t jgot = std::fread(jpeg.data(), 1, jpeg.size(), jf);
+    std::fclose(jf);
+    if (jgot != jpeg.size()) { error = "short read on SDR JPEG"; return false; }
+
+    RawF16View view{hdr.rgba_f16.data(), hdr.width, hdr.height};
+    std::vector<uint8_t> out;
+    if (!encodeUltraHdrToMemory(view, clamps, jpeg.data(), jpeg.size(),
+                                hdrCgamut, sdrCgamut, out, error)) {
+        return false;
+    }
+
     // --- write the gain-map JPEG ---------------------------------------------
     std::FILE* of = std::fopen(outPath.c_str(), "wb");
-    if (!of) { error = "cannot open output '" + outPath + "'"; uhdr_release_encoder(enc); return false; }
-    size_t wrote = std::fwrite(out->data, 1, out->data_sz, of);
+    if (!of) { error = "cannot open output '" + outPath + "'"; return false; }
+    size_t wrote = std::fwrite(out.data(), 1, out.size(), of);
     std::fclose(of);
-    if (wrote != out->data_sz) { error = "short write on output"; uhdr_release_encoder(enc); return false; }
-
-    uhdr_release_encoder(enc);
+    if (wrote != out.size()) { error = "short write on output"; return false; }
     return true;
 }
 
