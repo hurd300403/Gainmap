@@ -29,6 +29,10 @@ public final class MergeModel: ObservableObject {
         /// The source already looks like an UltraHDR export (name suffix or an
         /// embedded gain map) — merging it again would bloom the bloom.
         public var looksMerged: Bool = false
+        public var byteSize: Int64 = 0
+        /// > 64 MB: imports and edits normally but stays entirely local (r6) —
+        /// the filmstrip badges it once sync exists.
+        public var tooLargeToSync: Bool = false
     }
 
     /// The live HDR-look the controls bind to. Editing it carries forward to the
@@ -55,6 +59,7 @@ public final class MergeModel: ObservableObject {
                     intensity = 1.0
                 }
             }
+            schedulePersist()
         }
     }
 
@@ -120,6 +125,7 @@ public final class MergeModel: ObservableObject {
                 loadAsAnchor(item.look ?? runningLook)
             }
         }
+        schedulePersist()
     }
 
     /// Adopt a STORED look onto the live bench as-is: suppress the didSet
@@ -133,17 +139,199 @@ public final class MergeModel: ObservableObject {
         intensity = 1.0
     }
 
-    public init() {
+    // MARK: Persistence (P3)
+
+    /// The persistent truth this model edits. `items` is the view-facing
+    /// mirror; `syncToSession()` folds live state back into it before saves.
+    public private(set) var session: Session
+    private var store: FileSessionStore?
+    public var outputPolicy: OutputPolicy
+    private var persistTask: Task<Void, Never>?
+
+    /// Import-time metadata (content hash + pixel dims) keyed by photo id —
+    /// the source of truth `syncToSession` folds into the records. Lives
+    /// OUTSIDE `session` because hashing lands async while `session.photos`
+    /// is rebuilt on every flush; writing into the records directly would race
+    /// the rebuild (and lose against it).
+    private struct PhotoMeta { var hash: String?; var pixelWidth: Int?; var pixelHeight: Int? }
+    private var photoMeta: [UUID: PhotoMeta] = [:]
+
+    /// `store: nil` = ephemeral (exactly the pre-P3 behavior — what most unit
+    /// tests want). The Mac app attaches the real store after launch via
+    /// `attachStoreAndRestore`; iOS (P5) passes one here directly.
+    public init(session: Session? = nil, store: FileSessionStore? = nil,
+                output: OutputPolicy = .besideOriginal) {
         // Retire the old global GLOW-IN-SDR flag (now per-photo on the look) so a
         // stale `true` from an earlier build can't override the clean default.
         UserDefaults.standard.removeObject(forKey: "gainmap.bakeGlowIntoSDR")
-        sameLookForAll = UserDefaults.standard.bool(forKey: Self.sameLookKey)
+        self.store = store
+        self.outputPolicy = output
+        // Session-scoped batch mode; the old UserDefaults global seeds NEW
+        // sessions (and keeps tracking the last-used mode as that seed).
+        let seededSame = UserDefaults.standard.bool(forKey: Self.sameLookKey)
+        let sess = session ?? Session(sameLookForAll: seededSame)
+        self.session = sess
+        sameLookForAll = sess.sameLookForAll
         let sig = SignatureStore.load() ?? AutoHDR.signatureLook
         signature = sig
         anchorLook = sig
         bloom = sig   // didSet seeds runningLook + anchor (intensity → 100%)
-
+        if session != nil { restoreItemsFromSession() }
     }
+
+    /// Mac launch path: the @StateObject is created empty, then adopts the
+    /// store — loading the saved default look (signature.json, falling back to
+    /// the legacy UserDefaults blob for one release) and resuming the most
+    /// recently updated session. No-ops if photos were already imported
+    /// (e.g. the -gm-seed dev hook ran first).
+    public func attachStoreAndRestore(_ store: FileSessionStore) async {
+        self.store = store
+        if let sig = await store.loadSignature() {
+            signature = sig
+            hasCustomDefault = true
+            if items.isEmpty { resetToDefault() }
+        }
+        if items.isEmpty, let recent = await store.mostRecent(), !recent.photos.isEmpty {
+            session = recent
+            restoreItemsFromSession()
+        }
+    }
+
+    /// Rebuild the view-facing queue from `session.photos` (init-with-session
+    /// and launch-restore). Missing source files surface as item errors —
+    /// visible, never silently dropped. `done` survives only while the export
+    /// file still exists.
+    private func restoreItemsFromSession() {
+        sameLookForAll = session.sameLookForAll
+        runningLook = session.runningLook
+        loadingSelection = true
+        bloom = session.runningLook
+        loadingSelection = false
+        anchorLook = bloom
+        intensity = 1.0
+        photoMeta = Dictionary(uniqueKeysWithValues: session.photos.map {
+            ($0.id, PhotoMeta(hash: $0.contentHash,
+                              pixelWidth: $0.pixelWidth, pixelHeight: $0.pixelHeight))
+        })
+        let fm = FileManager.default
+        items = session.photos.map { p in
+            let src = p.sourceURL(managedRoot: nil)
+            var item = BatchItem(id: p.id, sdrURL: src, look: p.look,
+                                 looksMerged: p.looksMerged,
+                                 byteSize: p.byteSize,
+                                 tooLargeToSync: p.tooLargeToSync)
+            if p.done, let out = p.outputPath, fm.fileExists(atPath: out) {
+                item.status = .done
+                item.outputURL = URL(fileURLWithPath: out)
+                item.readout = p.readout
+            }
+            if !fm.fileExists(atPath: src.path) {
+                item.status = .error
+                item.error = "The source file has moved or was deleted: \(src.lastPathComponent)"
+            }
+            return item
+        }
+        if let first = items.first { select(first.id) }
+        // Older records may predate hashing — fill them in (and let dedup run).
+        let unhashed = session.photos.filter { $0.contentHash == nil }.map(\.id)
+        if !unhashed.isEmpty {
+            Task { [weak self] in await self?.computeImportMetadata(for: unhashed) }
+        }
+    }
+
+    /// Fold live state back into `session` (the view drives `items`; the
+    /// session is what persists). Computed metadata (contentHash, pixel dims)
+    /// is carried over from the existing records by id.
+    func syncToSession() {
+        session.photos = items.map { item in
+            var p = PhotoRecord(id: item.id, origin: .linked(path: item.sdrURL.path))
+            let meta = photoMeta[item.id]
+            p.contentHash = meta?.hash
+            p.pixelWidth = meta?.pixelWidth
+            p.pixelHeight = meta?.pixelHeight
+            p.byteSize = item.byteSize
+            p.tooLargeToSync = item.tooLargeToSync
+            p.looksMerged = item.looksMerged
+            p.look = item.look
+            p.done = item.status == .done
+            p.outputPath = item.outputURL?.path
+            p.readout = item.readout
+            return p
+        }
+        session.sameLookForAll = sameLookForAll
+        session.runningLook = runningLook
+        session.updatedAt = Date()
+    }
+
+    /// Debounced persist: mutations schedule a save ~500 ms out; a burst of
+    /// slider ticks collapses into one write.
+    private func schedulePersist() {
+        guard store != nil else { return }
+        persistTask?.cancel()
+        persistTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            guard !Task.isCancelled else { return }
+            await self?.flushSession()
+        }
+    }
+
+    /// Commit the live look and write the session now (drains the debounce).
+    public func flushSession() async {
+        guard let store else { return }
+        persistTask?.cancel()
+        commitLiveLook()
+        syncToSession()
+        guard !session.photos.isEmpty || !session.title.isEmpty else { return }
+        try? await store.save(session)
+    }
+
+    /// Synchronous last-chance flush for app termination — willTerminate gives
+    /// no async grace, so this writes the session file directly (same layout,
+    /// same atomic temp-and-replace the store uses).
+    public func flushNowForTermination() {
+        guard let store else { return }
+        persistTask?.cancel()
+        commitLiveLook()
+        syncToSession()
+        guard !session.photos.isEmpty || !session.title.isEmpty else { return }
+        let dir = store.root.appendingPathComponent("users/\(store.uid)/sessions",
+                                                    isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let enc = JSONEncoder()
+        enc.outputFormatting = [.sortedKeys]
+        enc.dateEncodingStrategy = .iso8601
+        guard let data = try? enc.encode(session) else { return }
+        let final = dir.appendingPathComponent("\(session.id.uuidString).json")
+        let tmp = dir.appendingPathComponent(".tmp-\(UUID().uuidString).json")
+        guard (try? data.write(to: tmp, options: .atomic)) != nil else { return }
+        _ = try? FileManager.default.replaceItemAt(final, withItemAt: tmp)
+    }
+
+    /// Off-main metadata for freshly imported photos: SHA-256 content hash +
+    /// pixel dimensions. A hash matching an EXISTING photo means the same
+    /// bytes arrived from a second path — the duplicate is removed with
+    /// feedback (contentHash dedup; path dedup already ran at import).
+    private func computeImportMetadata(for ids: [UUID]) async {
+        for id in ids {
+            guard let item = items.first(where: { $0.id == id }) else { continue }
+            let url = item.sdrURL
+            let meta = await Task.detached(priority: .utility) { () -> (String?, CGSize?) in
+                (ContentHash.sha256(of: url), ImageInfo.pixelSize(of: url))
+            }.value
+            guard items.contains(where: { $0.id == id }) else { continue }
+            if let hash = meta.0,
+               photoMeta.contains(where: { $0.key != id && $0.value.hash == hash }) {
+                remove(id)
+                dropNotice = "Duplicate photo skipped — those exact bytes are already in this session."
+                continue
+            }
+            photoMeta[id] = PhotoMeta(hash: meta.0,
+                                      pixelWidth: meta.1.map { Int($0.width) },
+                                      pixelHeight: meta.1.map { Int($0.height) })
+        }
+        schedulePersist()
+    }
+
 
     #if DEBUG
     /// Dev hook: seed the queue from a launch argument so UI states can be
@@ -186,7 +374,8 @@ public final class MergeModel: ObservableObject {
         signature = sig
         anchorLook = bloom
         intensity = 1.0
-        SignatureStore.save(sig)
+        SignatureStore.save(sig)   // legacy blob kept one release (rollback safety)
+        if let store { Task { await store.saveSignature(sig) } }
         hasCustomDefault = true
     }
 
@@ -194,6 +383,7 @@ public final class MergeModel: ObservableObject {
     /// with (then re-anchor the current photo to it).
     public func restoreBuiltInDefault() {
         SignatureStore.clear()
+        if let store { Task { await store.clearSignature() } }
         signature = AutoHDR.signatureLook
         hasCustomDefault = false
         resetToDefault()
@@ -224,6 +414,7 @@ public final class MergeModel: ObservableObject {
         applyingIntensity = true
         bloom = c
         applyingIntensity = false
+        schedulePersist()
     }
 
     // MARK: Auto-mode queue
@@ -274,6 +465,7 @@ public final class MergeModel: ObservableObject {
     public func commitLiveLook() {
         guard !sameLookForAll else { return }
         if let i = selectedIndex { items[i].look = bloom }
+        schedulePersist()
     }
 
     /// Load a queue item into the live bench: its own look if it has one, else the
@@ -336,15 +528,28 @@ public final class MergeModel: ObservableObject {
             let std = url.standardizedFileURL
             guard !seen.contains(std) else { continue }
             seen.insert(std)
+            let size = (try? FileManager.default.attributesOfItem(atPath: std.path))
+                .flatMap { $0[.size] as? NSNumber }?.int64Value ?? 0
             added.append(BatchItem(id: UUID(), sdrURL: std, look: nil,
-                                   looksMerged: UHDRRunner.looksLikeMergedOutput(std)))
+                                   looksMerged: UHDRRunner.looksLikeMergedOutput(std),
+                                   byteSize: size,
+                                   tooLargeToSync: SyncLimits.tooLargeToSync(byteSize: size)))
         }
         dropNotice = Self.dropNoticeText(tiffCount: tiffs, otherCount: others)
         guard !added.isEmpty else { return }
         items.append(contentsOf: added)
+        // A fresh session takes its title from the first import.
+        if session.title.isEmpty {
+            session.title = SessionNaming.suggest(from: added.map(\.sdrURL))
+        }
         // Jump the session to the freshly-imported photo: the new file when a
         // single one is added, or the FIRST of a dragged-in / auto-selected batch.
         select(added[0].id)
+        schedulePersist()
+        // Content hash + pixel dims compute off-main; a hash collision with an
+        // existing photo removes the duplicate (contentHash dedup).
+        let ids = added.map(\.id)
+        Task { [weak self] in await self?.computeImportMetadata(for: ids) }
     }
 
     public func remove(_ id: UUID) {
@@ -357,6 +562,7 @@ public final class MergeModel: ObservableObject {
         } else {
             clearSelection()
         }
+        schedulePersist()
     }
 
     public func clearQueue() {
@@ -440,7 +646,7 @@ public final class MergeModel: ObservableObject {
         guard let item = items.first(where: { $0.id == id }) else { return }
         let look = overrideLook ?? (sameLookForAll ? bloom : (item.look ?? runningLook))
         let sdr = item.sdrURL
-        let finalOut = UHDRRunner.defaultOutputURL(forSDR: sdr)
+        let finalOut = outputPolicy.outputURL(forSource: sdr)
         let tempOut = finalOut.deletingLastPathComponent()
             .appendingPathComponent(".gm-partial-\(UUID().uuidString).jpg")
         let prior = item   // for restore if this run is stopped
@@ -491,6 +697,7 @@ public final class MergeModel: ObservableObject {
             readout = updated.readout
             errorMessage = updated.error
         }
+        schedulePersist()
     }
 
     /// Move `temp` into `final`'s place: atomic replace when a previous export

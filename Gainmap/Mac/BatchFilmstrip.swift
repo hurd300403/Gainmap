@@ -65,6 +65,17 @@ struct FilmstripCell: View {
             .overlay(shape.stroke(selected ? Theme.accent : Theme.line,
                                   lineWidth: selected ? 2 : 1))
             .overlay(alignment: .topTrailing) { statusBadge.padding(4) }
+            .overlay(alignment: .bottomLeading) {
+                if item.tooLargeToSync {
+                    Image(systemName: "externaldrive")
+                        .font(.system(size: 8, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .padding(3)
+                        .background(.black.opacity(0.45), in: Circle())
+                        .padding(4)
+                        .help("Over 64 MB — this photo stays on this Mac (too large to sync).")
+                }
+            }
             .overlay(alignment: .topLeading) {
                 if hovering {
                     Button(action: onRemove) {

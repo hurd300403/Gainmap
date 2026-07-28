@@ -14,6 +14,7 @@ import GainmapCore
 
 struct ContentView: View {
     @StateObject private var model = MergeModel()
+    @Environment(\.scenePhase) private var scenePhase
     // Look-panel disclosure state lives HERE (session lifetime), not in the
     // panel: the panel is torn down when the queue empties, and these must
     // survive the "clear the strip, start the next batch" cycle (1.5 behavior).
@@ -145,6 +146,23 @@ struct ContentView: View {
             #if DEBUG
             model.applyDebugSeedIfRequested()
             #endif
+        }
+        // P3 persistence: adopt the store + resume the last session. The
+        // -gm-seed dev hook stays ephemeral (no store) so screenshot runs
+        // never pollute real sessions.
+        .task {
+            if UserDefaults.standard.string(forKey: "gm-seed") == nil {
+                await model.attachStoreAndRestore(FileSessionStore())
+            }
+        }
+        // Live-look flush: debounce covers editing; background/quit flush the
+        // rest (willTerminate needs the synchronous path — no async grace).
+        .onChange(of: scenePhase) { _, phase in
+            if phase != .active { Task { await model.flushSession() } }
+        }
+        .onReceive(NotificationCenter.default.publisher(
+            for: NSApplication.willTerminateNotification)) { _ in
+            model.flushNowForTermination()
         }
         .background(WindowAccessor { window = $0 })
         .preferredColorScheme(.dark)
