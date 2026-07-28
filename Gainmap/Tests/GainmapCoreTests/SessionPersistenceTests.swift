@@ -146,24 +146,51 @@ final class SessionPersistenceTests: XCTestCase {
 
     // MARK: contentHash dedup
 
-    func testSameBytesFromTwoPathsDeduplicate() async throws {
+    func testSameBytesTwiceInOneDropDeduplicate() async throws {
         let bytes = Data((0..<4096).map { UInt8($0 % 251) })
         let a = jpg("first", bytes: bytes)
         let b = jpg("second-copy", bytes: bytes)
 
         let m = MergeModel()
-        m.addFiles([a])
-        m.addFiles([b])
+        m.addFiles([a, b])                        // ONE gesture, same bytes twice
         XCTAssertEqual(m.items.count, 2, "path dedup alone can't catch this")
 
         // Hashing runs off-main; poll until the dedup lands.
         for _ in 0..<100 where m.items.count > 1 {
             try await Task.sleep(nanoseconds: 50_000_000)
         }
-        XCTAssertEqual(m.items.count, 1, "identical bytes must collapse to one photo")
-        XCTAssertEqual(m.items[0].sdrURL, a, "the FIRST import wins")
-        XCTAssertNotNil(m.dropNotice)
+        XCTAssertEqual(m.items.count, 1, "identical bytes in one drop collapse to one photo")
+        XCTAssertEqual(m.items[0].sdrURL, a, "the FIRST occurrence wins")
         XCTAssertTrue(m.dropNotice?.contains("Duplicate") ?? false)
+    }
+
+    /// Dedup is deliberately same-batch only: removals across batches were
+    /// racy and could delete an edited/exported photo (P3 review). Re-adding
+    /// a photo — or dropping the same bytes from another folder later — works.
+    func testCrossBatchAndReAddAreAllowed() async throws {
+        let bytes = Data((0..<4096).map { UInt8($0 % 199) })
+        let a = jpg("orig", bytes: bytes)
+        let b = jpg("other-folder-copy", bytes: bytes)
+
+        let m = MergeModel()
+        m.addFiles([a])
+        try await waitForHashes(m, count: 1)
+        m.addFiles([b])                           // separate gesture: allowed
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(m.items.count, 2, "cross-batch duplicates are the user's call")
+
+        m.remove(m.items[1].id)
+        m.addFiles([b])                           // re-add after remove: allowed
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(m.items.count, 2, "a removed photo must be re-addable")
+    }
+
+    private func waitForHashes(_ m: MergeModel, count: Int) async throws {
+        for _ in 0..<100 {
+            if m.session.photos.filter({ $0.contentHash != nil }).count >= count { return }
+            m.syncToSession()
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
     }
 
     // MARK: Live-look flush + relaunch restore
@@ -215,7 +242,7 @@ final class SessionPersistenceTests: XCTestCase {
         XCTAssertEqual(m.items[1].status, .pending)
     }
 
-    func testDoneSurvivesOnlyWhileExportExists() async throws {
+    func testUnreachableExportShowsPendingButLedgerSurvives() async throws {
         let store = FileSessionStore(root: root)
         let src = jpg("exported")
         let out = jpg("exported_UltraHDR")
@@ -223,16 +250,61 @@ final class SessionPersistenceTests: XCTestCase {
                                outputPath: out.path,
                                readout: ClampReadout(peakBoost: 2, stops: 1,
                                                      maxBoost: 2.1, targetNits: 406))
-        let stale = PhotoRecord(origin: .linked(path: jpg("stale").path), done: true,
-                                outputPath: root.appendingPathComponent("deleted.jpg").path)
-        try await store.save(Session(title: "T", photos: [done, stale]))
+        let offline = PhotoRecord(origin: .linked(path: jpg("on-volume").path), done: true,
+                                  outputPath: root.appendingPathComponent("unmounted.jpg").path,
+                                  readout: ClampReadout(peakBoost: 3, stops: 1.58,
+                                                        maxBoost: 3.15, targetNits: 609))
+        try await store.save(Session(title: "T", photos: [done, offline]))
 
         let m = MergeModel()
         await m.attachStoreAndRestore(FileSessionStore(root: root))
         XCTAssertEqual(m.items[0].status, .done)
         XCTAssertEqual(m.items[0].readout?.targetNits, 406)
         XCTAssertEqual(m.items[1].status, .pending,
-                       "a deleted export means the photo is no longer 'saved'")
+                       "an unreachable export shows as not-saved in the VIEW")
+
+        // …but flushing must NOT erase the durable record: when the volume
+        // comes back and the app relaunches, the export is 'saved' again.
+        await m.flushSession()
+        let reloaded = await FileSessionStore(root: root).load(id: m.session.id)
+        let record = try XCTUnwrap(reloaded?.photos.first { $0.id == offline.id })
+        XCTAssertTrue(record.done, "a temporarily offline export is never forgotten")
+        XCTAssertEqual(record.outputPath, offline.outputPath)
+        XCTAssertEqual(record.readout?.targetNits, 609)
+    }
+
+    /// P3 review regression: flush→commitLiveLook re-armed the debounce from
+    /// inside the flush it triggered — a self-sustaining 2 Hz write loop. An
+    /// idle app must write NOTHING after its state is flushed.
+    func testIdleAppStopsWritingAfterFlush() async throws {
+        let store = FileSessionStore(root: root)
+        let m = MergeModel(store: store)
+        m.addFiles([jpg("idle")])
+        try await waitForHashes(m, count: 1)   // let the one metadata persist land
+        await m.flushSession()
+
+        let dir = root.appendingPathComponent("users/local/sessions")
+        let file = dir.appendingPathComponent("\(m.session.id.uuidString).json")
+        let mtime = { try? FileManager.default.attributesOfItem(atPath: file.path)[.modificationDate] as? Date }
+        let before = try XCTUnwrap(mtime())
+        try await Task.sleep(nanoseconds: 1_500_000_000)   // three debounce periods
+        XCTAssertEqual(mtime(), before, "an idle app must not keep rewriting its session")
+    }
+
+    /// P3 review regression: removing a NON-selected photo returned before the
+    /// persist was scheduled — the deletion held only until relaunch.
+    func testRemovingNonSelectedPhotoIsDurable() async throws {
+        let store = FileSessionStore(root: root)
+        let m = MergeModel(store: store)
+        m.addFiles([jpg("keep"), jpg("axe")])
+        m.select(m.items[0].id)
+        m.remove(m.items[1].id)                    // not the selected one
+        await m.flushSession()
+
+        let m2 = MergeModel()
+        await m2.attachStoreAndRestore(FileSessionStore(root: root))
+        XCTAssertEqual(m2.items.map(\.sdrURL.lastPathComponent), ["keep.jpg"],
+                       "a removal must survive relaunch")
     }
 
     func testFirstImportNamesTheSession() {
@@ -247,6 +319,18 @@ final class SessionPersistenceTests: XCTestCase {
     }
 
     // MARK: Signature file store
+
+    func testLegacyUserDefaultsSignatureMigratesToFileOnAttach() async {
+        var p = AutoHDR.BloomParams(); p.glow = 0.77
+        SignatureStore.save(p)
+        defer { SignatureStore.clear() }
+
+        let m = MergeModel()
+        await m.attachStoreAndRestore(FileSessionStore(root: root))
+        let migrated = await FileSessionStore(root: root).loadSignature()
+        XCTAssertEqual(migrated?.glow ?? 0, 0.77, accuracy: 1e-9,
+                       "the UserDefaults-era default look must migrate to signature.json")
+    }
 
     func testSignatureRoundTripsAndNormalizesBakeOff() async {
         let store = FileSessionStore(root: root)

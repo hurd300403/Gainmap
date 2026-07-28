@@ -20,13 +20,20 @@ public enum ContentHash {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { try? handle.close() }
         var hasher = SHA256()
-        while autoreleasepool(invoking: {
-            guard let chunk = try? handle.read(upToCount: 1 << 20), !chunk.isEmpty else {
+        var failed = false
+        while !failed, autoreleasepool(invoking: { () -> Bool in
+            do {
+                guard let chunk = try handle.read(upToCount: 1 << 20), !chunk.isEmpty else {
+                    return false   // clean EOF
+                }
+                hasher.update(data: chunk)
+                return true
+            } catch {
+                failed = true      // mid-file I/O error: unknown ≠ wrong hash
                 return false
             }
-            hasher.update(data: chunk)
-            return true
         }) {}
+        if failed { return nil }
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 }

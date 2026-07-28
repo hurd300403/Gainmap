@@ -153,8 +153,29 @@ public final class MergeModel: ObservableObject {
     /// OUTSIDE `session` because hashing lands async while `session.photos`
     /// is rebuilt on every flush; writing into the records directly would race
     /// the rebuild (and lose against it).
-    private struct PhotoMeta { var hash: String?; var pixelWidth: Int?; var pixelHeight: Int? }
+    private struct PhotoMeta {
+        var hash: String?
+        var pixelWidth: Int?
+        var pixelHeight: Int?
+        /// Durable export record (outputPath + readout). PRESERVED even when
+        /// the export file is temporarily unreachable (offline volume) — only
+        /// a fresh export overwrites it, absence never erases it.
+        var exportPath: String?
+        var exportReadout: ClampReadout?
+        var exportDone = false
+    }
     private var photoMeta: [UUID: PhotoMeta] = [:]
+
+    /// Snapshot of the last persisted session CONTENT (dates ignored) — saves
+    /// are skipped when nothing real changed, which both quiets the disk and
+    /// keeps `updatedAt` meaningful as a version signal (an idle app must not
+    /// out-rank real edits under P4's reconciliation).
+    private var lastPersistedContent: Session?
+
+    private static func contentEquals(_ a: Session, _ b: Session) -> Bool {
+        a.id == b.id && a.title == b.title && a.sameLookForAll == b.sameLookForAll
+            && a.runningLook == b.runningLook && a.photos == b.photos
+    }
 
     /// `store: nil` = ephemeral (exactly the pre-P3 behavior — what most unit
     /// tests want). The Mac app attaches the real store after launch via
@@ -190,6 +211,10 @@ public final class MergeModel: ObservableObject {
             signature = sig
             hasCustomDefault = true
             if items.isEmpty { resetToDefault() }
+        } else if let legacy = SignatureStore.load() {
+            // One-time migration: the UserDefaults-era saved default becomes
+            // signature.json (P4 syncs the file, not the defaults blob).
+            await store.saveSignature(legacy)
         }
         if items.isEmpty, let recent = await store.mostRecent(), !recent.photos.isEmpty {
             session = recent
@@ -209,10 +234,12 @@ public final class MergeModel: ObservableObject {
         loadingSelection = false
         anchorLook = bloom
         intensity = 1.0
-        photoMeta = Dictionary(uniqueKeysWithValues: session.photos.map {
+        photoMeta = Dictionary(session.photos.map {
             ($0.id, PhotoMeta(hash: $0.contentHash,
-                              pixelWidth: $0.pixelWidth, pixelHeight: $0.pixelHeight))
-        })
+                              pixelWidth: $0.pixelWidth, pixelHeight: $0.pixelHeight,
+                              exportPath: $0.outputPath, exportReadout: $0.readout,
+                              exportDone: $0.done))
+        }, uniquingKeysWith: { first, _ in first })
         let fm = FileManager.default
         items = session.photos.map { p in
             let src = p.sourceURL(managedRoot: nil)
@@ -220,6 +247,9 @@ public final class MergeModel: ObservableObject {
                                  looksMerged: p.looksMerged,
                                  byteSize: p.byteSize,
                                  tooLargeToSync: p.tooLargeToSync)
+            // The VIEW shows "saved" only while the export file is reachable;
+            // the durable ledger (photoMeta) keeps the record either way, so
+            // an offline volume at launch never erases export state.
             if p.done, let out = p.outputPath, fm.fileExists(atPath: out) {
                 item.status = .done
                 item.outputURL = URL(fileURLWithPath: out)
@@ -232,7 +262,11 @@ public final class MergeModel: ObservableObject {
             return item
         }
         if let first = items.first { select(first.id) }
-        // Older records may predate hashing — fill them in (and let dedup run).
+        // The just-loaded state IS the persisted state — restoring must not
+        // trigger a save (or bump updatedAt) by itself.
+        syncToSession()
+        lastPersistedContent = session
+        // Older records may predate hashing — fill them in.
         let unhashed = session.photos.filter { $0.contentHash == nil }.map(\.id)
         if !unhashed.isEmpty {
             Task { [weak self] in await self?.computeImportMetadata(for: unhashed) }
@@ -253,14 +287,22 @@ public final class MergeModel: ObservableObject {
             p.tooLargeToSync = item.tooLargeToSync
             p.looksMerged = item.looksMerged
             p.look = item.look
-            p.done = item.status == .done
-            p.outputPath = item.outputURL?.path
-            p.readout = item.readout
+            // Export state: a live .done wins; otherwise the durable ledger —
+            // an export that's merely unreachable right now is NOT forgotten.
+            if item.status == .done {
+                p.done = true
+                p.outputPath = item.outputURL?.path
+                p.readout = item.readout
+            } else if let meta, meta.exportDone {
+                p.done = true
+                p.outputPath = meta.exportPath
+                p.readout = meta.exportReadout
+            }
             return p
         }
         session.sameLookForAll = sameLookForAll
         session.runningLook = runningLook
-        session.updatedAt = Date()
+        // updatedAt is bumped at SAVE time, only when content actually changed.
     }
 
     /// Debounced persist: mutations schedule a save ~500 ms out; a burst of
@@ -276,13 +318,18 @@ public final class MergeModel: ObservableObject {
     }
 
     /// Commit the live look and write the session now (drains the debounce).
+    /// No-ops when nothing real changed since the last save — an idle app
+    /// writes nothing and never advances `updatedAt`.
     public func flushSession() async {
         guard let store else { return }
         persistTask?.cancel()
         commitLiveLook()
         syncToSession()
         guard !session.photos.isEmpty || !session.title.isEmpty else { return }
+        if let last = lastPersistedContent, Self.contentEquals(last, session) { return }
+        session.updatedAt = Date()
         try? await store.save(session)
+        lastPersistedContent = session
     }
 
     /// Synchronous last-chance flush for app termination — willTerminate gives
@@ -294,6 +341,8 @@ public final class MergeModel: ObservableObject {
         commitLiveLook()
         syncToSession()
         guard !session.photos.isEmpty || !session.title.isEmpty else { return }
+        if let last = lastPersistedContent, Self.contentEquals(last, session) { return }
+        session.updatedAt = Date()
         let dir = store.root.appendingPathComponent("users/\(store.uid)/sessions",
                                                     isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -305,13 +354,19 @@ public final class MergeModel: ObservableObject {
         let tmp = dir.appendingPathComponent(".tmp-\(UUID().uuidString).json")
         guard (try? data.write(to: tmp, options: .atomic)) != nil else { return }
         _ = try? FileManager.default.replaceItemAt(final, withItemAt: tmp)
+        lastPersistedContent = session
     }
 
     /// Off-main metadata for freshly imported photos: SHA-256 content hash +
-    /// pixel dimensions. A hash matching an EXISTING photo means the same
-    /// bytes arrived from a second path — the duplicate is removed with
-    /// feedback (contentHash dedup; path dedup already ran at import).
+    /// pixel dimensions. Dedup is SAME-BATCH ONLY and keeps the earliest
+    /// occurrence: identical bytes dropped twice in one gesture collapse with
+    /// feedback, but a photo re-added later (or the same bytes in two shoot
+    /// folders, dropped separately) is always allowed — cross-batch removal
+    /// was racy and could delete an edited or exported photo (P3 review);
+    /// cloud-side, P4 dedups blobs by hash regardless.
     private func computeImportMetadata(for ids: [UUID]) async {
+        var batchHashes: [String: UUID] = [:]
+        var duplicatesRemoved = 0
         for id in ids {
             guard let item = items.first(where: { $0.id == id }) else { continue }
             let url = item.sdrURL
@@ -319,15 +374,24 @@ public final class MergeModel: ObservableObject {
                 (ContentHash.sha256(of: url), ImageInfo.pixelSize(of: url))
             }.value
             guard items.contains(where: { $0.id == id }) else { continue }
-            if let hash = meta.0,
-               photoMeta.contains(where: { $0.key != id && $0.value.hash == hash }) {
-                remove(id)
-                dropNotice = "Duplicate photo skipped — those exact bytes are already in this session."
-                continue
+            if let hash = meta.0 {
+                if let keeper = batchHashes[hash], items.contains(where: { $0.id == keeper }) {
+                    remove(id)
+                    duplicatesRemoved += 1
+                    continue
+                }
+                batchHashes[hash] = id
             }
-            photoMeta[id] = PhotoMeta(hash: meta.0,
-                                      pixelWidth: meta.1.map { Int($0.width) },
-                                      pixelHeight: meta.1.map { Int($0.height) })
+            var m = photoMeta[id] ?? PhotoMeta()
+            m.hash = meta.0
+            m.pixelWidth = meta.1.map { Int($0.width) }
+            m.pixelHeight = meta.1.map { Int($0.height) }
+            photoMeta[id] = m
+        }
+        if duplicatesRemoved > 0 {
+            dropNotice = duplicatesRemoved == 1
+                ? "Duplicate photo skipped — the same bytes were in this drop twice."
+                : "\(duplicatesRemoved) duplicate photos skipped — the same bytes were in this drop twice."
         }
         schedulePersist()
     }
@@ -462,10 +526,13 @@ public final class MergeModel: ObservableObject {
     /// Write the live bloom onto the selected item — called when LEAVING a photo
     /// (navigation, merge, export-all), not on every slider tick. No-op while
     /// SAME-LOOK is on: the shared look must never stamp preserved per-photo looks.
+    /// NOTE: deliberately does NOT schedulePersist — the flush paths call
+    /// this, and scheduling from here re-armed the debounce from inside the
+    /// flush it triggered (a self-sustaining 2 Hz write loop, P3 review).
+    /// Mutation call sites schedule for themselves.
     public func commitLiveLook() {
         guard !sameLookForAll else { return }
         if let i = selectedIndex { items[i].look = bloom }
-        schedulePersist()
     }
 
     /// Load a queue item into the live bench: its own look if it has one, else the
@@ -485,6 +552,7 @@ public final class MergeModel: ObservableObject {
         readout = item.readout
         errorMessage = item.error
         if phase != .merging { phase = .idle }
+        schedulePersist()
     }
 
     public func selectNext() { stepSelection(+1) }
@@ -556,18 +624,23 @@ public final class MergeModel: ObservableObject {
         guard let idx = items.firstIndex(where: { $0.id == id }) else { return }
         let wasSelected = id == selectedID
         items.remove(at: idx)
+        // Prune the metadata ledger — a stale hash here made a removed photo
+        // impossible to re-add ("duplicate" of itself, P3 review finding).
+        photoMeta.removeValue(forKey: id)
+        defer { schedulePersist() }
         guard wasSelected else { return }
         if let next = items[safe: idx] ?? items.last {
             select(next.id)
         } else {
             clearSelection()
         }
-        schedulePersist()
     }
 
     public func clearQueue() {
         items.removeAll()
+        photoMeta.removeAll()
         clearSelection()
+        schedulePersist()
     }
 
     private func clearSelection() {
@@ -680,6 +753,9 @@ public final class MergeModel: ObservableObject {
                     items[idx].outputURL = finalOut
                     items[idx].readout = readout
                     items[idx].error = nil
+                    photoMeta[id, default: PhotoMeta()].exportPath = finalOut.path
+                    photoMeta[id, default: PhotoMeta()].exportReadout = readout
+                    photoMeta[id, default: PhotoMeta()].exportDone = true
                 } catch {
                     try? FileManager.default.removeItem(at: tempOut)
                     items[idx].status = .error
