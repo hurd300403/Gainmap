@@ -61,13 +61,28 @@ afterward, signups closed throughout).
   `https://gainmap-production.firebaseapp.com/auth/apple-return/`), SIWA key
   `NGYK4L9ML6`, Developer ID provisioning profile `Gainmap Developer ID`.
 
-## iOS (device) — PENDING
+## iOS (iPhone 15 Pro, Debug build via devicectl) — ALL PASS
 
-Native SIWA sheet, Google, relaunch persistence, DCAppAttest verdict — awaiting
-the iPhone session. S3 stays open until recorded here.
+| Test | Result |
+|---|---|
+| Native Sign in with Apple sheet → Firebase | **PASS** — sub `001902.60a17…`, email delivered natively |
+| **Cross-platform identity: native iOS flow and Mac web flow → SAME uid** (`dYcD672…`) | **PASS** — App ID grouping + provider config verified end-to-end |
+| Google Sign-In → Firebase | **PASS** (same uid as Mac, `xJYirhzjh…`) |
+| Persistence across swipe-quit + relaunch | **PASS** (Sam confirmed) |
+| App Check: `DCAppAttestService.isSupported` | **true** |
+
+## App Check decision (per the plan's rule)
+
+Mac notarized = `false`, iOS = `true` ⇒ enforcement is OFF the table (a
+notarized Mac cannot attest). **App Check = monitor-only / deferred.** Cost
+protection remains the reservation quota + admission cap + kill switch.
 
 ## Cleanup ledger
 
-Spike Auth users to delete at S3 close: `xJYirhzjh…` (google), `dYcD672…`
-(apple). Two email-less strays (`B2FjCnvgkm…`, `NBzOpSsro…`) already deleted
-2026-07-27.
+Email-less strays `B2FjCnvgkm…`, `NBzOpSsro…` deleted 2026-07-27. Spike users
+`xJYirhzjh…` (google) and `dYcD672…` (apple) deleted at close — production
+Auth is empty again.
+
+**S3 CLOSED 2026-07-27.** Plan risk #4 (macOS keychain/-34018 on notarized
+builds) retired; auth architecture settled: native SIWA on iOS, hand-rolled
+web flow + appleReturn CF on Mac, Google native SDK both platforms.
