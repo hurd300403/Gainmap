@@ -1,6 +1,6 @@
 //
 //  AutoHDR.swift
-//  Gainmap
+//  GainmapCore
 //
 //  One-file auto mode: synthesize a highlight-boosted "bloom-as-HDR" rendition
 //  from a single SDR JPEG. With the glow kept out of the SDR base (the default),
@@ -22,7 +22,7 @@ import UniformTypeIdentifiers
 import CoreImage
 import CoreImage.CIFilterBuiltins
 
-enum AutoHDR {
+public enum AutoHDR {
 
     static let ciContext: CIContext = {
         let cs = CGColorSpace(name: CGColorSpace.extendedLinearSRGB)!
@@ -78,26 +78,27 @@ enum AutoHDR {
     """)!
 
     /// The full set of dials for the bloom-as-HDR look.
-    struct BloomParams: Equatable, Codable {
-        var glow: Double = 0.40        // bloom intensity (0…1.5)
-        var threshold: Double = 0.58   // highlight cutoff, gamma 0…1 (lower = more glows)
-        var spread: Double = 0.006     // blur radius as fraction of width (halo size)
-        var punch: Double = 0.0        // 0 = soft dreamy bloom … 1 = sharp crisp pop
-        var peak: Double = 3.0         // max linear boost ceiling (×)
-        var falloff: Double = 1.0      // gamma on the highlight ramp (>1 softer onset)
-        var saturation: Double = 1.0   // glow color: 0 = white, 1 = as-shot, >1 = vivid
-        var tint: Double = 0.0         // glow hue: -1 = cool, 0 = neutral, +1 = warm
-        var headroom: Double = 1.0     // HDR headroom: expand highlights above SDR
+    public struct BloomParams: Equatable, Codable {
+        public init() {}
+        public var glow: Double = 0.40        // bloom intensity (0…1.5)
+        public var threshold: Double = 0.58   // highlight cutoff, gamma 0…1 (lower = more glows)
+        public var spread: Double = 0.006     // blur radius as fraction of width (halo size)
+        public var punch: Double = 0.0        // 0 = soft dreamy bloom … 1 = sharp crisp pop
+        public var peak: Double = 3.0         // max linear boost ceiling (×)
+        public var falloff: Double = 1.0      // gamma on the highlight ramp (>1 softer onset)
+        public var saturation: Double = 1.0   // glow color: 0 = white, 1 = as-shot, >1 = vivid
+        public var tint: Double = 0.0         // glow hue: -1 = cool, 0 = neutral, +1 = warm
+        public var headroom: Double = 1.0     // HDR headroom: expand highlights above SDR
                                        // white (1 = unchanged … pushes target nits up)
         // Per-photo: bake the soft bloom into the SDR base too (glow shows on every
         // screen) vs. HDR-only glow with a pixel-faithful SDR fallback. Travels with
         // the look (copy/paste + running-look inheritance). Default OFF (clean base).
-        var bakeGlowIntoSDR: Bool = false
+        public var bakeGlowIntoSDR: Bool = false
     }
 
     /// The built-in "signature" look — the dialed-in favorite that the single
     /// Intensity slider treats as 100%. Power users can override it (Set as default).
-    static let signatureLook: BloomParams = {
+    public static let signatureLook: BloomParams = {
         var p = BloomParams()
         p.glow = 1.5; p.headroom = 1.5; p.threshold = 0.67; p.spread = 0.025
         p.punch = 0.30; p.falloff = 1.54; p.saturation = 0.74; p.tint = -1.0
@@ -107,7 +108,7 @@ enum AutoHDR {
     /// Blend a signature look down by a single 0…1 intensity: at 1 it's the full
     /// signature; toward 0 the pop fades (glow/headroom/punch scale to neutral)
     /// while the look's character (threshold/spread/tone/tint) is preserved.
-    static func look(intensity t: Double, signature s: BloomParams = signatureLook) -> BloomParams {
+    public static func look(intensity t: Double, signature s: BloomParams = signatureLook) -> BloomParams {
         let t = min(1, max(0, t))
         var p = s
         p.glow = s.glow * t
@@ -169,7 +170,10 @@ enum AutoHDR {
 
     // MARK: Synthesis (side-effecting; call off the main thread)
 
-    struct RawBuffer { let url: URL; let width: Int; let height: Int }
+    public struct RawBuffer {
+        public let url: URL; public let width: Int; public let height: Int
+        public init(url: URL, width: Int, height: Int) { self.url = url; self.width = width; self.height = height }
+    }
 
     enum SynthError: LocalizedError {
         case decode, context
@@ -184,7 +188,7 @@ enum AutoHDR {
     /// Write a downscaled JPEG copy of `url` (for fast preview rendering). The
     /// preview's gain map is computed at this smaller size so it's cheap to
     /// regenerate as the slider moves; the final merge still uses full res.
-    static func downscaledJPEG(of url: URL, maxDim: CGFloat, quality: CGFloat = 0.92) -> URL? {
+    public static func downscaledJPEG(of url: URL, maxDim: CGFloat, quality: CGFloat = 0.92) -> URL? {
         guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
         let opts: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
@@ -239,7 +243,7 @@ enum AutoHDR {
     /// the export (rendered to the f16 buffer / gain map) and the live EDR preview
     /// so the two are guaranteed identical. `base` is the sRGB source; spread scales
     /// with its width.
-    static func bloomCIImage(base: CIImage, params p: BloomParams) -> CIImage? {
+    public static func bloomCIImage(base: CIImage, params p: BloomParams) -> CIImage? {
         guard let pieces = bloomPieces(base: base, params: p) else { return nil }
         return combineKernel.apply(
             extent: base.extent,
@@ -261,7 +265,7 @@ enum AutoHDR {
     }
 
     /// Build the bloom-as-HDR rendition and render it to the engine's RGBA f16 buffer.
-    static func synthesize(from sdrURL: URL, params p: BloomParams, gamut: Gamut = .rec709) throws -> RawBuffer {
+    public static func synthesize(from sdrURL: URL, params p: BloomParams, gamut: Gamut = .rec709) throws -> RawBuffer {
         guard let src = CGImageSourceCreateWithURL(sdrURL as CFURL, nil),
               let cg = CGImageSourceCreateImageAtIndex(src, 0, nil) else {
             throw SynthError.decode
@@ -290,9 +294,12 @@ enum AutoHDR {
     /// SDR puts the haze on every screen while the highlight lift/pop stays in
     /// the gain map for HDR displays. The fallback keeps the edit's tonality; it
     /// is NOT pixel-identical to the input only where the haze lands.
-    struct UltraHDRInputs { let hdr: RawBuffer; let sdrJPEG: URL }
+    public struct UltraHDRInputs {
+        public let hdr: RawBuffer; public let sdrJPEG: URL
+        public init(hdr: RawBuffer, sdrJPEG: URL) { self.hdr = hdr; self.sdrJPEG = sdrJPEG }
+    }
 
-    static func synthesizeInputs(from sdrURL: URL, params p: BloomParams, gamut: Gamut = .rec709) throws -> UltraHDRInputs {
+    public static func synthesizeInputs(from sdrURL: URL, params p: BloomParams, gamut: Gamut = .rec709) throws -> UltraHDRInputs {
         guard let src = CGImageSourceCreateWithURL(sdrURL as CFURL, nil),
               let cg = CGImageSourceCreateImageAtIndex(src, 0, nil) else { throw SynthError.decode }
         let w = cg.width, h = cg.height
@@ -348,7 +355,7 @@ extension AutoHDR.BloomParams {
         case glow, threshold, spread, punch, peak, falloff, saturation, tint, headroom, bakeGlowIntoSDR
     }
 
-    init(from decoder: Decoder) throws {
+    public init(from decoder: Decoder) throws {
         var p = AutoHDR.BloomParams()
         let c = try decoder.container(keyedBy: CodingKeys.self)
         p.glow           = try c.decodeIfPresent(Double.self, forKey: .glow)           ?? p.glow

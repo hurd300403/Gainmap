@@ -57,13 +57,16 @@ if [ -d "$SPK" ]; then
   codesign --force --options runtime --timestamp --sign "$SIGN_HASH" "$SPK"
 fi
 # Sentry ships as a dynamic xcframework (embedded Sentry.framework); re-sign it with
-# Developer ID + hardened runtime so notarization accepts it.
-SENTRY_FW="$APP/Contents/Frameworks/Sentry.framework"
-[ -d "$SENTRY_FW" ] && codesign --force --options runtime --timestamp --sign "$SIGN_HASH" "$SENTRY_FW"
+# Developer ID + hardened runtime so notarization accepts it. Same treatment for
+# our own embedded GainmapCore.framework (P1 core extraction).
+for fw in "Sentry.framework" "GainmapCore.framework"; do
+  FW="$APP/Contents/Frameworks/$fw"
+  [ -d "$FW" ] && codesign --force --options runtime --timestamp --sign "$SIGN_HASH" "$FW"
+done
 codesign --force --options runtime --timestamp --sign "$SIGN_HASH" \
     "$APP/Contents/Resources/Helpers/uhdrtool"
 codesign --force --options runtime --timestamp \
-    --entitlements "$PROJ/Sources/Support/Gainmap.entitlements" \
+    --entitlements "$PROJ/Mac/Support/Gainmap.entitlements" \
     --sign "$SIGN_HASH" "$APP"
 codesign --verify --deep --strict --verbose=2 "$APP"
 

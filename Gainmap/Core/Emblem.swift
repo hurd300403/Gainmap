@@ -1,6 +1,6 @@
 //
 //  Emblem.swift
-//  Gainmap
+//  GainmapCore
 //
 //  The Legacy Lab flask + camera-aperture emblem, ported from the canonical
 //  brand SVG into SwiftUI. `GainmapEmblem` is the header/icon mark (rings +
@@ -15,8 +15,9 @@ import SwiftUI
 
 // MARK: - GainmapEmblem (header / icon mark)
 
-struct GainmapEmblem: View {
-    var body: some View {
+public struct GainmapEmblem: View {
+    public init() {}
+    public var body: some View {
         Canvas { ctx, size in
             let s = min(size.width, size.height) / 200
             ctx.scaleBy(x: s, y: s)
@@ -88,9 +89,10 @@ struct GainmapEmblem: View {
 /// The Gainmap flask mark with an accent "+" badge in the corner — used for the
 /// add tile / empty-state so the add affordance matches the app icon instead of
 /// a bare system glyph. `active` brightens the badge (hover/emphasis).
-struct GainmapAddEmblem: View {
-    var active: Bool = false
-    var body: some View {
+public struct GainmapAddEmblem: View {
+    public var active: Bool = false
+    public init(active: Bool = false) { self.active = active }
+    public var body: some View {
         GainmapEmblem()
             .overlay {
                 GeometryReader { geo in

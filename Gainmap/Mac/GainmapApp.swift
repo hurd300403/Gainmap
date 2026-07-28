@@ -10,6 +10,7 @@
 import SwiftUI
 import Combine
 import Sparkle
+import GainmapCore
 
 @main
 struct GainmapApp: App {

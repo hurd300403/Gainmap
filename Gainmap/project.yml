@@ -2,11 +2,20 @@
 # Regenerate the .xcodeproj with:  xcodegen generate
 # You normally don't need to — the generated Gainmap.xcodeproj is committed and
 # opens directly in Xcode. Only regenerate after editing this file.
+#
+# Layout (P1 core extraction):
+#   Core/  → GainmapCore.framework — everything shared or shareable with the
+#            future iOS app (look engine, merge state machine, theme, shared
+#            controls). Compiles for macOS AND iOS; mac-only pieces (the
+#            uhdrtool Process runner) are #if os(macOS)-gated inside it.
+#   Mac/   → the Gainmap app shell: window chrome, filmstrip, EDR preview,
+#            Sparkle, panels/drops — everything AppKit-shaped.
 name: Gainmap
 options:
   bundleIdPrefix: com.legacylab
   deploymentTarget:
     macOS: "14.0"
+    iOS: "17.0"
   createIntermediateGroups: true
   groupSortPosition: top
 
@@ -14,8 +23,8 @@ settings:
   base:
     DEVELOPMENT_TEAM: S8HQ5TEYDE
     SWIFT_VERSION: "5.0"
-    MARKETING_VERSION: "1.5"
-    CURRENT_PROJECT_VERSION: "7"
+    MARKETING_VERSION: "1.6"
+    CURRENT_PROJECT_VERSION: "8"
     CODE_SIGN_STYLE: Automatic
 
 packages:
@@ -27,15 +36,38 @@ packages:
     from: "8.0.0"
 
 targets:
+  GainmapCore:
+    type: framework
+    supportedDestinations: [macOS, iOS]
+    sources:
+      - path: Core
+    dependencies:
+      # Sentry rides in Core (CrashReporting lives there); the app gets it
+      # transitively.
+      - package: Sentry
+        product: Sentry
+    settings:
+      base:
+        PRODUCT_NAME: GainmapCore
+        PRODUCT_MODULE_NAME: GainmapCore
+        PRODUCT_BUNDLE_IDENTIFIER: com.legacylab.gainmap.core
+        GENERATE_INFOPLIST_FILE: YES
+        ENABLE_MODULE_VERIFIER: NO
+        # Same DSN plumbing as the app: empty in Debug, real for Release.
+        SENTRY_DSN: ""
+      configs:
+        Release:
+          SENTRY_DSN: "https://553956a1d0e59a781e1ec7dedeee33ba@o4510926726365184.ingest.us.sentry.io/4511583301795840"
+
   Gainmap:
     type: application
     platform: macOS
     dependencies:
+      - target: GainmapCore
+        embed: true
       - package: Sparkle
-      - package: Sentry
-        product: Sentry
     sources:
-      - path: Sources
+      - path: Mac
       # Asset catalog is compiled (app icon + accent color).
       - path: Resources/Assets.xcassets
         buildPhase: resources
@@ -59,8 +91,8 @@ targets:
         SENTRY_DSN: ""
         # dSYMs so Sentry crash stacks symbolicate (release.sh uploads them).
         DEBUG_INFORMATION_FORMAT: dwarf-with-dsym
-        INFOPLIST_FILE: Sources/Support/Info.plist
-        CODE_SIGN_ENTITLEMENTS: Sources/Support/Gainmap.entitlements
+        INFOPLIST_FILE: Mac/Support/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Mac/Support/Gainmap.entitlements
         ENABLE_HARDENED_RUNTIME: YES
         ENABLE_APP_SANDBOX: NO
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
@@ -72,31 +104,43 @@ targets:
           # gainmap project in the sam-hurd-photo Sentry org.
           SENTRY_DSN: "https://553956a1d0e59a781e1ec7dedeee33ba@o4510926726365184.ingest.us.sentry.io/4511583301795840"
 
-  GainmapTests:
+  GainmapCoreTests:
     type: bundle.unit-test
-    platform: macOS
+    supportedDestinations: [macOS, iOS]
     sources:
-      - path: Tests/GainmapTests
+      - path: Tests/GainmapCoreTests
     dependencies:
-      - target: Gainmap
+      - target: GainmapCore
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.legacylab.gainmap.tests
+        PRODUCT_BUNDLE_IDENTIFIER: com.legacylab.gainmap.core.tests
         GENERATE_INFOPLIST_FILE: YES
 
 schemes:
+  # Framework-only scheme: lets the same 62 tests run against the iOS
+  # destination (the Gainmap scheme is pinned to the macOS app).
+  GainmapCore:
+    build:
+      targets:
+        GainmapCore: all
+        GainmapCoreTests: [test]
+    test:
+      config: Debug
+      targets:
+        - GainmapCoreTests
+
   Gainmap:
     build:
       targets:
         Gainmap: all
-        GainmapTests: [test]
+        GainmapCoreTests: [test]
     run:
       config: Debug
     test:
       config: Debug
       gatherCoverageData: true
       targets:
-        - GainmapTests
+        - GainmapCoreTests
     profile:
       config: Release
     analyze:

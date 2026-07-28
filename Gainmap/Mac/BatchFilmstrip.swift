@@ -10,6 +10,7 @@
 import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
+import GainmapCore
 
 struct BatchFilmstrip: View {
     @ObservedObject var model: MergeModel
@@ -46,7 +47,7 @@ struct FilmstripCell: View {
     let selected: Bool
     var onRemove: () -> Void
 
-    @State private var thumb: NSImage?
+    @State private var thumb: CGImage?
     @State private var hovering = false
 
     private var shape: RoundedRectangle { RoundedRectangle(cornerRadius: 8, style: .continuous) }
@@ -56,7 +57,7 @@ struct FilmstripCell: View {
             ZStack {
                 shape.fill(Theme.surfaceHi)
                 if let thumb {
-                    Image(nsImage: thumb).resizable().aspectRatio(contentMode: .fill)
+                    Image(decorative: thumb, scale: 1).resizable().aspectRatio(contentMode: .fill)
                 }
             }
             .frame(width: cellW, height: cellH)

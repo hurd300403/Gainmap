@@ -8,7 +8,7 @@
 //
 
 import XCTest
-@testable import Gainmap
+@testable import GainmapCore
 
 final class CrashReportingTests: XCTestCase {
 

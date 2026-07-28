@@ -1,6 +1,6 @@
 //
 //  MergeModel.swift
-//  Gainmap
+//  GainmapCore
 //
 //  Observable state for the bench: a QUEUE of SDR JPEGs. You step through them
 //  on a filmstrip, tune the HDR look per photo, and save as you go (or Export
@@ -12,28 +12,28 @@
 import SwiftUI
 
 @MainActor
-final class MergeModel: ObservableObject {
+public final class MergeModel: ObservableObject {
 
-    enum Phase: Equatable { case idle, merging, done, error }
+    public enum Phase: Equatable { case idle, merging, done, error }
 
     /// One photo in the auto-mode queue.
-    struct BatchItem: Identifiable, Equatable {
-        enum Status: Equatable { case pending, merging, done, error }
-        let id: UUID
-        let sdrURL: URL
-        var look: AutoHDR.BloomParams?   // nil = inherit the running look (untouched)
-        var status: Status = .pending
-        var outputURL: URL?
-        var readout: ClampReadout?
-        var error: String?
+    public struct BatchItem: Identifiable, Equatable {
+        public enum Status: Equatable { case pending, merging, done, error }
+        public let id: UUID
+        public let sdrURL: URL
+        public var look: AutoHDR.BloomParams?   // nil = inherit the running look (untouched)
+        public var status: Status = .pending
+        public var outputURL: URL?
+        public var readout: ClampReadout?
+        public var error: String?
         /// The source already looks like an UltraHDR export (name suffix or an
         /// embedded gain map) — merging it again would bloom the bloom.
-        var looksMerged: Bool = false
+        public var looksMerged: Bool = false
     }
 
     /// The live HDR-look the controls bind to. Editing it carries forward to the
     /// next untouched photo (runningLook) and is remembered on the selected item.
-    @Published var bloom = AutoHDR.BloomParams() {
+    @Published public var bloom = AutoHDR.BloomParams() {
         didSet {
             guard !loadingSelection, bloom != oldValue else { return }
             runningLook = bloom
@@ -66,10 +66,10 @@ final class MergeModel: ObservableObject {
         return a == b
     }
     /// The most-recently dialed look, inherited by the next photo you arrive at.
-    @Published var runningLook = AutoHDR.BloomParams()
+    @Published public var runningLook = AutoHDR.BloomParams()
 
     /// 0…1 master. Scales the current look (anchorLook = 100%) down toward subtle.
-    @Published var intensity: Double = 1.0
+    @Published public var intensity: Double = 1.0
     /// The look Intensity treats as 100% — updated by any manual edit so the macro
     /// stays relative to the current dial. Not the saved default.
     private var anchorLook = AutoHDR.signatureLook
@@ -77,11 +77,11 @@ final class MergeModel: ObservableObject {
 
     /// The saved "default look" (the shared signature). Reset returns here; starts
     /// as the built-in signature, overridable via "Set as default look".
-    @Published var signature: AutoHDR.BloomParams = AutoHDR.signatureLook
+    @Published public var signature: AutoHDR.BloomParams = AutoHDR.signatureLook
 
     /// True once the user has saved their own default look (so the button offers
     /// "Restore app default" instead of "Save as default").
-    @Published private(set) var hasCustomDefault = SignatureStore.hasSaved
+    @Published public private(set) var hasCustomDefault = SignatureStore.hasSaved
 
     // MARK: Same look for all (batch mode)
 
@@ -90,14 +90,14 @@ final class MergeModel: ObservableObject {
     /// (they're KEPT and come back when turned off), and merges use the shared
     /// look for every item. Persisted across launches. private(set): all changes
     /// go through setSameLookForAll so the transition rules can't be bypassed.
-    @Published private(set) var sameLookForAll: Bool {
+    @Published public private(set) var sameLookForAll: Bool {
         didSet { UserDefaults.standard.set(sameLookForAll, forKey: Self.sameLookKey) }
     }
     static let sameLookKey = "gainmap.sameLookForAll"
 
     /// Flip batch mode, running the transition rules. No-ops while a batch
     /// export is running (flipping mid-run would split the batch's semantics).
-    func setSameLookForAll(_ on: Bool) {
+    public func setSameLookForAll(_ on: Bool) {
         guard on != sameLookForAll, !isExportingAll else { return }
         if on {
             // A photo that already OWNS a look keeps its uncommitted live edits.
@@ -133,7 +133,7 @@ final class MergeModel: ObservableObject {
         intensity = 1.0
     }
 
-    init() {
+    public init() {
         // Retire the old global GLOW-IN-SDR flag (now per-photo on the look) so a
         // stale `true` from an earlier build can't override the clean default.
         UserDefaults.standard.removeObject(forKey: "gainmap.bakeGlowIntoSDR")
@@ -151,7 +151,7 @@ final class MergeModel: ObservableObject {
     /// gestures ignore synthesized AX clicks). Called from the view's
     /// onAppear — seeding during @StateObject init breaks scene creation.
     ///   Gainmap -gm-seed "/path/a.jpg,/path/b.jpg"
-    func applyDebugSeedIfRequested() {
+    public func applyDebugSeedIfRequested() {
         guard items.isEmpty,
               let seed = UserDefaults.standard.string(forKey: "gm-seed") else { return }
         addFiles(seed.split(separator: ",").map { URL(fileURLWithPath: String($0)) })
@@ -160,7 +160,7 @@ final class MergeModel: ObservableObject {
 
     /// Drive the whole look from the single Intensity slider, RELATIVE to the
     /// current anchor (100% = the look as currently dialed).
-    func setIntensity(_ t: Double) {
+    public func setIntensity(_ t: Double) {
         intensity = t
         applyingIntensity = true
         bloom = AutoHDR.look(intensity: t, signature: anchorLook)
@@ -168,7 +168,7 @@ final class MergeModel: ObservableObject {
     }
 
     /// Reset to the saved default look (the shared signature / screenshot preset).
-    func resetToDefault() {
+    public func resetToDefault() {
         anchorLook = signature
         applyingIntensity = true
         bloom = signature
@@ -180,7 +180,7 @@ final class MergeModel: ObservableObject {
     /// default never carries GLOW-IN-SDR: it's a deliberate per-photo opt-in, so new
     /// photos always start with a clean SDR base (the current photo's own bake is
     /// left untouched — only the stored default is normalized off).
-    func setSignatureFromCurrent() {
+    public func setSignatureFromCurrent() {
         var sig = bloom
         sig.bakeGlowIntoSDR = false
         signature = sig
@@ -192,7 +192,7 @@ final class MergeModel: ObservableObject {
 
     /// Throw away the user's saved default and return to the look Gainmap shipped
     /// with (then re-anchor the current photo to it).
-    func restoreBuiltInDefault() {
+    public func restoreBuiltInDefault() {
         SignatureStore.clear()
         signature = AutoHDR.signatureLook
         hasCustomDefault = false
@@ -202,20 +202,20 @@ final class MergeModel: ObservableObject {
     // MARK: Copy / paste a look between photos
 
     /// A copied look, ready to paste onto another photo. nil = nothing copied.
-    @Published var clipboard: AutoHDR.BloomParams?
-    var canPaste: Bool { clipboard != nil }
+    @Published public var clipboard: AutoHDR.BloomParams?
+    public var canPaste: Bool { clipboard != nil }
 
     /// Copy the current photo's look.
-    func copyLook() { clipboard = bloom }
+    public func copyLook() { clipboard = bloom }
 
     /// Paste the copied look onto the selected photo (didSet stores it + re-anchors).
-    func pasteLook() {
+    public func pasteLook() {
         guard let c = clipboard else { return }
         bloom = c
     }
 
     /// Paste the copied look onto every photo in the queue.
-    func pasteLookToAll() {
+    public func pasteLookToAll() {
         guard let c = clipboard, !items.isEmpty else { return }
         for i in items.indices { items[i].look = c }
         runningLook = c
@@ -228,12 +228,12 @@ final class MergeModel: ObservableObject {
 
     // MARK: Auto-mode queue
 
-    @Published var items: [BatchItem] = []
-    @Published var selectedID: UUID?
+    @Published public var items: [BatchItem] = []
+    @Published public var selectedID: UUID?
     private var loadingSelection = false
 
     /// The selected photo's file, mirrored for the preview pane.
-    @Published var sdrURL: URL?
+    @Published public var sdrURL: URL?
 
     // GLOW-IN-SDR is now a per-photo dial that lives on `bloom.bakeGlowIntoSDR`
     // (see AutoHDR.BloomParams) so it travels with each photo's look. It used to be
@@ -243,27 +243,27 @@ final class MergeModel: ObservableObject {
 
     // MARK: Shared status (phase + per-merge spinner)
 
-    @Published var phase: Phase = .idle
-    @Published var readout: ClampReadout?
-    @Published var outputURL: URL?
-    @Published var errorMessage: String?
+    @Published public var phase: Phase = .idle
+    @Published public var readout: ClampReadout?
+    @Published public var outputURL: URL?
+    @Published public var errorMessage: String?
 
     // MARK: Selection
 
-    var selectedIndex: Int? {
+    public var selectedIndex: Int? {
         guard let id = selectedID else { return nil }
         return items.firstIndex { $0.id == id }
     }
-    var selectedItem: BatchItem? { selectedIndex.map { items[$0] } }
+    public var selectedItem: BatchItem? { selectedIndex.map { items[$0] } }
 
-    var savedCount: Int { items.filter { $0.status == .done }.count }
-    var pendingCount: Int { items.filter { $0.status != .done }.count }
-    var hasNext: Bool { selectedIndex.map { $0 < items.count - 1 } ?? false }
-    var hasPrevious: Bool { selectedIndex.map { $0 > 0 } ?? false }
-    var canSaveSelected: Bool { selectedItem != nil && phase != .merging && !isExportingAll }
+    public var savedCount: Int { items.filter { $0.status == .done }.count }
+    public var pendingCount: Int { items.filter { $0.status != .done }.count }
+    public var hasNext: Bool { selectedIndex.map { $0 < items.count - 1 } ?? false }
+    public var hasPrevious: Bool { selectedIndex.map { $0 > 0 } ?? false }
+    public var canSaveSelected: Bool { selectedItem != nil && phase != .merging && !isExportingAll }
     /// While SAME-LOOK is on, Export All targets EVERY photo (done ones get
     /// re-merged so the "same look for all" promise holds after look changes).
-    var canExportAll: Bool {
+    public var canExportAll: Bool {
         sameLookForAll ? (!items.isEmpty && phase != .merging)
                        : (pendingCount > 0 && phase != .merging)
     }
@@ -271,7 +271,7 @@ final class MergeModel: ObservableObject {
     /// Write the live bloom onto the selected item — called when LEAVING a photo
     /// (navigation, merge, export-all), not on every slider tick. No-op while
     /// SAME-LOOK is on: the shared look must never stamp preserved per-photo looks.
-    func commitLiveLook() {
+    public func commitLiveLook() {
         guard !sameLookForAll else { return }
         if let i = selectedIndex { items[i].look = bloom }
     }
@@ -280,7 +280,7 @@ final class MergeModel: ObservableObject {
     /// running look (so a fresh photo arrives pre-dialed to your last settings).
     /// While SAME-LOOK is on, only the selection + status mirror update — the
     /// shared look stays live (never loaded from, never committed to, the item).
-    func select(_ id: UUID) {
+    public func select(_ id: UUID) {
         guard let item = items.first(where: { $0.id == id }) else { return }
         commitLiveLook()   // the photo we're leaving keeps what was dialed on it
         selectedID = id
@@ -295,8 +295,8 @@ final class MergeModel: ObservableObject {
         if phase != .merging { phase = .idle }
     }
 
-    func selectNext() { stepSelection(+1) }
-    func selectPrevious() { stepSelection(-1) }
+    public func selectNext() { stepSelection(+1) }
+    public func selectPrevious() { stepSelection(-1) }
     private func stepSelection(_ delta: Int) {
         guard let i = selectedIndex, items.indices.contains(i + delta) else { return }
         select(items[i + delta].id)
@@ -306,7 +306,7 @@ final class MergeModel: ObservableObject {
 
     /// Transient note shown when dropped files were skipped (wrong type), so a
     /// rejected drop never just silently does nothing. Cleared by the view.
-    @Published var dropNotice: String?
+    @Published public var dropNotice: String?
 
     /// The user-facing explanation for skipped drops. nil when nothing was skipped.
     /// (nonisolated: pure String math, unit-tested off the main actor.)
@@ -324,7 +324,7 @@ final class MergeModel: ObservableObject {
 
     /// Add one or more SDR JPEGs to the queue (dedup by path). Files that aren't
     /// JPEGs are skipped WITH feedback (dropNotice), never silently.
-    func addFiles(_ urls: [URL]) {
+    public func addFiles(_ urls: [URL]) {
         var seen = Set(items.map { $0.sdrURL.standardizedFileURL })
         var added: [BatchItem] = []
         var tiffs = 0, others = 0
@@ -347,7 +347,7 @@ final class MergeModel: ObservableObject {
         select(added[0].id)
     }
 
-    func remove(_ id: UUID) {
+    public func remove(_ id: UUID) {
         guard let idx = items.firstIndex(where: { $0.id == id }) else { return }
         let wasSelected = id == selectedID
         items.remove(at: idx)
@@ -359,7 +359,7 @@ final class MergeModel: ObservableObject {
         }
     }
 
-    func clearQueue() {
+    public func clearQueue() {
         items.removeAll()
         clearSelection()
     }
@@ -378,23 +378,23 @@ final class MergeModel: ObservableObject {
     /// Merge the selected photo, then advance to the next (save-as-you-go).
     /// Guarded against reentry: a repeated ⌘S (or a save fired between batch
     /// items) would otherwise interleave merges and can skip a photo unsaved.
-    func saveSelectedAndAdvance() async {
+    public func saveSelectedAndAdvance() async {
         guard phase != .merging, !isExportingAll, let id = selectedID else { return }
         await mergeItem(id)
         if hasNext { selectNext() }
     }
 
     /// True while an Export All batch is running (drives the Stop affordance).
-    @Published private(set) var isExportingAll = false
+    @Published public private(set) var isExportingAll = false
     /// Progress for the CURRENT batch run. `pendingCount` can't describe it
     /// while SAME-LOOK is on (done items are targets too).
-    @Published private(set) var batchTotal = 0
-    @Published private(set) var batchDone = 0
+    @Published public private(set) var batchTotal = 0
+    @Published public private(set) var batchDone = 0
     private var exportTask: Task<Void, Never>?
 
     /// Kick off Export All as a RETAINED task so the user can stop it — an
     /// unowned fire-and-forget batch could only be ended by force-quitting.
-    func startExportAll() {
+    public func startExportAll() {
         guard exportTask == nil else { return }
         isExportingAll = true
         exportTask = Task { [weak self] in
@@ -405,13 +405,13 @@ final class MergeModel: ObservableObject {
     }
 
     /// Stop the batch after the in-flight photo (which also gets terminated).
-    func stopExportAll() { exportTask?.cancel() }
+    public func stopExportAll() { exportTask?.cancel() }
 
     /// Merge the batch, in order. SAME-LOOK on: every photo, all with the shared
     /// look; off: not-yet-saved photos with their own looks. Look AND targets are
     /// snapshotted before the first await so slider edits or queue mutations
     /// mid-batch can't split the export. Checks for cancellation between photos.
-    func exportAll() async {
+    public func exportAll() async {
         commitLiveLook()
         let batchLook: AutoHDR.BloomParams? = sameLookForAll ? bloom : nil
         let targets = sameLookForAll
@@ -432,7 +432,7 @@ final class MergeModel: ObservableObject {
     /// successful run replaces `<base>_UltraHDR.jpg` — so stopping or failing a
     /// RE-export can never destroy the previous good export.
     /// `look:` overrides the per-item look (batch snapshot); nil = resolve here.
-    func mergeItem(_ id: UUID, look overrideLook: AutoHDR.BloomParams? = nil) async {
+    public func mergeItem(_ id: UUID, look overrideLook: AutoHDR.BloomParams? = nil) async {
         if id == selectedID { commitLiveLook() }   // merge what's on screen (no-op while SAME-LOOK)
         guard let item = items.first(where: { $0.id == id }) else { return }
         let look = overrideLook ?? (sameLookForAll ? bloom : (item.look ?? runningLook))
@@ -501,8 +501,16 @@ final class MergeModel: ObservableObject {
     }
 
     // Test seams — the real implementations render Core Image + spawn uhdrtool,
-    // so the merge state machine can be unit-tested without either.
+    // so the merge state machine can be unit-tested without either. The CLI
+    // runner only exists on macOS; the iOS default fails loudly until the
+    // in-process encoder (P2) takes over this seam.
+    #if os(macOS)
     var runTool: @Sendable (UHDRRunner.Job) async -> RunOutcome = { await UHDRRunner().run($0) }
+    #else
+    var runTool: @Sendable (UHDRRunner.Job) async -> RunOutcome = { _ in
+        .failure(message: "The HDR encoder isn't available on this platform yet.")
+    }
+    #endif
     var synthesizeBuffer: @Sendable (URL, AutoHDR.BloomParams, Gamut) throws -> AutoHDR.RawBuffer =
         { try AutoHDR.synthesize(from: $0, params: $1, gamut: $2) }
     var synthesizeBakeInputs: @Sendable (URL, AutoHDR.BloomParams, Gamut) throws -> AutoHDR.UltraHDRInputs =

@@ -1,6 +1,6 @@
 //
 //  VersionGate.swift
-//  Gainmap
+//  GainmapCore
 //
 //  Remote "disable old versions" kill-switch. On launch the app fetches a tiny
 //  gate.json; if this build's integer build number is below `minimumBuild`, the
@@ -10,6 +10,10 @@
 //  never brick the app. Lets Sam disable an old build instantly by editing one
 //  file, no new release required.
 //
+//  The Info.plist key and fallback URL are init parameters so each platform
+//  gates against its OWN file (Mac and iOS build-number series diverge): the
+//  Mac app uses the defaults; the iOS app will pass its own key + gate-ios.json.
+//
 //  gate.json shape:
 //    { "minimumBuild": 3, "message": "…", "downloadURL": "https://…" }
 //
@@ -17,10 +21,10 @@
 import Foundation
 
 @MainActor
-final class VersionGate: ObservableObject {
-    @Published private(set) var blocked = false
-    @Published private(set) var message = "This version of Gainmap is no longer supported. Please update."
-    @Published private(set) var downloadURL = URL(string: "https://github.com/hurd300403/Gainmap/releases/latest")!
+public final class VersionGate: ObservableObject {
+    @Published public private(set) var blocked = false
+    @Published public private(set) var message = "This version of Gainmap is no longer supported. Please update."
+    @Published public private(set) var downloadURL = URL(string: "https://github.com/hurd300403/Gainmap/releases/latest")!
 
     private struct Gate: Decodable {
         let minimumBuild: Int
@@ -28,13 +32,20 @@ final class VersionGate: ObservableObject {
         let downloadURL: String?
     }
 
-    private static let fallbackURL = "https://samhurdphotography.com/gainmap/gate.json"
+    private let infoPlistKey: String
+    private let fallbackURLString: String
+
+    public init(infoPlistKey: String = "GainmapGateURL",
+                fallbackURLString: String = "https://samhurdphotography.com/gainmap/gate.json") {
+        self.infoPlistKey = infoPlistKey
+        self.fallbackURLString = fallbackURLString
+    }
 
     /// Fetch the gate and block only if this build is too old. Fails open.
-    func check() async {
-        let raw = (Bundle.main.object(forInfoDictionaryKey: "GainmapGateURL") as? String ?? "")
+    public func check() async {
+        let raw = (Bundle.main.object(forInfoDictionaryKey: infoPlistKey) as? String ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard var comps = URLComponents(string: raw.isEmpty ? Self.fallbackURL : raw) else { return }
+        guard var comps = URLComponents(string: raw.isEmpty ? fallbackURLString : raw) else { return }
         // Cache-bust so a freshly-edited gate.json is seen promptly.
         comps.queryItems = (comps.queryItems ?? []) + [URLQueryItem(name: "t", value: "\(Int(Date().timeIntervalSince1970))")]
         guard let url = comps.url else { return }

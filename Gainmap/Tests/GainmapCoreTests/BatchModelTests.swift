@@ -12,7 +12,7 @@ import CoreGraphics
 import ImageIO
 import UniformTypeIdentifiers
 import CoreImage
-@testable import Gainmap
+@testable import GainmapCore
 
 @MainActor
 final class BatchModelTests: XCTestCase {

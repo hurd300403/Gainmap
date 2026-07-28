@@ -13,9 +13,24 @@ UPSTREAM="$ROOT/upstream"
 BUILD="$ROOT/build"
 APP_HELPERS="$ROOT/Gainmap/Resources/Helpers"
 PLUGIN_BIN="$UPSTREAM/lua/lightroom-hdr.lrplugin/bin/mac"
-# Sign by cert SHA-1 hash, not name: there are two "Developer ID Application:
-# Sam Hurd" certs in the keychain and the name alone is ambiguous to codesign.
-SIGN_ID="38FED0F232826AF0D22DF117CE055D78F0823FAC"
+# Signing identity, resolved dynamically (P1): override with GAINMAP_SIGN_ID,
+# else pick the "Developer ID Application: Sam Hurd" cert from the keychain by
+# SHA-1 hash (codesign needs the hash — the NAME alone is ambiguous when two
+# certs exist). With multiple matches the last one listed wins, and the choice
+# is printed so a wrong pick is visible. Any valid Developer ID signature on
+# the helper notarizes fine; only the APP archive pins a specific cert (that
+# pin lives in exportOptions.plist, matched to the provisioning profile).
+resolve_sign_id() {
+    security find-identity -v -p codesigning \
+        | awk '/Developer ID Application: Sam Hurd/ {print $2}' | tail -1
+}
+SIGN_ID="${GAINMAP_SIGN_ID:-$(resolve_sign_id)}"
+if [[ -z "$SIGN_ID" ]]; then
+    echo "error: no 'Developer ID Application: Sam Hurd' identity in the keychain" >&2
+    echo "       (set GAINMAP_SIGN_ID=<cert SHA-1> to override)" >&2
+    exit 1
+fi
+echo "▸ signing identity: $SIGN_ID"
 
 echo "▸ configuring + building uhdrtool (arm64, Release)…"
 cmake -B "$BUILD" -S "$UPSTREAM" \

@@ -13,7 +13,7 @@ import XCTest
 import CoreGraphics
 import ImageIO
 import UniformTypeIdentifiers
-@testable import Gainmap
+@testable import GainmapCore
 
 final class GlowBakeTests: XCTestCase {
 

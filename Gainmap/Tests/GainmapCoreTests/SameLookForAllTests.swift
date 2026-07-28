@@ -12,7 +12,7 @@
 //
 
 import XCTest
-@testable import Gainmap
+@testable import GainmapCore
 
 @MainActor
 final class SameLookForAllTests: XCTestCase {

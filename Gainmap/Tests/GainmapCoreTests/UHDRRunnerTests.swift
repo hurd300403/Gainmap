@@ -13,7 +13,7 @@ import CoreImage.CIFilterBuiltins
 import CoreGraphics
 import ImageIO
 import UniformTypeIdentifiers
-@testable import Gainmap
+@testable import GainmapCore
 
 final class UHDRRunnerTests: XCTestCase {
 

@@ -13,6 +13,7 @@ import AppKit
 import Metal
 import CoreImage
 import ImageIO
+import GainmapCore
 
 // MARK: - Metal EDR view
 
