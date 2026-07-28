@@ -77,17 +77,18 @@ final class AuthModel: ObservableObject {
     #if os(macOS)
     private static let servicesID = "com.legacylab.gainmap.auth"
     private static let returnHost = "gainmap-production.firebaseapp.com"
-    private static let returnPath = "/__/auth/handler"
+    // Our own hosted bounce page: takes Apple's fragment and redirects it to
+    // gainmapauth://callback#…, which ASWebAuthenticationSession intercepts via
+    // custom scheme — the .https callback route demands the Associated Domains
+    // entitlement + AASA publication, which the bounce page sidesteps entirely.
+    private static let returnPath = "/auth/apple-return/"
+    private static let callbackScheme = "gainmapauth"
 
     private let webPresenter = WebAuthPresenter()
     private var webSession: ASWebAuthenticationSession?
     private var webState: String?
 
     func appleWebSignIn() {
-        guard #available(macOS 14.4, *) else {
-            say("APPLE/web flow needs macOS 14.4+ (https callback interception)")
-            return
-        }
         let rawNonce = Self.randomNonce()
         currentNonce = rawNonce
         let hashedNonce = SHA256.hash(data: Data(rawNonce.utf8))
@@ -107,7 +108,7 @@ final class AuthModel: ObservableObject {
         say("APPLE/web flow: opening appleid.apple.com…")
         let session = ASWebAuthenticationSession(
             url: c.url!,
-            callback: .https(host: Self.returnHost, path: Self.returnPath)
+            callbackURLScheme: Self.callbackScheme
         ) { [weak self] url, error in
             self?.handleAppleWebCallback(url: url, error: error, rawNonce: rawNonce)
         }

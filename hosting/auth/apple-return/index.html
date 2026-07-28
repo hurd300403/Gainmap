@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<html>
+<!-- Sign-in-with-Apple return page for the DESKTOP app (S3+).
+     Apple redirects here with the token in the URL fragment; we bounce it to
+     the app's custom scheme, which ASWebAuthenticationSession intercepts
+     without needing the Associated Domains entitlement (unavailable-in-practice
+     for the https-callback route). The fragment never reaches any server. -->
+<head><meta charset="utf-8"><title>Returning to Gainmap…</title></head>
+<body style="font-family: -apple-system, sans-serif; text-align: center; padding-top: 4em; background: #111; color: #eee">
+<p>Returning to Gainmap…</p>
+<script>
+  location.replace("gainmapauth://callback" + (location.hash || "#error=no_fragment"));
+</script>
+</body>
+</html>
