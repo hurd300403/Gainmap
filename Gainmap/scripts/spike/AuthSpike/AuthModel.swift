@@ -77,10 +77,12 @@ final class AuthModel: ObservableObject {
     #if os(macOS)
     private static let servicesID = "com.legacylab.gainmap.auth"
     private static let returnHost = "gainmap-production.firebaseapp.com"
-    // Our own hosted bounce page: takes Apple's fragment and redirects it to
-    // gainmapauth://callback#…, which ASWebAuthenticationSession intercepts via
-    // custom scheme — the .https callback route demands the Associated Domains
-    // entitlement + AASA publication, which the bounce page sidesteps entirely.
+    // The return URL is a tiny Cloud Function (behind a Hosting rewrite) that
+    // receives Apple's form_post and bounces it to gainmapauth://callback#…,
+    // which ASWebAuthenticationSession intercepts via custom scheme — the
+    // .https callback route demands the Associated Domains entitlement, and a
+    // static fragment-mode page can't request scopes (scope-less id_tokens
+    // carry no email, which breaks one-account-per-email — S3 finding).
     private static let returnPath = "/auth/apple-return/"
     private static let callbackScheme = "gainmapauth"
 
@@ -101,7 +103,8 @@ final class AuthModel: ObservableObject {
             .init(name: "client_id", value: Self.servicesID),
             .init(name: "redirect_uri", value: "https://\(Self.returnHost)\(Self.returnPath)"),
             .init(name: "response_type", value: "code id_token"),
-            .init(name: "response_mode", value: "fragment"),
+            .init(name: "response_mode", value: "form_post"),  // required once scopes are requested
+            .init(name: "scope", value: "name email"),
             .init(name: "state", value: state),
             .init(name: "nonce", value: hashedNonce),
         ]

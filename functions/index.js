@@ -22,7 +22,7 @@ const { getFirestore, Timestamp } = require('firebase-admin/firestore');
 const { getStorage } = require('firebase-admin/storage');
 const { getAuth } = require('firebase-admin/auth');
 const { setGlobalOptions } = require('firebase-functions/v2');
-const { onCall, HttpsError } = require('firebase-functions/v2/https');
+const { onCall, onRequest, HttpsError } = require('firebase-functions/v2/https');
 const { onObjectFinalized, onObjectDeleted } = require('firebase-functions/v2/storage');
 const { onSchedule } = require('firebase-functions/v2/scheduler');
 const logger = require('firebase-functions/logger');
@@ -109,6 +109,25 @@ exports.maintenance = onSchedule('every 24 hours', async () => {
     now: Timestamp.now(),
   });
   logger.info('maintenance', report);
+});
+
+// ---------------------------------------------------------------------------
+// appleReturn — Sign-in-with-Apple return endpoint for the DESKTOP app
+// ---------------------------------------------------------------------------
+// Developer ID Mac builds cannot use native SIWA (S3 finding), so the Mac app
+// runs a browser flow. Requesting the email scope forces Apple to form_post
+// the response, which a static page cannot read — this endpoint receives the
+// POST (behind the Hosting rewrite at /auth/apple-return) and bounces the
+// fields to the app's custom scheme, where ASWebAuthenticationSession picks
+// them up. Deliberately: no auth, no state, no logging of token material.
+exports.appleReturn = onRequest((req, res) => {
+  const p = req.method === 'POST' ? req.body || {} : req.query || {};
+  const frag = ['code', 'id_token', 'state', 'user', 'error']
+    .filter((k) => typeof p[k] === 'string' && p[k].length > 0 && p[k].length < 8192)
+    .map((k) => `${k}=${encodeURIComponent(p[k])}`)
+    .join('&');
+  res.set('Cache-Control', 'no-store');
+  res.redirect(303, `gainmapauth://callback#${frag || 'error=empty_response'}`);
 });
 
 // ---------------------------------------------------------------------------

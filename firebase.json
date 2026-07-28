@@ -44,6 +44,18 @@
     "ignore": [
       "firebase.json",
       "**/.*"
+    ],
+    "rewrites": [
+      {
+        "source": "/auth/apple-return",
+        "function": "appleReturn",
+        "region": "us-central1"
+      },
+      {
+        "source": "/auth/apple-return/**",
+        "function": "appleReturn",
+        "region": "us-central1"
+      }
     ]
   }
 }
