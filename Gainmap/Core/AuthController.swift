@@ -307,6 +307,104 @@ public final class AuthController: ObservableObject {
             withIDToken: idToken, rawNonce: rawNonce, fullName: nil)
         signIn(with: credential)
     }
+
+    // ------------------------------------------------- Google (Mac)
+    // FirebaseAuth's OAuthProvider web flow is iOS-only (S3 finding), so the
+    // Mac hand-rolls Google's authorization-code + PKCE flow: ASWebAuth ->
+    // accounts.google.com -> custom-scheme redirect (the plist's reversed
+    // client ID) -> token exchange -> GoogleAuthProvider credential. No
+    // client secret — Google's iOS-type OAuth clients use PKCE alone.
+    public func googleWebSignIn() {
+        guard let clientID = FirebaseApp.app()?.options.clientID else {
+            state = .failed("Google sign-in is not configured.")
+            return
+        }
+        // "NNN-xxx.apps.googleusercontent.com" -> "com.googleusercontent.apps.NNN-xxx"
+        let reversed = clientID.split(separator: ".").reversed().joined(separator: ".")
+        let redirectURI = "\(reversed):/oauth2redirect"
+
+        let verifier = Self.randomNonce(length: 64)
+        let challenge = Data(SHA256.hash(data: Data(verifier.utf8)))
+            .base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+        let state = Self.randomNonce(length: 16)
+        webState = state
+
+        var c = URLComponents(string: "https://accounts.google.com/o/oauth2/v2/auth")!
+        c.queryItems = [
+            .init(name: "client_id", value: clientID),
+            .init(name: "redirect_uri", value: redirectURI),
+            .init(name: "response_type", value: "code"),
+            .init(name: "scope", value: "openid email profile"),
+            .init(name: "state", value: state),
+            .init(name: "code_challenge", value: challenge),
+            .init(name: "code_challenge_method", value: "S256"),
+        ]
+        let session = ASWebAuthenticationSession(
+            url: c.url!,
+            callbackURLScheme: String(reversed)
+        ) { [weak self] url, error in
+            Task { @MainActor in
+                await self?.handleGoogleWebCallback(url: url, error: error,
+                                                    clientID: clientID,
+                                                    redirectURI: redirectURI,
+                                                    verifier: verifier)
+            }
+        }
+        session.presentationContextProvider = webPresenter
+        webSession = session
+        session.start()
+    }
+
+    private func handleGoogleWebCallback(url: URL?, error: Error?, clientID: String,
+                                         redirectURI: String, verifier: String) async {
+        webSession = nil
+        if let error {
+            let ns = error as NSError
+            if ns.domain == ASWebAuthenticationSessionError.errorDomain,
+               ns.code == ASWebAuthenticationSessionError.canceledLogin.rawValue { return }
+            state = .failed(error.localizedDescription)
+            return
+        }
+        guard let url,
+              let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems,
+              items.first(where: { $0.name == "state" })?.value == webState,
+              let code = items.first(where: { $0.name == "code" })?.value else {
+            state = .failed("Google sign-in returned no authorization code.")
+            return
+        }
+        // Exchange the code for tokens (PKCE — no secret).
+        var request = URLRequest(url: URL(string: "https://oauth2.googleapis.com/token")!)
+        request.httpMethod = "POST"
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        let form = [
+            "code": code,
+            "client_id": clientID,
+            "redirect_uri": redirectURI,
+            "code_verifier": verifier,
+            "grant_type": "authorization_code",
+        ]
+        request.httpBody = form
+            .map { "\($0.key)=\($0.value.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? $0.value)" }
+            .joined(separator: "&")
+            .data(using: .utf8)
+        do {
+            let (data, _) = try await URLSession.shared.data(for: request)
+            guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let idToken = json["id_token"] as? String else {
+                state = .failed("Google sign-in token exchange failed.")
+                return
+            }
+            let accessToken = json["access_token"] as? String ?? ""
+            let credential = GoogleAuthProvider.credential(withIDToken: idToken,
+                                                           accessToken: accessToken)
+            signIn(with: credential)
+        } catch {
+            state = .failed(error.localizedDescription)
+        }
+    }
     #endif
 
     // ------------------------------------------------- sign-out

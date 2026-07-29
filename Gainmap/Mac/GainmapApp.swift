@@ -92,7 +92,10 @@ struct SettingsView: View {
             Section {
                 switch auth.state {
                 case .signedOut, .failed:
-                    Button("Sign in with Apple…") { auth.appleWebSignIn() }
+                    HStack(spacing: 10) {
+                        Button("Sign in with Apple…") { auth.appleWebSignIn() }
+                        Button("Sign in with Google…") { auth.googleWebSignIn() }
+                    }
                     Text("Sessions and looks sync to your other devices. "
                          + "Photos upload to your private library only.")
                         .font(.caption).foregroundStyle(.secondary)
@@ -107,19 +110,28 @@ struct SettingsView: View {
                         Text("Setting up sync…").foregroundStyle(.secondary)
                     }
                 case .ready:
-                    LabeledContent("Signed in", value: auth.email ?? "Apple ID")
-                    Text(sync.syncing ? "Sync is on — sessions follow you to your iPhone."
-                                      : "Sync is starting…")
-                        .font(.caption).foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(auth.email ?? "Signed in")
+                            .fontWeight(.medium)
+                        Text(sync.syncing
+                             ? "Sync is on — sessions follow you to your iPhone."
+                             : "Sync is starting…")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                     Button("Sign out", role: .destructive) { auth.signOut() }
                 case .waitlisted:
-                    LabeledContent("Signed in", value: auth.email ?? "Apple ID")
-                    Text("Sync is full right now — you're on the waitlist. "
-                         + "Everything keeps working on this Mac.")
-                        .font(.caption).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Button("Re-check") { auth.retryAdmission() }
-                    Button("Sign out", role: .destructive) { auth.signOut() }
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(auth.email ?? "Signed in")
+                            .fontWeight(.medium)
+                        Text("Sync is full right now — you're on the waitlist. "
+                             + "Everything keeps working on this Mac.")
+                            .font(.caption).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    HStack(spacing: 10) {
+                        Button("Re-check") { auth.retryAdmission() }
+                        Button("Sign out", role: .destructive) { auth.signOut() }
+                    }
                 }
             } header: {
                 Text("Sync")
@@ -139,7 +151,10 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 440, height: 320)
+        // Width fixed, height fits the current auth state — a hard-coded
+        // height left a scrollbar in one state and dead space in another.
+        .frame(width: 460)
+        .fixedSize(horizontal: false, vertical: true)
     }
 }
 
