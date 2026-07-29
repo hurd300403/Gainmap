@@ -317,6 +317,11 @@ public final class MergeModel: ObservableObject {
         }
     }
 
+    /// The sync bridge (P5): fired with the just-saved Session after every
+    /// real save — the app hands it to SyncEngine.noteLocalSession so local
+    /// edits get journaled and drained. Nil (the default) = no sync.
+    public var onSessionPersisted: (@Sendable (Session) -> Void)?
+
     /// Commit the live look and write the session now (drains the debounce).
     /// No-ops when nothing real changed since the last save — an idle app
     /// writes nothing and never advances `updatedAt`.
@@ -330,6 +335,7 @@ public final class MergeModel: ObservableObject {
         session.updatedAt = Date()
         try? await store.save(session)
         lastPersistedContent = session
+        onSessionPersisted?(session)
     }
 
     /// Synchronous last-chance flush for app termination — willTerminate gives
@@ -355,6 +361,7 @@ public final class MergeModel: ObservableObject {
         guard (try? data.write(to: tmp, options: .atomic)) != nil else { return }
         _ = try? FileManager.default.replaceItemAt(final, withItemAt: tmp)
         lastPersistedContent = session
+        onSessionPersisted?(session)
     }
 
     /// Off-main metadata for freshly imported photos: SHA-256 content hash +

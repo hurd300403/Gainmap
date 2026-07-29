@@ -16,7 +16,15 @@
 import SwiftUI
 
 public struct LookControlsPanel: View {
+    /// How the ADVANCED section renders. `.accordion` = the Mac's boxed
+    /// collapsible groups (concept A). `.tabbed` = a segmented picker with one
+    /// group visible at a time (concept D) — the compact-iPhone layout, where
+    /// three stacked open groups would outgrow the bottom sheet.
+    public enum AdvancedStyle { case accordion, tabbed }
+
     @ObservedObject var model: MergeModel
+    let advancedStyle: AdvancedStyle
+    @State private var selectedGroup = "glow"
     /// Turning GLOW IN SDR on opens an explainer first (so the brighter/blown
     /// SDR fallback doesn't surprise anyone) — the host app owns that modal.
     var onGlowInSDRInfo: () -> Void
@@ -33,10 +41,12 @@ public struct LookControlsPanel: View {
     public init(model: MergeModel,
                 showAdvancedLook: Binding<Bool>,
                 expandedGroups: Binding<Set<String>>,
+                advancedStyle: AdvancedStyle = .accordion,
                 onGlowInSDRInfo: @escaping () -> Void) {
         self.model = model
         self._showAdvancedLook = showAdvancedLook
         self._expandedGroups = expandedGroups
+        self.advancedStyle = advancedStyle
         self.onGlowInSDRInfo = onGlowInSDRInfo
     }
 
@@ -164,34 +174,68 @@ public struct LookControlsPanel: View {
                     Spacer(minLength: 0)
                 }
 
-                // THE GLOW — shape & strength of the bloom.
-                lookGroup("glow", "THE GLOW", "how the highlights bloom") {
-                    sliderRow("GLOW", $model.bloom.glow, 0...1.5, fmt: "%.2f", "none", "bright",
-                              resetTo: model.signature.glow,
-                              help: "How much the bright areas bloom and spill light. Higher = brighter, dreamier highlights.")
-                    sliderRow("SPREAD", $model.bloom.spread, 0.002...0.025, fmt: "%.1f%%", "tight", "wide", scale: 100,
-                              resetTo: model.signature.spread,
-                              help: "Size of the glow halo around bright areas. Tight = crisp and contained; wide = soft and dreamy.")
-                    sliderRow("PUNCH", $model.bloom.punch, 0...1, fmt: "%.2f", "soft glow", "sharp pop",
-                              resetTo: model.signature.punch,
-                              help: "The character of the glow. Left = soft, dreamy bloom; right = sharp, snappy highlights.")
-                    sliderRow("FALLOFF", $model.bloom.falloff, 0.5...2.0, fmt: "%.2f", "hard", "smooth",
-                              resetTo: model.signature.falloff,
-                              help: "How abruptly the glow ramps up in the highlights. Hard = sudden onset; smooth = gradual and gentle.")
+                switch advancedStyle {
+                case .accordion:
+                    lookGroup("glow", "THE GLOW", "how the highlights bloom") { glowControls }
+                    lookGroup("color", "COLOR", "the color of that light") { colorControls }
+                    lookGroup("hdr", "HDR & SCREENS", "how it shows across displays") { hdrControls }
+                case .tabbed:
+                    Picker("", selection: $selectedGroup) {
+                        Text("THE GLOW").tag("glow")
+                        Text("COLOR").tag("color")
+                        Text("HDR").tag("hdr")
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    VStack(spacing: 4) {
+                        switch selectedGroup {
+                        case "color": colorControls
+                        case "hdr": hdrControls
+                        default: glowControls
+                        }
+                    }
+                    .padding(12)
+                    .background(Theme.inset, in: RoundedRectangle(cornerRadius: 10))
+                    .overlay(RoundedRectangle(cornerRadius: 10).stroke(Theme.line, lineWidth: 1))
                 }
+            }
+        }
+        .padding(16)
+        .background(Theme.surface.opacity(0.5), in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Theme.line, lineWidth: 1))
+        .onChange(of: expandedGroups) { _, groups in
+            // The GLOW-IN-SDR teaser inserts "hdr" — mirror it onto the tab.
+            if advancedStyle == .tabbed, groups.contains("hdr") { selectedGroup = "hdr" }
+        }
+    }
 
-                // COLOR — the color of the glow.
-                lookGroup("color", "COLOR", "the color of that light") {
-                    sliderRow("GLOW COLOR", $model.bloom.saturation, 0...1.5, fmt: "%.2f", "white", "vivid",
-                              resetTo: model.signature.saturation,
-                              help: "How colorful the glow is. White = neutral light; vivid = keeps the scene's own color in the glow.")
-                    sliderRow("TINT", $model.bloom.tint, -1...1, fmt: "%+.2f", "cool", "warm",
-                              resetTo: model.signature.tint,
-                              help: "Warmth of the glow. Cool leans blue; warm leans golden-hour.")
-                }
+    // MARK: group contents (shared by both advanced styles)
 
-                // HDR & SCREENS — how the effect shows across displays.
-                lookGroup("hdr", "HDR & SCREENS", "how it shows across displays") {
+    @ViewBuilder private var glowControls: some View {
+        sliderRow("GLOW", $model.bloom.glow, 0...1.5, fmt: "%.2f", "none", "bright",
+                  resetTo: model.signature.glow,
+                  help: "How much the bright areas bloom and spill light. Higher = brighter, dreamier highlights.")
+        sliderRow("SPREAD", $model.bloom.spread, 0.002...0.025, fmt: "%.1f%%", "tight", "wide", scale: 100,
+                  resetTo: model.signature.spread,
+                  help: "Size of the glow halo around bright areas. Tight = crisp and contained; wide = soft and dreamy.")
+        sliderRow("PUNCH", $model.bloom.punch, 0...1, fmt: "%.2f", "soft glow", "sharp pop",
+                  resetTo: model.signature.punch,
+                  help: "The character of the glow. Left = soft, dreamy bloom; right = sharp, snappy highlights.")
+        sliderRow("FALLOFF", $model.bloom.falloff, 0.5...2.0, fmt: "%.2f", "hard", "smooth",
+                  resetTo: model.signature.falloff,
+                  help: "How abruptly the glow ramps up in the highlights. Hard = sudden onset; smooth = gradual and gentle.")
+    }
+
+    @ViewBuilder private var colorControls: some View {
+        sliderRow("GLOW COLOR", $model.bloom.saturation, 0...1.5, fmt: "%.2f", "white", "vivid",
+                  resetTo: model.signature.saturation,
+                  help: "How colorful the glow is. White = neutral light; vivid = keeps the scene's own color in the glow.")
+        sliderRow("TINT", $model.bloom.tint, -1...1, fmt: "%+.2f", "cool", "warm",
+                  resetTo: model.signature.tint,
+                  help: "Warmth of the glow. Cool leans blue; warm leans golden-hour.")
+    }
+
+    @ViewBuilder private var hdrControls: some View {
                     sliderRow("HEADROOM", $model.bloom.headroom, 1...3, fmt: "%.1f×", "natural", "intense",
                               resetTo: model.signature.headroom,
                               help: "How far the bright tones climb on HDR screens. Higher makes highlights glow harder on HDR-capable displays (little effect on regular screens or the SDR fallback).")
@@ -220,12 +264,6 @@ public struct LookControlsPanel: View {
                         Text(model.bloom.bakeGlowIntoSDR ? "shows on every screen" : "HDR screens only")
                             .font(Theme.mono(9)).foregroundStyle(Theme.stoneFaint)
                     }
-                }
-            }
-        }
-        .padding(16)
-        .background(Theme.surface.opacity(0.5), in: RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Theme.line, lineWidth: 1))
     }
 
     private func sliderRow(_ title: String, _ value: Binding<Double>, _ range: ClosedRange<Double>,

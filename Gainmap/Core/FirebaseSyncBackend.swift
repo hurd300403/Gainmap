@@ -309,6 +309,13 @@ public enum FirebaseSetup {
         settings.cacheSettings = MemoryCacheSettings()   // tests want no disk cache
         Firestore.firestore().settings = settings
         Auth.auth().useEmulator(withHost: host, port: authPort)
+        // PURGE any persisted user BEFORE anything can ask for its token.
+        // The host app's keychain carries the previous run's user, whose
+        // refresh token belongs to a DEAD emulator instance; once its ID
+        // token ages out, FirebaseAuth's proactive 0:0 refresh fails and the
+        // error poisons every credential fetch — Firestore streams report
+        // 'Unknown: internal error' and the whole suite reads as offline.
+        try? Auth.auth().signOut()
         Storage.storage().useEmulator(withHost: host, port: storagePort)
         Functions.functions(region: "us-central1").useEmulator(withHost: host, port: functionsPort)
     }

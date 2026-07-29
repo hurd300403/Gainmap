@@ -93,7 +93,7 @@
       </Testables>
       <CommandLineArguments>
          <CommandLineArgument
-            argument = "-gm-seed test-host"
+            argument = "-gm-no-store YES"
             isEnabled = "YES">
          </CommandLineArgument>
       </CommandLineArguments>

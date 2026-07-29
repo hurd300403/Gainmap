@@ -169,8 +169,11 @@ final class SyncEmulatorTests: XCTestCase {
         return p
     }
 
-    /// Poll until `condition` holds (listeners are asynchronous).
-    private func waitUntil(_ label: String, timeout: TimeInterval = 15,
+    /// Poll until `condition` holds (listeners are asynchronous). THROWS on
+    /// timeout so the test aborts — continuing into a force-unwrap would
+    /// crash the HOST APP (it hosts the tests) and poison every later test
+    /// with relaunch debris.
+    private func waitUntil(_ label: String, timeout: TimeInterval = 25,
                            condition: () async -> Bool) async throws {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
@@ -178,6 +181,17 @@ final class SyncEmulatorTests: XCTestCase {
             try await Task.sleep(nanoseconds: 200_000_000)
         }
         XCTFail("timed out waiting for \(label)")
+        throw NSError(domain: "waitUntil", code: 408,
+                      userInfo: [NSLocalizedDescriptionKey: "timeout: \(label)"])
+    }
+
+    /// Force-unwrap-free session load: missing session fails the test
+    /// cleanly instead of trapping the host process.
+    private func loadOrFail(_ store: FileSessionStore, _ id: UUID,
+                            file: StaticString = #filePath,
+                            line: UInt = #line) async throws -> Session {
+        let session = await store.load(id: id)
+        return try XCTUnwrap(session, "session \(id) missing", file: file, line: line)
     }
 
     // ================================================================ tests
@@ -203,7 +217,7 @@ final class SyncEmulatorTests: XCTestCase {
         try await waitUntil("B materializes the session") {
             await storeB.load(id: session.id) != nil
         }
-        var atB = await storeB.load(id: session.id)!
+        var atB = try await loadOrFail(storeB, session.id)
         XCTAssertEqual(atB.title, "Smith Wedding")
         XCTAssertEqual(atB.photos.count, 2)
         XCTAssertEqual(atB.photos[0].contentHash, p1.hash)   // order preserved
@@ -222,7 +236,7 @@ final class SyncEmulatorTests: XCTestCase {
             guard let s = await storeA.load(id: session.id) else { return false }
             return s.photos[1].look == self.look(0.8) && s.sameLookForAll
         }
-        let atA = await storeA.load(id: session.id)!
+        let atA = try await loadOrFail(storeA, session.id)
         XCTAssertEqual(atA.runningLook, look(0.5))
         // A's original photo look survived untouched.
         XCTAssertEqual(atA.photos[0].look, look(1.2))
@@ -248,12 +262,12 @@ final class SyncEmulatorTests: XCTestCase {
         }
 
         // Both edit the SAME photo look while "offline" (no drains yet).
-        var atA = await storeA.load(id: session.id)!
+        var atA = try await loadOrFail(storeA, session.id)
         atA.photos[0].look = look(1.5)
         try await storeA.save(atA)
         await engineA.noteLocalSession(atA)
 
-        var atB = await storeB.load(id: session.id)!
+        var atB = try await loadOrFail(storeB, session.id)
         atB.photos[0].look = look(0.3)
         try await storeB.save(atB)
         await engineB.noteLocalSession(atB)
@@ -306,12 +320,12 @@ final class SyncEmulatorTests: XCTestCase {
         let photoID = session.photos[1].id
 
         // A removes photo 2 (pending tombstone), B edits its look (pending).
-        var atA = await storeA.load(id: session.id)!
+        var atA = try await loadOrFail(storeA, session.id)
         atA.photos.removeAll { $0.id == photoID }
         try await storeA.save(atA)
         await engineA.noteLocalSession(atA)
 
-        var atB = await storeB.load(id: session.id)!
+        var atB = try await loadOrFail(storeB, session.id)
         atB.photos[1].look = look(0.9)
         try await storeB.save(atB)
         await engineB.noteLocalSession(atB)
@@ -348,14 +362,14 @@ final class SyncEmulatorTests: XCTestCase {
 
         // B edits the photo FIRST (pending, not drained) — deterministic:
         // the edit is journaled before any tombstone exists anywhere.
-        var atB = await storeB.load(id: session.id)!
+        var atB = try await loadOrFail(storeB, session.id)
         let i = atB.photos.firstIndex { $0.id == photoID }!
         atB.photos[i].look = look(0.7)
         try await storeB.save(atB)
         await engineB.noteLocalSession(atB)
 
         // A deletes photo 1 AND DRAINS (tombstone committed remotely).
-        var atA = await storeA.load(id: session.id)!
+        var atA = try await loadOrFail(storeA, session.id)
         atA.photos.removeAll { $0.id == photoID }
         try await storeA.save(atA)
         await engineA.noteLocalSession(atA)

@@ -44,6 +44,12 @@ packages:
   Firebase:
     url: https://github.com/firebase/firebase-ios-sdk
     from: "12.0.0"
+  # NOTE: NO GoogleSignIn SDK. Every released version (through 9.2.0) pins
+  # GTMSessionFetcher < 4, which downgrades the fetcher under Firebase 12's
+  # Auth/Storage/Functions from 4.5.0 to 3.5.0 and broke every authenticated
+  # call (P5 regression, found by bisecting Package.resolved). Google
+  # sign-in uses FirebaseAuth's generic OAuthProvider("google.com") web flow
+  # instead — no extra dependency, same one-uid outcome.
 
 targets:
   GainmapCore:
@@ -139,26 +145,29 @@ targets:
           # gainmap project in the sam-hurd-photo Sentry org.
           SENTRY_DSN: "https://553956a1d0e59a781e1ec7dedeee33ba@o4510926726365184.ingest.us.sentry.io/4511583301795840"
 
-  # Dev-only P1 demo shell: GainmapCore running on a physical iPhone (shared
-  # LookControlsPanel + AutoHDR engine + an EDR Metal preview twin). Throwaway —
-  # replaced by the real GainmapIOS target in P5.
-  CoreDemo:
+  # P5: the real iOS app (replaces the P1 CoreDemo shell on-device — same
+  # registered App ID). Auth + sync + the shared editor.
+  GainmapIOS:
     type: application
     platform: iOS
     dependencies:
       - target: GainmapCore
         embed: true
     sources:
-      - path: Demo/CoreDemo
+      - path: iOS
+        excludes: ["Resources/**", "Support/**"]
+      - path: iOS/Resources/GoogleService-Info.plist
+        buildPhase: resources
+      # Brand fonts (Info.plist UIAppFonts lists them by Fonts/ path).
+      - path: Resources/Fonts
+        type: folder
+        buildPhase: resources
     settings:
       base:
-        PRODUCT_NAME: CoreDemo
-        # Reuses the registered iOS App ID (same as the S3 AuthSpikeIOS install,
-        # which this replaces on-device).
+        PRODUCT_NAME: Gainmap
         PRODUCT_BUNDLE_IDENTIFIER: com.legacylab.gainmap.ios
-        GENERATE_INFOPLIST_FILE: YES
-        INFOPLIST_KEY_UILaunchScreen_Generation: YES
-        INFOPLIST_KEY_CFBundleDisplayName: Gainmap Demo
+        INFOPLIST_FILE: iOS/Support/Info.plist
+        CODE_SIGN_ENTITLEMENTS: iOS/Support/GainmapIOS.entitlements
         TARGETED_DEVICE_FAMILY: "1"
         LD_RUNPATH_SEARCH_PATHS: "@executable_path/Frameworks"
 
@@ -216,10 +225,10 @@ schemes:
       targets:
         - GainmapCoreTests
 
-  CoreDemo:
+  GainmapIOS:
     build:
       targets:
-        CoreDemo: all
+        GainmapIOS: all
     run:
       config: Debug
 
@@ -234,10 +243,12 @@ schemes:
     test:
       config: Debug
       gatherCoverageData: true
-      # -gm-seed keeps the HOST app from attaching the real session store
-      # while the integration tests drive their own temp stores.
+      # -gm-no-store keeps the HOST app from attaching the real session
+      # store while the integration tests drive their own temp stores
+      # (a dedicated flag: abusing -gm-seed poured a bogus path into the
+      # import pipeline and popped an error alert on every test run).
       commandLineArguments:
-        "-gm-seed test-host": true
+        "-gm-no-store YES": true
       targets:
         - GainmapCoreTests
         - SyncIntegrationTests

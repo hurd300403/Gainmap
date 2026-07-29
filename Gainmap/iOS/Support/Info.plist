@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleDisplayName</key>
+    <string>Gainmap</string>
+    <key>CFBundleExecutable</key>
+    <string>$(EXECUTABLE_NAME)</string>
+    <key>CFBundleIdentifier</key>
+    <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>$(PRODUCT_NAME)</string>
+    <key>CFBundlePackageType</key>
+    <string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
+    <key>CFBundleShortVersionString</key>
+    <string>$(MARKETING_VERSION)</string>
+    <key>CFBundleVersion</key>
+    <string>$(CURRENT_PROJECT_VERSION)</string>
+    <!-- FirebaseAuth's OAuth web flow (Google sign-in) round-trips through
+         the encoded-app-ID scheme; the reversed client ID stays for safety. -->
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>app-1-937169591841-ios-d35bf5a2a84831b37d0d60</string>
+                <string>com.googleusercontent.apps.937169591841-4orvoj00fj3b8qha03g5ls2jq51a3sj7</string>
+            </array>
+        </dict>
+    </array>
+    <key>UILaunchScreen</key>
+    <dict>
+        <key>UIColorName</key>
+        <string></string>
+    </dict>
+    <key>UISupportedInterfaceOrientations</key>
+    <array>
+        <string>UIInterfaceOrientationPortrait</string>
+        <string>UIInterfaceOrientationLandscapeLeft</string>
+        <string>UIInterfaceOrientationLandscapeRight</string>
+    </array>
+    <!-- Brand fonts (bundled as a Fonts/ folder reference). -->
+    <key>UIAppFonts</key>
+    <array>
+        <string>Fonts/Inter.ttf</string>
+        <string>Fonts/JetBrainsMono.ttf</string>
+        <string>Fonts/ZillaSlab-Bold.ttf</string>
+        <string>Fonts/ZillaSlab-Medium.ttf</string>
+        <string>Fonts/ZillaSlab-Regular.ttf</string>
+        <string>Fonts/ZillaSlab-SemiBold.ttf</string>
+    </array>
+    <key>ITSAppUsesNonExemptEncryption</key>
+    <false/>
+</dict>
+</plist>

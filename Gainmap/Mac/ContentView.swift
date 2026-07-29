@@ -149,9 +149,12 @@ struct ContentView: View {
         }
         // P3 persistence: adopt the store + resume the last session. The
         // -gm-seed dev hook stays ephemeral (no store) so screenshot runs
-        // never pollute real sessions.
+        // never pollute real sessions; -gm-no-store does the same WITHOUT
+        // seeding anything (the emulator-test host launch — a bogus seed
+        // path would pop an import error on every test run).
         .task {
-            if UserDefaults.standard.string(forKey: "gm-seed") == nil {
+            if UserDefaults.standard.string(forKey: "gm-seed") == nil,
+               !UserDefaults.standard.bool(forKey: "gm-no-store") {
                 await model.attachStoreAndRestore(FileSessionStore())
             }
         }

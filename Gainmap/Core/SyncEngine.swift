@@ -135,6 +135,60 @@ public actor SyncEngine {
         await pumpTransfers(now: now)
     }
 
+    /// Fired after inbound changes land in the local store (materialize,
+    /// tombstone adoption, purge) — the app refreshes its grid/editor.
+    private var onRemoteChange: (@Sendable (UUID) -> Void)?
+
+    public func setOnRemoteChange(_ handler: (@Sendable (UUID) -> Void)?) {
+        onRemoteChange = handler
+    }
+
+    private func noteRemoteChange(_ sessionID: UUID) {
+        onRemoteChange?(sessionID)
+    }
+
+    // ------------------------------------------------------------- hydration
+
+    /// Local path of a 1024px thumb for `hash` — downloads it from the thumbs
+    /// tier if this device never generated one (the grid's mosaic source).
+    public func hydrateThumb(hash: String) async -> URL? {
+        let dir = root.appendingPathComponent("thumbs")
+        let url = dir.appendingPathComponent("\(hash).jpg")
+        if FileManager.default.fileExists(atPath: url.path) { return url }
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        do {
+            try await backend.downloadObject(
+                objectName: SyncSchema.objectName(uid: uid, tier: "thumbs", contentHash: hash),
+                to: url)
+            return url
+        } catch {
+            return nil
+        }
+    }
+
+    /// Local URL of the ORIGINAL bytes for `hash`: the linked file when this
+    /// device has it, else the blob cache (downloading on first request).
+    /// The cache path matches the `.managed(relativePath: "blobs/<hash>.jpg")`
+    /// origins materializeLocal writes, resolved against the store's managed
+    /// files root — so PhotoRecord.sourceURL finds it too.
+    public func hydrateOriginal(hash: String) async -> URL? {
+        if let path = state.hashIndex[hash],
+           FileManager.default.fileExists(atPath: path) {
+            return URL(fileURLWithPath: path)
+        }
+        let cacheURL = await store.managedFilesDir
+            .appendingPathComponent("blobs/\(hash).jpg")
+        if FileManager.default.fileExists(atPath: cacheURL.path) { return cacheURL }
+        do {
+            try await backend.downloadObject(
+                objectName: SyncSchema.objectName(uid: uid, tier: "originals", contentHash: hash),
+                to: cacheURL)
+            return cacheURL
+        } catch {
+            return nil
+        }
+    }
+
     private func loadState() {
         guard let data = try? Data(contentsOf: stateURL),
               let loaded = try? JSONDecoder().decode(SyncState.self, from: data) else {
@@ -807,6 +861,7 @@ public actor SyncEngine {
             } else {
                 await materializeLocal(session: id)
             }
+            noteRemoteChange(id)
         }
         persistSoon()
     }
@@ -838,6 +893,7 @@ public actor SyncEngine {
             setShadow(doc, session: sid)
         }
         await materializeLocal(session: sid)
+        noteRemoteChange(sid)
         persistSoon()
     }
 
@@ -880,6 +936,7 @@ public actor SyncEngine {
         state.shadowSessions.removeValue(forKey: id.uuidString)
         state.shadowPhotos.removeValue(forKey: id.uuidString)
         await store.delete(id: id)
+        noteRemoteChange(id)
     }
 
     /// Rebuild the local Session from shadow + dirty overlay and save it.
