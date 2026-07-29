@@ -78,7 +78,7 @@ public enum AutoHDR {
     """)!
 
     /// The full set of dials for the bloom-as-HDR look.
-    public struct BloomParams: Equatable, Codable {
+    public struct BloomParams: Equatable, Codable, Sendable {
         public init() {}
         public var glow: Double = 0.40        // bloom intensity (0…1.5)
         public var threshold: Double = 0.58   // highlight cutoff, gamma 0…1 (lower = more glows)
