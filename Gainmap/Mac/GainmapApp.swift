@@ -19,20 +19,39 @@ struct GainmapApp: App {
     // early-launch crash is still captured). No-op if the user opted out or no DSN.
     private let crashBootstrap: Void = CrashReporting.bootstrap()
 
+    // Firebase (P5 sync). SKIPPED for ephemeral launches: -gm-seed screenshot
+    // runs, and CRITICALLY the emulator-test HOST (-gm-no-store) — configuring
+    // the production app there would wedge configureForEmulator, whose
+    // FirebaseApp.configure(options:) only runs when no app exists yet.
+    private let firebaseBootstrap: Void = {
+        if !SyncCoordinator.isEphemeralLaunch { FirebaseBootstrap.configureApp() }
+    }()
+
     // Sparkle auto-update. Starts the updater; checks the appcast at SUFeedURL
     // (GitHub Releases) and verifies updates against SUPublicEDKey in Info.plist.
     private let updaterController = SPUStandardUpdaterController(
         startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
 
     @StateObject private var versionGate = VersionGate()
+    @StateObject private var model = MergeModel()
+    @StateObject private var auth = AuthController()
+    @StateObject private var sync = SyncCoordinator()
 
     var body: some Scene {
         Window("Gainmap", id: "main") {
-            ContentView()
+            ContentView(model: model)
                 .modifier(IntelUnsupportedNotice())
                 .modifier(FirstRunCrashNotice())
                 .modifier(VersionGateOverlay(gate: versionGate, updater: updaterController.updater))
                 .task { await versionGate.check() }
+                .task {
+                    guard !SyncCoordinator.isEphemeralLaunch else { return }
+                    auth.start()
+                    await sync.apply(authState: auth.state, model: model)
+                }
+                .onChange(of: auth.state) { _, state in
+                    Task { await sync.apply(authState: state, model: model) }
+                }
         }
         .windowResizability(.contentSize)
         .windowStyle(.hiddenTitleBar)
@@ -43,7 +62,7 @@ struct GainmapApp: App {
             }
         }
 
-        Settings { SettingsView() }
+        Settings { SettingsView().environmentObject(auth).environmentObject(sync) }
     }
 }
 
@@ -65,15 +84,52 @@ struct CheckForUpdatesView: View {
 
 struct SettingsView: View {
     @AppStorage(CrashReporting.defaultsKey) private var crashReporting = true
+    @EnvironmentObject private var auth: AuthController
+    @EnvironmentObject private var sync: SyncCoordinator
 
     var body: some View {
         Form {
             Section {
+                switch auth.state {
+                case .signedOut, .failed:
+                    Button("Sign in with Apple…") { auth.appleWebSignIn() }
+                    Text("Sessions and looks sync to your other devices. "
+                         + "Photos upload to your private library only.")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if case .failed(let message) = auth.state {
+                        Text(message).font(.caption).foregroundStyle(.red)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                case .admitting:
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("Setting up sync…").foregroundStyle(.secondary)
+                    }
+                case .ready:
+                    LabeledContent("Signed in", value: auth.email ?? "Apple ID")
+                    Text(sync.syncing ? "Sync is on — sessions follow you to your iPhone."
+                                      : "Sync is starting…")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Button("Sign out", role: .destructive) { auth.signOut() }
+                case .waitlisted:
+                    LabeledContent("Signed in", value: auth.email ?? "Apple ID")
+                    Text("Sync is full right now — you're on the waitlist. "
+                         + "Everything keeps working on this Mac.")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button("Re-check") { auth.retryAdmission() }
+                    Button("Sign out", role: .destructive) { auth.signOut() }
+                }
+            } header: {
+                Text("Sync")
+            }
+            Section {
                 Toggle("Send anonymous crash reports", isOn: $crashReporting)
                 // Scoped to crash reports on purpose (P4): sync — when you
-                // sign in, in a future update — uploads your photos to your
-                // private library, so a blanket "no photos are ever sent"
-                // would become untrue. Crash reports never include them.
+                // sign in — uploads your photos to your private library, so a
+                // blanket "no photos are ever sent" would be untrue. Crash
+                // reports never include them.
                 Text("Helps fix bugs. Crash reports never include your photos, "
                      + "file names, or IP address. Takes effect on next launch.")
                     .font(.caption).foregroundStyle(.secondary)
@@ -83,7 +139,7 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 420, height: 160)
+        .frame(width: 440, height: 320)
     }
 }
 

@@ -21,6 +21,8 @@ import FirebaseAuth
 import FirebaseFunctions
 #if canImport(UIKit)
 import UIKit
+#elseif canImport(AppKit)
+import AppKit
 #endif
 
 // MARK: - App bootstrap (the pieces an app target can't do itself)
@@ -226,6 +228,87 @@ public final class AuthController: ObservableObject {
         Task { await requestAdmission(uid: uid) }
     }
 
+    // ------------------------------------------------- Sign in with Apple (Mac)
+    // Developer ID distribution does not support the applesignin entitlement
+    // (S3 finding), so the Mac runs Apple's browser OAuth flow: form_post to
+    // the appleReturn Cloud Function (Hosting rewrite), which bounces the
+    // fields to gainmapauth://callback where ASWebAuthenticationSession picks
+    // them up. Ported verbatim from the S3 spike (proved on a notarized build).
+    #if os(macOS)
+    private static let servicesID = "com.legacylab.gainmap.auth"
+    private static let returnHost = "gainmap-production.firebaseapp.com"
+    private static let returnPath = "/auth/apple-return/"
+    private static let callbackScheme = "gainmapauth"
+
+    private let webPresenter = WebAuthPresenter()
+    private var webSession: ASWebAuthenticationSession?
+    private var webState: String?
+
+    public func appleWebSignIn() {
+        let rawNonce = Self.randomNonce()
+        currentNonce = rawNonce
+        let hashedNonce = SHA256.hash(data: Data(rawNonce.utf8))
+            .map { String(format: "%02x", $0) }.joined()
+        let state = Self.randomNonce(length: 16)
+        webState = state
+
+        var c = URLComponents(string: "https://appleid.apple.com/auth/authorize")!
+        c.queryItems = [
+            .init(name: "client_id", value: Self.servicesID),
+            .init(name: "redirect_uri", value: "https://\(Self.returnHost)\(Self.returnPath)"),
+            .init(name: "response_type", value: "code id_token"),
+            .init(name: "response_mode", value: "form_post"),  // required once scopes are requested
+            .init(name: "scope", value: "name email"),
+            .init(name: "state", value: state),
+            .init(name: "nonce", value: hashedNonce),
+        ]
+        let session = ASWebAuthenticationSession(
+            url: c.url!,
+            callbackURLScheme: Self.callbackScheme
+        ) { [weak self] url, error in
+            Task { @MainActor in
+                self?.handleAppleWebCallback(url: url, error: error, rawNonce: rawNonce)
+            }
+        }
+        session.presentationContextProvider = webPresenter
+        webSession = session
+        session.start()
+    }
+
+    private func handleAppleWebCallback(url: URL?, error: Error?, rawNonce: String) {
+        webSession = nil
+        if let error {
+            let ns = error as NSError
+            if ns.domain == ASWebAuthenticationSessionError.errorDomain,
+               ns.code == ASWebAuthenticationSessionError.canceledLogin.rawValue { return }
+            state = .failed(error.localizedDescription)
+            return
+        }
+        guard let url,
+              let fragment = URLComponents(url: url, resolvingAgainstBaseURL: false)?.fragment else {
+            state = .failed("Apple sign-in returned no data.")
+            return
+        }
+        var params: [String: String] = [:]
+        for pair in fragment.components(separatedBy: "&") {
+            let kv = pair.components(separatedBy: "=")
+            guard kv.count == 2 else { continue }
+            params[kv[0]] = kv[1].removingPercentEncoding ?? kv[1]
+        }
+        guard params["state"] == webState else {
+            state = .failed("Apple sign-in state mismatch — try again.")
+            return
+        }
+        guard let idToken = params["id_token"] else {
+            state = .failed("Apple sign-in returned no identity token.")
+            return
+        }
+        let credential = OAuthProvider.appleCredential(
+            withIDToken: idToken, rawNonce: rawNonce, fullName: nil)
+        signIn(with: credential)
+    }
+    #endif
+
     // ------------------------------------------------- sign-out
 
     public func signOut() {
@@ -245,3 +328,12 @@ public final class AuthController: ObservableObject {
         return String(bytes.map { charset[Int($0) % charset.count] })
     }
 }
+
+
+#if os(macOS)
+final class WebAuthPresenter: NSObject, ASWebAuthenticationPresentationContextProviding {
+    func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
+        NSApp.keyWindow ?? NSApp.windows.first ?? ASPresentationAnchor()
+    }
+}
+#endif

@@ -13,7 +13,10 @@ import UniformTypeIdentifiers
 import GainmapCore
 
 struct ContentView: View {
-    @StateObject private var model = MergeModel()
+    // Owned by GainmapApp (P5): the sync coordinator re-attaches the model's
+    // store when auth state changes, so the model must outlive this view's
+    // identity churn.
+    @ObservedObject var model: MergeModel
     @Environment(\.scenePhase) private var scenePhase
     // Look-panel disclosure state lives HERE (session lifetime), not in the
     // panel: the panel is torn down when the queue empties, and these must
@@ -147,14 +150,13 @@ struct ContentView: View {
             model.applyDebugSeedIfRequested()
             #endif
         }
-        // P3 persistence: adopt the store + resume the last session. The
-        // -gm-seed dev hook stays ephemeral (no store) so screenshot runs
-        // never pollute real sessions; -gm-no-store does the same WITHOUT
-        // seeding anything (the emulator-test host launch — a bogus seed
-        // path would pop an import error on every test run).
+        // P3 persistence: adopt the store + resume the last session. Signed
+        // out this is the classic local store; once auth resolves, the
+        // SyncCoordinator re-attaches the per-uid store (adopting these
+        // sessions). Ephemeral launches (-gm-seed screenshots, -gm-no-store
+        // test host) skip stores entirely.
         .task {
-            if UserDefaults.standard.string(forKey: "gm-seed") == nil,
-               !UserDefaults.standard.bool(forKey: "gm-no-store") {
+            if !SyncCoordinator.isEphemeralLaunch {
                 await model.attachStoreAndRestore(FileSessionStore())
             }
         }

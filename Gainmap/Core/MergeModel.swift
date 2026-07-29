@@ -317,6 +317,25 @@ public final class MergeModel: ObservableObject {
         }
     }
 
+    /// Inbound sync (P5): a peer's committed change was materialized into the
+    /// session file — fold it into the LIVE model. Skips entirely while local
+    /// edits are unsaved (debounce pending) or an export is running: the
+    /// journal's dirty overlay protects those groups server-side, and the
+    /// next inbound event after our flush catches the model up. Selection is
+    /// preserved when the photo still exists.
+    public func reloadFromRemote(_ remote: Session) {
+        guard remote.id == session.id else { return }
+        guard persistTask == nil, phase != .merging, !isExportingAll else { return }
+        if let last = lastPersistedContent, Self.contentEquals(last, remote) { return }
+        let selected = selectedID
+        session = remote
+        restoreItemsFromSession()
+        if let selected, items.contains(where: { $0.id == selected }) {
+            select(selected)
+        }
+        lastPersistedContent = remote   // inbound is persisted state, not a local edit
+    }
+
     /// The sync bridge (P5): fired with the just-saved Session after every
     /// real save — the app hands it to SyncEngine.noteLocalSession so local
     /// edits get journaled and drained. Nil (the default) = no sync.

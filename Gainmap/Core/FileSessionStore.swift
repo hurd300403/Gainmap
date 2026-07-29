@@ -111,6 +111,33 @@ public actor FileSessionStore {
         root.appendingPathComponent("users/\(uid)/signature.json")
     }
 
+    /// One-time adoption at first sign-in (P4 spec): sessions created before
+    /// the account existed (uid "local") move under the real uid, so the
+    /// signed-in store — and the sync engine — see them. Existing files at
+    /// the destination win (never clobber synced state with pre-auth copies).
+    public func adoptLocalSessions() {
+        guard uid != "local" else { return }
+        let fm = FileManager.default
+        let localDir = root.appendingPathComponent("users/local/sessions", isDirectory: true)
+        guard let files = try? fm.contentsOfDirectory(at: localDir,
+                                                      includingPropertiesForKeys: nil) else { return }
+        try? ensureDirs()
+        for file in files where file.pathExtension == "json" {
+            let dest = sessionsDir.appendingPathComponent(file.lastPathComponent)
+            if fm.fileExists(atPath: dest.path) {
+                try? fm.removeItem(at: file)      // already adopted previously
+            } else {
+                try? fm.moveItem(at: file, to: dest)
+            }
+        }
+        // The signature travels too (if the signed-in namespace has none yet).
+        let localSig = root.appendingPathComponent("users/local/signature.json")
+        let destSig = root.appendingPathComponent("users/\(uid)/signature.json")
+        if fm.fileExists(atPath: localSig.path), !fm.fileExists(atPath: destSig.path) {
+            try? fm.copyItem(at: localSig, to: destSig)
+        }
+    }
+
     public func saveSignature(_ p: AutoHDR.BloomParams) {
         // The saved default never carries GLOW-IN-SDR (bake normalization —
         // same rule SignatureStore has always applied).
