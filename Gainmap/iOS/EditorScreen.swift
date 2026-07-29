@@ -43,6 +43,8 @@ struct EditorScreen: View {
     /// Photos picked for a brand-new session — imported in prepare().
     private let importItems: [PhotosPickerItem]
     @State private var importing = false
+    /// Filmstrip "+": add more photos to THIS session.
+    @State private var addPickerItems: [PhotosPickerItem] = []
 
     init(session: Session, store: FileSessionStore?, importItems: [PhotosPickerItem] = []) {
         sessionTitle = session.title
@@ -87,6 +89,11 @@ struct EditorScreen: View {
         }
         .sheet(isPresented: $controlsPresented) {
             controlsSheet
+        }
+        .onChange(of: addPickerItems) { _, items in
+            guard !items.isEmpty else { return }
+            addPickerItems = []
+            Task { await importPhotos(items, selectFirstNew: true) }
         }
         .task { await prepare() }
         .onDisappear {
@@ -216,6 +223,20 @@ struct EditorScreen: View {
                                    tooLarge: item.tooLargeToSync)
                         .onTapGesture { select(item.id) }
                 }
+                // Add more photos to this session — a thumb-sized "+" tile.
+                PhotosPicker(selection: $addPickerItems, matching: .images,
+                             photoLibrary: .shared()) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(Theme.inset)
+                        Image(systemName: "plus")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundStyle(Theme.gold)
+                    }
+                    .frame(width: 52, height: 52)
+                    .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(Theme.line, lineWidth: 1))
+                }
             }
             .padding(.vertical, 1)
         }
@@ -297,7 +318,7 @@ struct EditorScreen: View {
             controlsPresented = true
         }
         if !importItems.isEmpty {
-            await importPicked()
+            await importPhotos(importItems, selectFirstNew: false)
         }
         if model.selectedID == nil, let first = model.items.first?.id {
             model.select(first)
@@ -308,14 +329,16 @@ struct EditorScreen: View {
     /// Phone-native import (P5): stage the picked photos as JPEGs in the
     /// store's managed files, then feed them through the same addFiles
     /// pipeline the Mac drop uses (hashing, dedup, naming, persistence —
-    /// and from there the sync bridge uploads them).
-    private func importPicked() async {
+    /// and from there the sync bridge uploads them). Used both for a new
+    /// session's initial pick and the filmstrip's "+".
+    private func importPhotos(_ items: [PhotosPickerItem], selectFirstNew: Bool) async {
         guard let store else { return }
         importing = true
         defer { importing = false }
+        let existingIDs = Set(model.items.map(\.id))
         let managedRoot = store.managedFilesDir
         var staged: [URL] = []
-        for item in importItems {
+        for item in items {
             guard let data = try? await item.loadTransferable(type: Data.self) else { continue }
             if let url = try? PhotoImport.stage(data: data, managedRoot: managedRoot) {
                 staged.append(url)
@@ -324,7 +347,11 @@ struct EditorScreen: View {
         guard !staged.isEmpty else { return }
         model.addFiles(staged)
         await model.flushSession()
-        if model.selectedID == nil, let first = model.items.first?.id {
+        if selectFirstNew,
+           let firstNew = model.items.first(where: { !existingIDs.contains($0.id) }) {
+            model.select(firstNew.id)
+            await loadSelectedBase()
+        } else if model.selectedID == nil, let first = model.items.first?.id {
             model.select(first)
             await loadSelectedBase()
         }
