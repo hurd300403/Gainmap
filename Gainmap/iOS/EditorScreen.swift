@@ -37,6 +37,9 @@ struct EditorScreen: View {
     // Dynamic sheet: the resting detent hugs the fitted image.
     @State private var restingDetent: CGFloat = 190
     @State private var detentSelection: PresentationDetent = .height(190)
+    /// Nearly-dismissed controls state. The sheet stays alive so its nested
+    /// picker/share presentations retain a valid presenter.
+    private let collapsedDetentHeight: CGFloat = 54
 
     private let sessionTitle: String
     private let store: FileSessionStore?
@@ -77,6 +80,10 @@ struct EditorScreen: View {
     private let hGap: CGFloat = 10
     private let minResting: CGFloat = 190
 
+    private var controlsCollapsed: Bool {
+        detentSelection == .height(collapsedDetentHeight)
+    }
+
     var body: some View {
         GeometryReader { geo in
             ZStack {
@@ -86,11 +93,16 @@ struct EditorScreen: View {
                     preview
                         .frame(width: fitted.width, height: fitted.height)
                         .frame(maxWidth: .infinity)
-                    filmstrip
-                    Spacer(minLength: 0)
+                    if controlsCollapsed {
+                        thumbnailGrid
+                    } else {
+                        filmstrip
+                        Spacer(minLength: 0)
+                    }
                 }
                 .padding(.horizontal, 10)
                 .padding(.top, 2)
+                .animation(.easeInOut(duration: 0.18), value: controlsCollapsed)
             }
             .onAppear { recomputeResting(geo: geo) }
             .onChange(of: previewAspect) { _, _ in recomputeResting(geo: geo) }
@@ -242,56 +254,121 @@ struct EditorScreen: View {
             // Lazy: a big synced session must not decode every thumb on open.
             LazyHStack(spacing: 8) {
                 ForEach(model.items) { item in
-                    FilmstripThumb(url: item.sdrURL,
-                                   selected: item.id == model.selectedID,
-                                   done: item.status == .done,
-                                   tooLarge: item.tooLargeToSync)
-                        .onTapGesture { select(item.id) }
+                    thumbnail(item)
                 }
-                // Add more photos to this session — a thumb-sized "+" tile.
-                // A Button, not an inline PhotosPicker: the actual picker is
-                // presented from the controls sheet (see controlsSheet).
-                Button {
-                    addPickerPresented = true
-                } label: {
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(Theme.inset)
-                        Image(systemName: "plus")
-                            .font(.system(size: 16, weight: .semibold))
-                            .foregroundStyle(Theme.gold)
-                    }
-                    .frame(width: 52, height: 52)
-                    .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .stroke(Theme.line, lineWidth: 1))
-                }
-                .buttonStyle(.plain)
+                addPhotosTile
             }
             .padding(.vertical, 1)
         }
         .frame(height: stripHeight)
     }
 
-    private var controlsSheet: some View {
-        ScrollView {
-            VStack(spacing: 8) {
-                // The cubbyholed title — the header row it replaced cost 44pt
-                // of photo. Tiny, quiet, exactly where the thumb already is.
-                Text(liveTitle.isEmpty ? "Untitled session" : liveTitle)
-                    .font(Theme.mono(9, .semibold)).tracking(1.5)
-                    .foregroundStyle(Theme.stoneFaint)
-                    .lineLimit(1)
-                    .frame(maxWidth: .infinity)
-                LookControlsPanel(model: model,
-                                  showAdvancedLook: $showAdvancedLook,
-                                  expandedGroups: $expandedGroups,
-                                  advancedStyle: .tabbed,
-                                  onGlowInSDRInfo: { showGlowInSDRModal = true })
+    /// Spend the space reclaimed from the controls on the queue. Six 52pt
+    /// cells fit on a typical Pro phone, so 30 photos take roughly five rows
+    /// instead of one long filmstrip.
+    private var thumbnailGrid: some View {
+        ScrollView(.vertical, showsIndicators: false) {
+            LazyVGrid(
+                columns: [GridItem(.adaptive(minimum: 52, maximum: 52), spacing: 8)],
+                alignment: .leading,
+                spacing: 8
+            ) {
+                ForEach(model.items) { item in
+                    thumbnail(item)
+                }
+                addPhotosTile
             }
-            .padding(.horizontal, 10)
-            .padding(.top, 8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 1)
         }
-        .presentationDetents([.height(restingDetent), .medium, .large],
+        .frame(maxHeight: .infinity, alignment: .top)
+    }
+
+    private func thumbnail(_ item: MergeModel.BatchItem) -> some View {
+        FilmstripThumb(url: item.sdrURL,
+                       selected: item.id == model.selectedID,
+                       done: item.status == .done,
+                       tooLarge: item.tooLargeToSync)
+            .onTapGesture { select(item.id) }
+    }
+
+    /// The picker is presented from the controls sheet, which remains alive
+    /// even in its compact state.
+    private var addPhotosTile: some View {
+        Button {
+            addPickerPresented = true
+        } label: {
+            ZStack {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(Theme.inset)
+                Image(systemName: "plus")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(Theme.gold)
+            }
+            .frame(width: 52, height: 52)
+            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(Theme.line, lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var controlsSheet: some View {
+        Group {
+            if controlsCollapsed {
+                Button {
+                    detentSelection = .height(restingDetent)
+                } label: {
+                    HStack(spacing: 8) {
+                        Text("HDR LOOK")
+                            .font(Theme.mono(10, .bold)).tracking(2)
+                            .foregroundStyle(Theme.gold)
+                        Spacer()
+                        Text(liveTitle.isEmpty ? "Untitled session" : liveTitle)
+                            .font(Theme.mono(8, .semibold)).tracking(1.2)
+                            .foregroundStyle(Theme.stoneFaint)
+                            .lineLimit(1)
+                        Image(systemName: "chevron.up")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(Theme.stoneDim)
+                    }
+                    .padding(.horizontal, 18)
+                    .frame(maxWidth: .infinity, minHeight: 38)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Show HDR controls")
+            } else {
+                ScrollView {
+                    VStack(spacing: 8) {
+                        HStack(spacing: 8) {
+                            Text(liveTitle.isEmpty ? "Untitled session" : liveTitle)
+                                .font(Theme.mono(9, .semibold)).tracking(1.5)
+                                .foregroundStyle(Theme.stoneFaint)
+                                .lineLimit(1)
+                                .frame(maxWidth: .infinity)
+                            Button {
+                                detentSelection = .height(collapsedDetentHeight)
+                            } label: {
+                                Image(systemName: "chevron.down")
+                                    .font(.system(size: 10, weight: .bold))
+                                    .foregroundStyle(Theme.stoneDim)
+                                    .frame(width: 28, height: 24)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Collapse HDR controls")
+                        }
+                        LookControlsPanel(model: model,
+                                          showAdvancedLook: $showAdvancedLook,
+                                          expandedGroups: $expandedGroups,
+                                          advancedStyle: .tabbed,
+                                          onGlowInSDRInfo: { showGlowInSDRModal = true })
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.top, 8)
+                }
+            }
+        }
+        .presentationDetents([.height(collapsedDetentHeight),
+                              .height(restingDetent), .medium, .large],
                              selection: $detentSelection)
         .presentationBackgroundInteraction(.enabled(upThrough: .medium))
         .presentationDragIndicator(.visible)
