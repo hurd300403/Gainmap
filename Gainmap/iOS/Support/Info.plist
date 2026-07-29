@@ -20,6 +20,21 @@
     <string>$(MARKETING_VERSION)</string>
     <key>CFBundleVersion</key>
     <string>$(CURRENT_PROJECT_VERSION)</string>
+    <!-- Always useful, even before first launch. "Continue Latest" is
+         registered dynamically once this account has a session to resume. -->
+    <key>UIApplicationShortcutItems</key>
+    <array>
+        <dict>
+            <key>UIApplicationShortcutItemType</key>
+            <string>com.legacylab.gainmap.ios.quick-action.new-session</string>
+            <key>UIApplicationShortcutItemTitle</key>
+            <string>New Session</string>
+            <key>UIApplicationShortcutItemSubtitle</key>
+            <string>Import photos</string>
+            <key>UIApplicationShortcutItemIconSymbolName</key>
+            <string>rectangle.stack.badge.plus</string>
+        </dict>
+    </array>
     <!-- FirebaseAuth's OAuth web flow (Google sign-in) round-trips through
          the encoded-app-ID scheme; the reversed client ID stays for safety. -->
     <key>CFBundleURLTypes</key>

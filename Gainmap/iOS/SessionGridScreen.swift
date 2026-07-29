@@ -20,8 +20,10 @@ struct EditorRequest: Identifiable {
 struct SessionGridScreen: View {
     @EnvironmentObject private var auth: AuthController
     @EnvironmentObject private var model: AppModel
+    @EnvironmentObject private var quickActions: GainmapSceneDelegate
     @State private var editorRequest: EditorRequest?
     @State private var pickedItems: [PhotosPickerItem] = []
+    @State private var newSessionPickerPresented = false
 
     var body: some View {
         NavigationStack {
@@ -59,8 +61,9 @@ struct SessionGridScreen: View {
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     // Phone-native session: pick photos, land in the editor.
-                    PhotosPicker(selection: $pickedItems, matching: .images,
-                                 photoLibrary: .shared()) {
+                    Button {
+                        newSessionPickerPresented = true
+                    } label: {
                         Image(systemName: "plus")
                             .foregroundStyle(Theme.gold)
                     }
@@ -77,6 +80,10 @@ struct SessionGridScreen: View {
                     }
                 }
             }
+            .photosPicker(isPresented: $newSessionPickerPresented,
+                          selection: $pickedItems,
+                          matching: .images,
+                          photoLibrary: .shared())
             .fullScreenCover(item: $editorRequest, onDismiss: {
                 Task { await model.refresh() }
             }) { request in
@@ -90,9 +97,46 @@ struct SessionGridScreen: View {
                 pickedItems = []
                 editorRequest = EditorRequest(session: Session(), importItems: items)
             }
-            .task { await model.refresh() }
+            .onChange(of: quickActions.requestedQuickAction) { _, action in
+                Task { await handleQuickAction(action) }
+            }
+            .onChange(of: model.cards.count) { _, count in
+                quickActions.updateContinueLatestShortcut(hasSessions: count > 0)
+            }
+            .onChange(of: model.initialLoadDone) { _, loaded in
+                guard loaded else { return }
+                Task { await handleQuickAction(quickActions.requestedQuickAction) }
+            }
+            .task {
+                await model.refresh()
+                quickActions.updateContinueLatestShortcut(hasSessions: !model.cards.isEmpty)
+                await handleQuickAction(quickActions.requestedQuickAction)
+            }
             .refreshable { await model.refresh() }
         }
+    }
+
+    @MainActor
+    private func handleQuickAction(_ action: GainmapQuickAction?) async {
+        // On a cold launch the auth transition may still be creating the
+        // per-user store. Leave the request pending; initialLoadDone will retry.
+        guard model.store != nil,
+              let action,
+              quickActions.requestedQuickAction == action else { return }
+
+        switch action {
+        case .newSession:
+            newSessionPickerPresented = true
+        case .continueLatest:
+            if let session = await model.store?.mostRecent() {
+                editorRequest = EditorRequest(session: session, importItems: [])
+            } else {
+                // A stale dynamic shortcut can survive a reinstall or account
+                // change. Starting a session remains a useful, non-dead end.
+                newSessionPickerPresented = true
+            }
+        }
+        quickActions.consume(action)
     }
 
     private var waitlistBanner: some View {
@@ -138,4 +182,3 @@ struct SessionGridScreen: View {
         .frame(maxWidth: .infinity)
     }
 }
-

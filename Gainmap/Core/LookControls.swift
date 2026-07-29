@@ -80,31 +80,34 @@ public struct LookControlsPanel: View {
 
             // SAME LOOK FOR ALL — reframes the whole slider stack from
             // this-photo to whole-queue. Per-photo looks are kept and come back
-            // when it's turned off.
-            HStack(spacing: 10) {
-                Toggle(isOn: Binding(get: { model.sameLookForAll },
-                                     set: { model.setSameLookForAll($0) })) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("SAME LOOK FOR ALL")
-                            .font(Theme.mono(10, .semibold)).tracking(1.5)
-                            .foregroundStyle(model.sameLookForAll ? Theme.gold : Theme.stone)
-                        Text(model.sameLookForAll ? "one look, every photo — the sliders edit the whole queue"
-                                                  : "each photo keeps its own look")
-                            .font(Theme.mono(9)).foregroundStyle(Theme.stoneDim)
+            // when it's turned off. With one photo there is no "all", so don't
+            // spend scarce editor space on a control that cannot change scope.
+            if model.items.count > 1 {
+                HStack(spacing: 10) {
+                    Toggle(isOn: Binding(get: { model.sameLookForAll },
+                                         set: { model.setSameLookForAll($0) })) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("SAME LOOK FOR ALL")
+                                .font(Theme.mono(10, .semibold)).tracking(1.5)
+                                .foregroundStyle(model.sameLookForAll ? Theme.gold : Theme.stone)
+                            Text(model.sameLookForAll ? "one look, every photo — the sliders edit the whole queue"
+                                                      : "each photo keeps its own look")
+                                .font(Theme.mono(9)).foregroundStyle(Theme.stoneDim)
+                        }
                     }
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                    .tint(Theme.gold)
+                    .disabled(model.isExportingAll)
+                    .help("One look for the whole queue. Per-photo looks are kept and come back when you turn this off; photos you never touched keep inheriting the latest look.")
+                    Spacer(minLength: 0)
                 }
-                .toggleStyle(.switch)
-                .controlSize(.small)
-                .tint(Theme.gold)
-                .disabled(model.isExportingAll)
-                .help("One look for the whole queue. Per-photo looks are kept and come back when you turn this off; photos you never touched keep inheriting the latest look.")
-                Spacer(minLength: 0)
+                .padding(.vertical, 9).padding(.horizontal, 12)
+                .background(model.sameLookForAll ? Theme.gold.opacity(0.07) : Theme.inset.opacity(0.6),
+                            in: RoundedRectangle(cornerRadius: 10))
+                .overlay(RoundedRectangle(cornerRadius: 10)
+                    .stroke(model.sameLookForAll ? Theme.gold.opacity(0.35) : Theme.line, lineWidth: 1))
             }
-            .padding(.vertical, 9).padding(.horizontal, 12)
-            .background(model.sameLookForAll ? Theme.gold.opacity(0.07) : Theme.inset.opacity(0.6),
-                        in: RoundedRectangle(cornerRadius: 10))
-            .overlay(RoundedRectangle(cornerRadius: 10)
-                .stroke(model.sameLookForAll ? Theme.gold.opacity(0.35) : Theme.line, lineWidth: 1))
 
             // The one slider most people ever touch: blend the signature look from
             // subtle to full.

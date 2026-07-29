@@ -7,10 +7,74 @@
 //
 
 import SwiftUI
+import UIKit
 import GainmapCore
+
+enum GainmapQuickAction: String {
+    case newSession = "com.legacylab.gainmap.ios.quick-action.new-session"
+    case continueLatest = "com.legacylab.gainmap.ios.quick-action.continue-latest"
+}
+
+@MainActor
+final class GainmapSceneDelegate: NSObject, UIWindowSceneDelegate, ObservableObject {
+    @Published private(set) var requestedQuickAction: GainmapQuickAction?
+
+    func scene(_ scene: UIScene,
+               willConnectTo session: UISceneSession,
+               options connectionOptions: UIScene.ConnectionOptions) {
+        request(connectionOptions.shortcutItem)
+    }
+
+    func windowScene(_ windowScene: UIWindowScene,
+                     performActionFor shortcutItem: UIApplicationShortcutItem) async -> Bool {
+        request(shortcutItem)
+    }
+
+    @discardableResult
+    private func request(_ shortcutItem: UIApplicationShortcutItem?) -> Bool {
+        guard let shortcutItem,
+              let action = GainmapQuickAction(rawValue: shortcutItem.type) else {
+            return false
+        }
+        requestedQuickAction = action
+        return true
+    }
+
+    func consume(_ action: GainmapQuickAction) {
+        guard requestedQuickAction == action else { return }
+        requestedQuickAction = nil
+    }
+
+    func updateContinueLatestShortcut(hasSessions: Bool) {
+        UIApplication.shared.shortcutItems = hasSessions ? [
+            UIApplicationShortcutItem(
+                type: GainmapQuickAction.continueLatest.rawValue,
+                localizedTitle: "Continue Latest",
+                localizedSubtitle: "Open your most recent session",
+                icon: UIApplicationShortcutIcon(systemImageName: "clock.arrow.circlepath"),
+                userInfo: nil)
+        ] : []
+    }
+}
+
+@MainActor
+final class GainmapAppDelegate: NSObject, UIApplicationDelegate {
+    func application(_ application: UIApplication,
+                     configurationForConnecting connectingSceneSession: UISceneSession,
+                     options: UIScene.ConnectionOptions) -> UISceneConfiguration {
+        let configuration = UISceneConfiguration(
+            name: nil,
+            sessionRole: connectingSceneSession.role)
+        if connectingSceneSession.role == .windowApplication {
+            configuration.delegateClass = GainmapSceneDelegate.self
+        }
+        return configuration
+    }
+}
 
 @main
 struct GainmapIOSApp: App {
+    @UIApplicationDelegateAdaptor(GainmapAppDelegate.self) private var appDelegate
     @StateObject private var auth = AuthController()
     @StateObject private var model = AppModel()
     @Environment(\.scenePhase) private var scenePhase
