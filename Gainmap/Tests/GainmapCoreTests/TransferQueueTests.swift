@@ -14,6 +14,7 @@ final class TransferQueueTests: XCTestCase {
 
     private let hashA = String(repeating: "aa", count: 32)
     private let hashB = String(repeating: "bb", count: 32)
+    private let hashC = String(repeating: "cc", count: 32)
     private let t0 = Date(timeIntervalSince1970: 1_000_000)
 
     private func queue(_ entries: [(String, String, Int64)]) -> TransferQueue {
@@ -187,6 +188,224 @@ final class TransferQueueTests: XCTestCase {
         XCTAssertEqual(metrics.pendingSessionIDs, Set([first.id]))
         XCTAssertEqual(metrics.progressBySessionID[first.id], 0)
         XCTAssertEqual(metrics.progressBySessionID[second.id], 1)
+    }
+
+    func testPersistedStatusRestoresOnlyExactCloudCompleteSession() throws {
+        let photo = PhotoRecord(
+            origin: .linked(path: "/photo.jpg"),
+            contentHash: hashA,
+            byteSize: 4,
+            pixelWidth: 12,
+            pixelHeight: 8)
+        let session = Session(
+            title: "Synced session",
+            sameLookForAll: true,
+            photos: [photo])
+        var state = SyncState()
+        state.acks.markAcked(.session(session.id))
+        state.acks.markAcked(
+            .photo(session: session.id, photo: photo.id))
+        state.shadowSessions[session.id.uuidString] = RemoteSessionDoc(
+            id: session.id,
+            title: session.title,
+            sameLookForAll: session.sameLookForAll,
+            runningLook: session.runningLook,
+            photoCount: 1).fsMap()
+        state.shadowPhotos[session.id.uuidString] = [
+            photo.id.uuidString: RemotePhotoDoc(
+                id: photo.id,
+                contentHash: hashA,
+                pixelWidth: photo.pixelWidth,
+                pixelHeight: photo.pixelHeight).fsMap(),
+        ]
+        let rendition: [String: FSValue] = [
+            "generation": .string("1"),
+            "byteSize": .int(4),
+            "counted": .bool(true),
+            "uploadedAt": .timestamp(t0),
+        ]
+        var blob = RemoteBlobDoc(
+            contentHash: hashA, byteSize: 4).shellFSMap()
+        blob["renditions"] = .map([
+            "originals": .map(rendition),
+            "thumbs": .map(rendition),
+        ])
+        state.shadowBlobs[hashA] = blob
+
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("gm-status-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(
+            at: root, withIntermediateDirectories: true)
+        try JSONEncoder().encode(state).write(
+            to: root.appendingPathComponent("sync-state.json"),
+            options: .atomic)
+
+        let restored = try XCTUnwrap(
+            SyncEngine.persistedStatusSnapshot(root: root))
+        let known = restored.knownSyncedSessionIDs(for: [session])
+        XCTAssertEqual(known, Set([session.id]))
+
+        var changed = session
+        changed.title = "Changed while terminating"
+        XCTAssertTrue(
+            restored.knownSyncedSessionIDs(for: [changed]).isEmpty)
+
+        var localOnly = session
+        localOnly.photos.append(PhotoRecord(
+            origin: .linked(path: "/new.jpg"),
+            contentHash: hashB,
+            byteSize: 4))
+        XCTAssertTrue(
+            restored.knownSyncedSessionIDs(for: [localOnly]).isEmpty)
+
+        var tooLarge = session
+        tooLarge.photos[0].tooLargeToSync = true
+        XCTAssertTrue(
+            restored.knownSyncedSessionIDs(for: [tooLarge]).isEmpty)
+
+        var pendingJournal = restored.journal
+        pendingJournal.record(
+            target: .session(session.id),
+            value: .title("Pending"),
+            baseRev: 0,
+            deviceID: "iphone")
+        let pendingMetrics = SessionSyncMetrics.calculate(
+            sessions: [session],
+            journal: pendingJournal,
+            transfers: restored.transfers,
+            persistedSyncedSessionIDs: known)
+        XCTAssertTrue(
+            pendingMetrics.knownSyncedSessionIDs.isEmpty)
+        XCTAssertTrue(
+            pendingMetrics.pendingSessionIDs.contains(session.id))
+    }
+
+    func testLaunchRebasesPersistedIOSContainerPathsAndRevivesUploads() throws {
+        let tempRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("gm-rebase-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+        let syncRoot = tempRoot.appendingPathComponent("users/test-user")
+        let managedRoot = syncRoot.appendingPathComponent("files")
+        let importURL = managedRoot.appendingPathComponent("imports/photo.jpg")
+        let untrackedURL = managedRoot.appendingPathComponent("imports/untracked.jpg")
+        let thumbURL = syncRoot.appendingPathComponent("thumbs/\(hashA).jpg")
+        try FileManager.default.createDirectory(
+            at: importURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(
+            at: thumbURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true)
+        try Data([1, 2, 3, 4]).write(to: importURL)
+        try Data(repeating: 9, count: 9).write(to: untrackedURL)
+        try Data([5, 6, 7]).write(to: thumbURL)
+
+        let photo = PhotoRecord(
+            origin: .managed(relativePath: "imports/photo.jpg"),
+            contentHash: hashA,
+            byteSize: 4)
+        let session = Session(photos: [photo])
+        let oldRoot = "/var/mobile/Containers/Data/Application/OLD/Library/Application Support/Gainmap"
+        var state = SyncState()
+        state.hashIndex[hashA] = "\(oldRoot)/users/test-user/files/imports/photo.jpg"
+        state.hashIndex[hashB] = untrackedURL.path
+        state.transfers.enqueue(
+            contentHash: hashA,
+            tier: "originals",
+            byteSize: 4,
+            sourcePath: "\(oldRoot)/users/test-user/files/imports/photo.jpg")
+        state.transfers.enqueue(
+            contentHash: hashA,
+            tier: "thumbs",
+            byteSize: 3,
+            sourcePath: "\(oldRoot)/users/test-user/thumbs/\(hashA).jpg")
+        state.transfers.enqueue(
+            contentHash: hashB,
+            tier: "originals",
+            byteSize: 9,
+            sourcePath: untrackedURL.path)
+        state.transfers.enqueue(
+            contentHash: hashC,
+            tier: "originals",
+            byteSize: 9,
+            sourcePath: "\(oldRoot)/users/test-user/files/imports/deleted.jpg")
+        let deletedSessionID = UUID()
+        let deletedPhotoID = UUID()
+        state.shadowPhotos[deletedSessionID.uuidString] = [
+            deletedPhotoID.uuidString: RemotePhotoDoc(
+                id: deletedPhotoID,
+                contentHash: hashC,
+                deletedAt: t0).fsMap(),
+        ]
+        for _ in 0..<TransferQueue.maxAttempts {
+            state.transfers.failed(
+                id: "originals_\(hashA)",
+                failure: .transient("File is not reachable"),
+                now: t0)
+        }
+
+        let repaired = SyncEngine.rebasingLocalFileReferences(
+            state,
+            sessions: [session],
+            managedRoot: managedRoot,
+            syncRoot: syncRoot)
+
+        XCTAssertEqual(repaired.hashIndex[hashA], importURL.path)
+        XCTAssertEqual(
+            repaired.transfers.transfer(id: "originals_\(hashA)")?.sourcePath,
+            importURL.path)
+        XCTAssertEqual(
+            repaired.transfers.transfer(id: "thumbs_\(hashA)")?.sourcePath,
+            thumbURL.path)
+        XCTAssertEqual(
+            repaired.transfers.transfer(id: "originals_\(hashA)")?.status,
+            .queued)
+        XCTAssertEqual(
+            repaired.transfers.transfer(id: "originals_\(hashA)")?.attempts,
+            0)
+        XCTAssertNotNil(
+            repaired.transfers.transfer(id: "originals_\(hashB)"),
+            "absence from partial local/shadow caches is not deletion evidence")
+        XCTAssertEqual(repaired.hashIndex[hashB], untrackedURL.path)
+        XCTAssertNil(
+            repaired.transfers.transfer(id: "originals_\(hashC)"),
+            "an unreachable tombstoned rendition must not become a permanent issue")
+    }
+
+    func testLaunchPreservesBytesUnderReversibleParentTombstone() throws {
+        let tempRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("gm-tombstone-rebase-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+        let original = tempRoot.appendingPathComponent("imports/photo.jpg")
+        try FileManager.default.createDirectory(
+            at: original.deletingLastPathComponent(),
+            withIntermediateDirectories: true)
+        try Data([1, 2, 3, 4]).write(to: original)
+
+        let sessionID = UUID()
+        let photoID = UUID()
+        var state = SyncState()
+        state.hashIndex[hashA] = original.path
+        state.transfers.enqueue(
+            contentHash: hashA, tier: "originals",
+            byteSize: 4, sourcePath: original.path)
+        state.shadowSessions[sessionID.uuidString] = RemoteSessionDoc(
+            id: sessionID, deletedAt: t0).fsMap()
+        state.shadowPhotos[sessionID.uuidString] = [
+            photoID.uuidString: RemotePhotoDoc(
+                id: photoID, contentHash: hashA).fsMap(),
+        ]
+
+        let repaired = SyncEngine.rebasingLocalFileReferences(
+            state,
+            sessions: [],
+            managedRoot: URL(fileURLWithPath: "/managed"),
+            syncRoot: URL(fileURLWithPath: "/sync"))
+
+        XCTAssertEqual(repaired.hashIndex[hashA], original.path)
+        XCTAssertEqual(
+            repaired.transfers.transfer(id: "originals_\(hashA)")?.sourcePath,
+            original.path)
     }
 
     func testRepeatedLeaseDenialsParkInsteadOfHotLooping() {

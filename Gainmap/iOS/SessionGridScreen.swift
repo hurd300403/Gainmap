@@ -39,20 +39,16 @@ struct SessionGridScreen: View {
                     if case .waitlisted = auth.state {
                         waitlistBanner
                     }
-                    if model.cards.isEmpty {
-                        if model.initialLoadDone {
-                            emptyState
-                        } else {
-                            // Don't claim "No sessions yet" before we've looked.
-                            VStack {
-                                Spacer()
-                                ProgressView().tint(Theme.stoneDim)
-                                Spacer()
-                            }.frame(maxWidth: .infinity)
-                        }
+                    if !model.initialLoadDone {
+                        VStack {
+                            Spacer()
+                            ProgressView().tint(Theme.stoneDim)
+                            Spacer()
+                        }.frame(maxWidth: .infinity)
                     } else {
                         SessionGridView(
                             cards: model.cards,
+                            onCreate: { newSessionPickerPresented = true },
                             onOpen: { id in
                                 Task {
                                     if let session = await model.session(id: id) {
@@ -77,15 +73,6 @@ struct SessionGridScreen: View {
             .navigationTitle("Sessions")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    // Phone-native session: pick photos, land in the editor.
-                    Button {
-                        newSessionPickerPresented = true
-                    } label: {
-                        Image(systemName: "plus")
-                            .foregroundStyle(Theme.gold)
-                    }
-                }
                 ToolbarItemGroup(placement: .topBarTrailing) {
                     Button {
                         let state = syncVisualState
@@ -255,17 +242,12 @@ struct SessionGridScreen: View {
             return .neutral
         case .failed:
             return card.pendingSync ? .issue(card.syncProgress) : .neutral
-        case .admitting:
-            return .pending(0)
-        case .ready:
+        case .admitting, .ready:
             if card.syncIssue {
                 return .issue(card.syncProgress)
             }
-            if !model.initialSyncComplete {
-                return .pending(card.pendingSync ? card.syncProgress : 0)
-            }
             if card.pendingSync { return .pending(card.syncProgress) }
-            return .synced
+            return card.knownSynced ? .synced : .pending(0)
         }
     }
 
@@ -335,23 +317,6 @@ struct SessionGridScreen: View {
                  alignment: .bottom)
     }
 
-    private var emptyState: some View {
-        VStack(spacing: 12) {
-            Spacer()
-            Image(systemName: "rectangle.stack.badge.plus")
-                .font(.system(size: 40)).foregroundStyle(Theme.stoneFaint)
-            Text("No sessions yet")
-                .font(Theme.ui(16, .semibold)).foregroundStyle(Theme.stone)
-            Text("Tap + to import photos from this phone,\nor drop them into Gainmap on your Mac —\neither way they show up everywhere.")
-                .font(Theme.ui(13)).foregroundStyle(Theme.stoneDim)
-                .multilineTextAlignment(.center)
-            if model.syncing {
-                ProgressView().tint(Theme.stoneDim).padding(.top, 8)
-            }
-            Spacer()
-        }
-        .frame(maxWidth: .infinity)
-    }
 }
 
 private struct SessionExportShare: Identifiable {

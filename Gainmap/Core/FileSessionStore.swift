@@ -123,6 +123,79 @@ public actor FileSessionStore {
             .sorted { $0.updatedAt > $1.updatedAt }
     }
 
+    /// Migrates legacy iOS imports that were persisted as absolute `.linked`
+    /// paths inside an older app-container UUID. The editor has always been
+    /// able to find the moved bytes by their `/files/` suffix, but merely
+    /// healing its in-memory BatchItem left sync-state rebuilding from the
+    /// stale Session origin on every launch.
+    ///
+    /// This is a storage-format repair only: timestamps and user-visible
+    /// content stay untouched, and the migrated origin is written once as the
+    /// portable `.managed(relativePath:)` form.
+    public func loadAllRepairingManagedOrigins() -> [Session] {
+        let fm = FileManager.default
+        var sessions = loadAll()
+        for sessionIndex in sessions.indices {
+            var changed = false
+            for photoIndex in sessions[sessionIndex].photos.indices {
+                let photo = sessions[sessionIndex].photos[photoIndex]
+                guard case .linked(let oldPath) = photo.origin,
+                      !fm.fileExists(atPath: oldPath),
+                      let relativePath = legacyManagedRelativePath(from: oldPath)
+                else { continue }
+                let currentURL = managedFilesDir.appendingPathComponent(relativePath)
+                guard let attrs = try? fm.attributesOfItem(atPath: currentURL.path),
+                      let size = attrs[.size] as? Int64,
+                      size > 0,
+                      photo.byteSize == 0 || photo.byteSize == size
+                else { continue }
+                if let expectedHash = photo.contentHash,
+                   SyncSchema.isValidContentHash(expectedHash),
+                   ContentHash.sha256(of: currentURL) != expectedHash {
+                    continue
+                }
+                sessions[sessionIndex].photos[photoIndex].origin =
+                    .managed(relativePath: relativePath)
+                changed = true
+            }
+            if changed {
+                try? save(sessions[sessionIndex])
+            }
+        }
+        return sessions
+    }
+
+    /// Only an old iOS data-container path is eligible. A disconnected Mac
+    /// volume can also contain a `/files/` component; treating that as one of
+    /// our managed imports could silently bind the session to unrelated bytes.
+    private func legacyManagedRelativePath(from oldPath: String) -> String? {
+        let containerPrefix = "/var/mobile/Containers/Data/Application/"
+        let storeMarker =
+            "/Library/Application Support/Gainmap/users/\(uid)/files/"
+        guard oldPath.hasPrefix(containerPrefix),
+              let markerRange = oldPath.range(of: storeMarker),
+              markerRange.lowerBound > oldPath.startIndex else { return nil }
+
+        let containerStart = oldPath.index(
+            oldPath.startIndex, offsetBy: containerPrefix.count)
+        let containerID = oldPath[containerStart..<markerRange.lowerBound]
+        guard !containerID.isEmpty, !containerID.contains("/") else { return nil }
+
+        let relativePath = String(oldPath[markerRange.upperBound...])
+        let components = relativePath.split(
+            separator: "/", omittingEmptySubsequences: false)
+        guard !components.isEmpty,
+              components.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." })
+        else { return nil }
+
+        let managedRoot = managedFilesDir.standardizedFileURL
+        let candidate = managedRoot
+            .appendingPathComponent(relativePath)
+            .standardizedFileURL
+        guard candidate.path.hasPrefix(managedRoot.path + "/") else { return nil }
+        return relativePath
+    }
+
     /// The most recently updated session — what the Mac app resumes at launch
     /// (P7 replaces this with the session grid).
     public func mostRecent() -> Session? { loadAll().first }

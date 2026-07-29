@@ -39,13 +39,20 @@ struct SyncState: Codable, Equatable {
     var shadowSessions: [String: [String: FSValue]] = [:]
     /// Last converged remote photo docs, keyed by session then photo UUID.
     var shadowPhotos: [String: [String: [String: FSValue]]] = [:]
-    /// contentHash -> absolute local path (Mac rehydration index).
+    /// Last observed server-owned blob ledgers, keyed by content hash. These
+    /// persist rendition completion so a cold launch can restore the last
+    /// truthful sync state before Firestore answers again.
+    var shadowBlobs: [String: [String: FSValue]] = [:]
+    /// contentHash -> absolute local path. Absolute sandbox paths are rebased
+    /// from the session's portable origin every launch because iOS changes
+    /// its app-container UUID when a development build is reinstalled.
     var hashIndex: [String: String] = [:]
 
     init() {}
 
     private enum CodingKeys: String, CodingKey {
-        case journal, acks, transfers, shadowSessions, shadowPhotos, hashIndex
+        case journal, acks, transfers, shadowSessions, shadowPhotos
+        case shadowBlobs, hashIndex
     }
 
     init(from decoder: Decoder) throws {
@@ -57,7 +64,99 @@ struct SyncState: Codable, Equatable {
                                                  forKey: .shadowSessions)) ?? [:]
         shadowPhotos = (try? c.decodeIfPresent([String: [String: [String: FSValue]]].self,
                                                forKey: .shadowPhotos)) ?? [:]
+        shadowBlobs = (try? c.decodeIfPresent([String: [String: FSValue]].self,
+                                              forKey: .shadowBlobs)) ?? [:]
         hashIndex = (try? c.decodeIfPresent([String: String].self, forKey: .hashIndex)) ?? [:]
+    }
+}
+
+/// Filesystem-backed status used by the session grid before the first network
+/// response. It contains no credentials and is safe to derive from the
+/// atomically persisted sync-state file during authentication/admission.
+public struct SyncStatusSnapshot: Sendable {
+    public let journal: ChangeJournal
+    public let transfers: TransferQueue
+
+    private let acks: AckLedger
+    private let shadowSessions: [String: [String: FSValue]]
+    private let shadowPhotos: [String: [String: [String: FSValue]]]
+    private let shadowBlobs: [String: [String: FSValue]]
+
+    init(state: SyncState) {
+        journal = state.journal
+        transfers = state.transfers
+        acks = state.acks
+        shadowSessions = state.shadowSessions
+        shadowPhotos = state.shadowPhotos
+        shadowBlobs = state.shadowBlobs
+    }
+
+    /// A green card requires proof that today's local session still matches
+    /// the last converged metadata and that both peer-facing renditions were
+    /// finalized by Storage. This catches the termination window where a
+    /// session file lands just before its journal callback.
+    public func knownSyncedSessionIDs(for sessions: [Session]) -> Set<UUID> {
+        Set(sessions.compactMap { session -> UUID? in
+            let target = SyncTarget.session(session.id)
+            guard acks.everAcked(target),
+                  let sessionMap = shadowSessions[session.id.uuidString],
+                  let remoteSession = RemoteSessionDoc(
+                    id: session.id, fsMap: sessionMap),
+                  remoteSession.deletedAt == nil,
+                  remoteSession.title == session.title,
+                  remoteSession.sameLookForAll == session.sameLookForAll,
+                  remoteSession.runningLook == session.runningLook
+            else { return nil }
+
+            let localPhotos = session.photos
+            guard localPhotos.allSatisfy({
+                !$0.tooLargeToSync
+                    && $0.contentHash.map(SyncSchema.isValidContentHash) == true
+            }) else { return nil }
+
+            let remoteMaps = shadowPhotos[session.id.uuidString] ?? [:]
+            let remotePhotos = remoteMaps.compactMap { key, map -> RemotePhotoDoc? in
+                guard let id = UUID(uuidString: key),
+                      let doc = RemotePhotoDoc(id: id, fsMap: map),
+                      doc.deletedAt == nil else { return nil }
+                return doc
+            }
+            guard remotePhotos.count == localPhotos.count,
+                  Set(remotePhotos.map(\.id)) == Set(localPhotos.map(\.id))
+            else { return nil }
+
+            let remoteByID = Dictionary(
+                remotePhotos.map { ($0.id, $0) },
+                uniquingKeysWith: { first, _ in first })
+            for photo in localPhotos {
+                guard let hash = photo.contentHash,
+                      acks.everAcked(
+                        .photo(session: session.id, photo: photo.id)),
+                      let remote = remoteByID[photo.id],
+                      remote.contentHash == hash,
+                      remote.look == photo.look,
+                      remote.looksMerged == photo.looksMerged,
+                      remote.pixelWidth == photo.pixelWidth,
+                      remote.pixelHeight == photo.pixelHeight
+                else { return nil }
+
+                let blob = shadowBlobs[hash].flatMap {
+                    RemoteBlobDoc(contentHash: hash, fsMap: $0)
+                }
+                let originalID = SyncSchema.reservationId(
+                    tier: "originals", contentHash: hash)
+                let thumbID = SyncSchema.reservationId(
+                    tier: "thumbs", contentHash: hash)
+                let queueProvesCompletion =
+                    transfers.transfer(id: originalID)?.status == .done
+                    && transfers.transfer(id: thumbID)?.status == .done
+                guard (blob?.isUploaded(tier: "originals") == true
+                       && blob?.isUploaded(tier: "thumbs") == true)
+                        || queueProvesCompletion
+                else { return nil }
+            }
+            return session.id
+        })
     }
 }
 
@@ -86,6 +185,8 @@ public actor SyncEngine {
     public var allowLargeTransfers = true
 
     private var lastKnownQuotaBytes: Int64 = 0
+    private var lifecycleGeneration: UInt = 0
+    private var isRunning = false
 
     public init(uid: String, deviceID: String, backend: SyncBackend,
                 store: FileSessionStore, root: URL) {
@@ -101,24 +202,155 @@ public actor SyncEngine {
     private var stateURL: URL { root.appendingPathComponent("sync-state.json") }
 
     public func start() async {
+        guard !isRunning else { return }
+        lifecycleGeneration &+= 1
+        let generation = lifecycleGeneration
         loadState()
+        let localSessions = await store.loadAllRepairingManagedOrigins()
+        // The store hop makes this actor re-entrant. A stop or newer start
+        // while migration is running invalidates this activation; never leave
+        // listeners alive after sign-out or install duplicate listener sets.
+        guard generation == lifecycleGeneration else { return }
+        state = Self.rebasingLocalFileReferences(
+            state,
+            sessions: localSessions,
+            managedRoot: store.managedFilesDir,
+            syncRoot: root)
         state.journal.requeueInFlightAfterRelaunch()
         state.transfers.relaunch()
-        // A launch is a natural retry trigger: revive parked transfers, give
-        // quota-terminal ones a fresh test, shed completed entries, and drop
-        // rehydration-index entries whose files are gone (bounded state —
-        // review P4-5/6/16).
+        // A launch is a natural retry trigger: revive parked transfers and
+        // give quota-terminal ones a fresh test. Completed entries are shed
+        // only after their server-owned blob ledger is also persisted; until
+        // then they are the cold-launch completion proof.
         state.transfers.retryTrigger()
         state.transfers.quotaChanged()
-        state.transfers.pruneDone()
-        state.hashIndex = state.hashIndex.filter {
-            FileManager.default.fileExists(atPath: $0.value)
-        }
+        let ledgerConfirmedTransferIDs = Set(
+            state.transfers.transfers.compactMap { transfer -> String? in
+                guard let map = state.shadowBlobs[transfer.contentHash],
+                      let blob = RemoteBlobDoc(
+                        contentHash: transfer.contentHash, fsMap: map),
+                      blob.isUploaded(tier: transfer.tier)
+                else { return nil }
+                return transfer.id
+            })
+        state.transfers.pruneDone(
+            confirmedIDs: ledgerConfirmedTransferIDs)
         persistState()
+        isRunning = true
         startListeners()
     }
 
+    /// Repairs persisted absolute paths after an app-container move. Session
+    /// origins are portable (`managed` paths are relative to managedRoot), so
+    /// they are the authority; sync-state paths are only a launch-local cache.
+    ///
+    /// Re-enqueueing an existing transfer refreshes its source URL and revives
+    /// a parked entry. This turns an otherwise permanent reinstall failure
+    /// into an automatic retry without asking the user to re-import anything.
+    nonisolated static func rebasingLocalFileReferences(
+        _ persisted: SyncState,
+        sessions: [Session],
+        managedRoot: URL,
+        syncRoot: URL
+    ) -> SyncState {
+        let fm = FileManager.default
+        var repaired = persisted
+        var currentIndex = persisted.hashIndex.filter {
+            fm.fileExists(atPath: $0.value)
+        }
+        var activeHashes = Set<String>()
+        var tombstonedHashes = Set<String>()
+
+        for session in sessions {
+            for photo in session.photos {
+                guard let hash = photo.contentHash else { continue }
+                activeHashes.insert(hash)
+                let source = photo.sourceURL(managedRoot: managedRoot)
+                if fm.fileExists(atPath: source.path) {
+                    currentIndex[hash] = source.path
+                }
+            }
+        }
+
+        // Tombstones are reversible. They are useful pruning evidence only
+        // for a rendition whose source bytes are already unreachable; a live
+        // path must survive so undo can restore the original without a
+        // needless download (or permanent loss when it never uploaded).
+        for (sessionID, photos) in persisted.shadowPhotos {
+            guard let sessionUUID = UUID(uuidString: sessionID) else { continue }
+            let sessionOverlay = persisted.journal.overlay(
+                for: .session(sessionUUID))
+            let parentDeleted: Bool
+            if case .tombstone(let deletedAt)? = sessionOverlay[.delete] {
+                parentDeleted = deletedAt != nil
+            } else if let map = persisted.shadowSessions[sessionID],
+                      let remote = RemoteSessionDoc(
+                        id: sessionUUID, fsMap: map) {
+                parentDeleted = remote.deletedAt != nil
+            } else {
+                parentDeleted = false
+            }
+
+            for (photoID, map) in photos {
+                guard let photoUUID = UUID(uuidString: photoID),
+                      let remote = RemotePhotoDoc(
+                        id: photoUUID, fsMap: map) else { continue }
+                let merged = InboundMerge.merged(
+                    photo: remote,
+                    overlay: persisted.journal.overlay(
+                        for: .photo(session: sessionUUID, photo: photoUUID)))
+                if parentDeleted || merged.deletedAt != nil {
+                    tombstonedHashes.insert(merged.contentHash)
+                }
+            }
+        }
+        repaired.hashIndex = currentIndex
+
+        // Iterate a value snapshot because enqueue mutates the queue.
+        for transfer in repaired.transfers.transfers {
+            let sourcePath: String?
+            switch transfer.tier {
+            case "thumbs":
+                let thumb = syncRoot
+                    .appendingPathComponent("thumbs/\(transfer.contentHash).jpg")
+                sourcePath = fm.fileExists(atPath: thumb.path) ? thumb.path : nil
+            case "originals":
+                if let indexed = currentIndex[transfer.contentHash] {
+                    sourcePath = indexed
+                } else if fm.fileExists(atPath: transfer.sourcePath) {
+                    sourcePath = transfer.sourcePath
+                    currentIndex[transfer.contentHash] = transfer.sourcePath
+                    repaired.hashIndex[transfer.contentHash] = transfer.sourcePath
+                } else {
+                    sourcePath = nil
+                }
+            default:
+                // Future rendition tiers may already use a stable external
+                // path. Preserve it only while it is actually reachable.
+                sourcePath = fm.fileExists(atPath: transfer.sourcePath)
+                    ? transfer.sourcePath
+                    : nil
+            }
+
+            guard let sourcePath else {
+                if tombstonedHashes.contains(transfer.contentHash),
+                   !activeHashes.contains(transfer.contentHash) {
+                    repaired.transfers.remove(id: transfer.id)
+                }
+                continue
+            }
+            repaired.transfers.enqueue(
+                contentHash: transfer.contentHash,
+                tier: transfer.tier,
+                byteSize: transfer.byteSize,
+                sourcePath: sourcePath)
+        }
+        return repaired
+    }
+
     public func stop() {
+        lifecycleGeneration &+= 1
+        isRunning = false
         for l in listeners { l.cancel() }
         listeners.removeAll()
         for t in eventPumps { t.cancel() }
@@ -194,11 +426,20 @@ public actor SyncEngine {
         }
     }
 
+    public nonisolated static func persistedStatusSnapshot(
+        root: URL
+    ) -> SyncStatusSnapshot? {
+        decodedState(at: root.appendingPathComponent("sync-state.json"))
+            .map(SyncStatusSnapshot.init(state:))
+    }
+
+    private nonisolated static func decodedState(at url: URL) -> SyncState? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode(SyncState.self, from: data)
+    }
+
     private func loadState() {
-        guard let data = try? Data(contentsOf: stateURL),
-              let loaded = try? JSONDecoder().decode(SyncState.self, from: data) else {
-            return
-        }
+        guard let loaded = Self.decodedState(at: stateURL) else { return }
         state = loaded
     }
 
@@ -241,6 +482,9 @@ public actor SyncEngine {
     // Test/diagnostic visibility.
     public var journalSnapshot: ChangeJournal { state.journal }
     public var transferSnapshot: TransferQueue { state.transfers }
+    public var statusSnapshot: SyncStatusSnapshot {
+        SyncStatusSnapshot(state: state)
+    }
     public var conflictRecords: [ConflictRecord] { state.journal.conflicts }
     public func everAcked(_ target: SyncTarget) -> Bool { state.acks.everAcked(target) }
 
@@ -984,11 +1228,13 @@ public actor SyncEngine {
                 // hold about its renditions are void — a future re-add of the
                 // same bytes must re-upload (review P4-17).
                 knownBlobDocs.remove(event.id)
+                state.shadowBlobs.removeValue(forKey: event.id)
                 state.transfers.remove(contentHash: event.id)
                 continue
             }
             guard let doc = RemoteBlobDoc(contentHash: event.id, fsMap: data) else { continue }
             knownBlobDocs.insert(doc.contentHash)
+            state.shadowBlobs[doc.contentHash] = data
             for tier in ["thumbs", "originals"] {
                 if doc.isUploaded(tier: tier) {
                     // Server finalize — the completion signal we trust.
@@ -1008,6 +1254,10 @@ public actor SyncEngine {
                 }
             }
         }
+        // Blob ledgers are the durable completion proof used by cold-launch
+        // card status, so their arrival must re-project the grid even when no
+        // byte-progress callback fires in this process.
+        onTransferProgress?()
         persistSoon()
     }
 

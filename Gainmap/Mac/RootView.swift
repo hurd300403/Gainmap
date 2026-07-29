@@ -132,11 +132,10 @@ private struct MacSessionLibrary: View {
                             .font(Theme.mono(11))
                             .foregroundStyle(Theme.stoneDim)
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    } else if sync.cards.isEmpty {
-                        emptyState
                     } else {
                         SessionGridView(
                             cards: sync.cards,
+                            onCreate: browse,
                             onOpen: { id in open(id) },
                             onRename: beginRename,
                             onDelete: { id in
@@ -218,64 +217,45 @@ private struct MacSessionLibrary: View {
                 Text("Your HDR work, ready on every screen.")
                     .font(Theme.ui(14))
                     .foregroundStyle(Theme.stoneDim)
+                    .lineLimit(1)
             }
-            Spacer()
-            Button(action: browse) {
-                Label("New Session", systemImage: "plus")
-                    .font(Theme.ui(13, .semibold))
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(.white)
-            .background(Theme.accent, in: Capsule())
-            .shadow(color: Theme.accent.opacity(0.3), radius: 10, y: 4)
-            .keyboardShortcut("n", modifiers: .command)
-
-            SettingsLink {
-                Image(systemName: "person.crop.circle")
-                    .font(.system(size: 19))
-                    .foregroundStyle(Theme.stone)
-                    .frame(width: 34, height: 34)
-                    .background(Theme.surface, in: Circle())
-                    .overlay(Circle().stroke(Theme.line, lineWidth: 1))
-            }
-            .buttonStyle(.plain)
-            .help("Account & Sync Settings")
-
-            VStack(alignment: .trailing, spacing: 0) {
-                (Text("Gain").foregroundStyle(.white)
-                 + Text("map").foregroundStyle(Theme.accent))
-                    .font(Theme.display(28, .semibold))
-            }
-            SyncStatusEmblem(state: headerSyncState)
+            .layoutPriority(1)
+            Spacer(minLength: 12)
+            responsiveHeaderActions
         }
-        .padding(.leading, 84)
-        .padding(.trailing, 38)
+        .padding(.horizontal, 28)
         .padding(.vertical, 17)
     }
 
-    private var emptyState: some View {
-        VStack(spacing: 14) {
-            GainmapAddEmblem(active: dropTargeted)
-                .frame(width: 100, height: 78)
-            Text("Start an HDR session")
-                .font(Theme.ui(21, .semibold))
-                .foregroundStyle(Theme.stone)
-            Text("Drop a batch of SDR JPEGs anywhere in this window,\nor choose them from your Mac.")
-                .font(Theme.ui(13))
-                .foregroundStyle(Theme.stoneDim)
-                .multilineTextAlignment(.center)
-            Button("Choose JPEGs…", action: browse)
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-                .padding(.top, 4)
-            Text("Each batch stays separate, resumes after relaunch, and syncs automatically when you sign in.")
-                .font(Theme.mono(9.5))
-                .foregroundStyle(Theme.stoneFaint)
-                .padding(.top, 5)
+    private var responsiveHeaderActions: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 18) {
+                accountSettingsButton
+                (Text("Gain").foregroundStyle(.white)
+                 + Text("map").foregroundStyle(Theme.accent))
+                    .font(Theme.display(28, .semibold))
+                SyncStatusEmblem(state: headerSyncState)
+            }
+            HStack(spacing: 12) {
+                accountSettingsButton
+                SyncStatusEmblem(state: headerSyncState)
+            }
+            SyncStatusEmblem(state: headerSyncState)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var accountSettingsButton: some View {
+        SettingsLink {
+            Image(systemName: "person.crop.circle")
+                .font(.system(size: 19))
+                .foregroundStyle(Theme.stone)
+                .frame(width: 34, height: 34)
+                .background(Theme.surface, in: Circle())
+                .overlay(Circle().stroke(Theme.line, lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .help("Account & Sync Settings")
+        .accessibilityLabel("Account & Sync Settings")
     }
 
     private func undoBar(_ deletion: DeletedSessionNotice) -> some View {
@@ -382,17 +362,12 @@ private struct MacSessionLibrary: View {
             return .neutral
         case .failed:
             return card.pendingSync ? .issue(card.syncProgress) : .neutral
-        case .admitting:
-            return .pending(0)
-        case .ready:
+        case .admitting, .ready:
             if card.syncIssue {
                 return .issue(card.syncProgress)
             }
-            if !sync.initialSyncComplete {
-                return .pending(card.pendingSync ? card.syncProgress : 0)
-            }
             if card.pendingSync { return .pending(card.syncProgress) }
-            return .synced
+            return card.knownSynced ? .synced : .pending(0)
         }
     }
 

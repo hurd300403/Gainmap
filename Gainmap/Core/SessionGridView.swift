@@ -24,10 +24,14 @@ public struct SessionCard: Identifiable, Equatable {
     public let syncIssue: Bool
     /// Byte-weighted completion of this session's known upload work.
     public let syncProgress: Double
+    /// Persisted converged metadata plus server-owned blob ledgers prove this
+    /// exact local state reached the cloud. This lets a cold launch restore
+    /// its last truthful green state before the first network reply.
+    public let knownSynced: Bool
 
     public init(id: UUID, title: String, photoCount: Int, updatedAt: Date,
                 covers: [URL?], pendingSync: Bool, syncIssue: Bool = false,
-                syncProgress: Double? = nil) {
+                syncProgress: Double? = nil, knownSynced: Bool = false) {
         self.id = id
         self.title = title
         self.photoCount = photoCount
@@ -37,6 +41,7 @@ public struct SessionCard: Identifiable, Equatable {
         self.syncIssue = syncIssue
         self.syncProgress = min(max(
             syncProgress ?? (pendingSync ? 0 : 1), 0), 1)
+        self.knownSynced = knownSynced
     }
 }
 
@@ -61,6 +66,13 @@ public enum SessionCardSyncState: Equatable {
         case .synced: return Theme.syncGreen
         case .pending: return Theme.gold
         case .issue: return .red
+        }
+    }
+
+    fileprivate var usesProgressSpectrum: Bool {
+        switch self {
+        case .synced, .pending: return true
+        case .neutral, .issue: return false
         }
     }
 
@@ -110,11 +122,13 @@ public struct SessionSyncMetrics {
     public let pendingSessionIDs: Set<UUID>
     public let issueSessionIDs: Set<UUID>
     public let progressBySessionID: [UUID: Double]
+    public let knownSyncedSessionIDs: Set<UUID>
 
     public static func calculate(
         sessions: [Session],
         journal: ChangeJournal?,
-        transfers: TransferQueue?
+        transfers: TransferQueue?,
+        persistedSyncedSessionIDs: Set<UUID> = []
     ) -> SessionSyncMetrics {
         let pendingMetadataSessionIDs = Set(
             (journal?.entries ?? []).compactMap { sessionID(for: $0.target) })
@@ -124,6 +138,7 @@ public struct SessionSyncMetrics {
         var pending = Set<UUID>()
         var issues = Set<UUID>()
         var progress: [UUID: Double] = [:]
+        var knownSynced = Set<UUID>()
 
         for session in sessions {
             let hashes = Set(session.photos.compactMap(\.contentHash))
@@ -138,6 +153,9 @@ public struct SessionSyncMetrics {
 
             guard metadataIsPending || uploadsArePending || needsAttention else {
                 progress[session.id] = 1
+                if persistedSyncedSessionIDs.contains(session.id) {
+                    knownSynced.insert(session.id)
+                }
                 continue
             }
 
@@ -166,7 +184,8 @@ public struct SessionSyncMetrics {
         return SessionSyncMetrics(
             pendingSessionIDs: pending,
             issueSessionIDs: issues,
-            progressBySessionID: progress)
+            progressBySessionID: progress,
+            knownSyncedSessionIDs: knownSynced)
     }
 
     private static func sessionID(for target: SyncTarget) -> UUID? {
@@ -179,6 +198,7 @@ public struct SessionSyncMetrics {
 
 public struct SessionGridView: View {
     let cards: [SessionCard]
+    let onCreate: (() -> Void)?
     let onOpen: (UUID) -> Void
     let onExport: ((UUID) -> Void)?
     let onRename: ((SessionCard) -> Void)?
@@ -186,12 +206,14 @@ public struct SessionGridView: View {
     let syncState: ((SessionCard) -> SessionCardSyncState)?
 
     public init(cards: [SessionCard],
+                onCreate: (() -> Void)? = nil,
                 onOpen: @escaping (UUID) -> Void,
                 onExport: ((UUID) -> Void)? = nil,
                 onRename: ((SessionCard) -> Void)? = nil,
                 onDelete: ((UUID) -> Void)? = nil,
                 syncState: ((SessionCard) -> SessionCardSyncState)? = nil) {
         self.cards = cards
+        self.onCreate = onCreate
         self.onOpen = onOpen
         self.onExport = onExport
         self.onRename = onRename
@@ -206,6 +228,14 @@ public struct SessionGridView: View {
             LazyVGrid(columns: columns, spacing: 14) {
                 ForEach(cards) { card in
                     cardButton(card)
+                }
+                if let onCreate {
+                    Button(action: onCreate) {
+                        NewSessionCardView()
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("New Session")
+                    .accessibilityHint("Choose photos to start a new session")
                 }
             }
             .padding(16)
@@ -249,9 +279,64 @@ public struct SessionGridView: View {
     }
 }
 
+private struct NewSessionCardView: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ZStack {
+                Theme.inset
+                Image(systemName: "plus")
+                    .font(.system(size: 28, weight: .semibold))
+                    .foregroundStyle(Theme.gold)
+            }
+            .aspectRatio(4.0 / 3.0, contentMode: .fit)
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(Theme.line, lineWidth: 1)
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                Text("New Session")
+                    .font(Theme.ui(14, .semibold))
+                    .foregroundStyle(Theme.stone)
+                    .lineLimit(1)
+                Text("CHOOSE PHOTOS")
+                    .font(Theme.mono(10))
+                    .foregroundStyle(Theme.stoneDim)
+                    .lineLimit(1)
+            }
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            Theme.surface.opacity(0.24),
+            in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(Theme.line, lineWidth: 2)
+        }
+    }
+}
+
 struct SessionCardView: View {
     let card: SessionCard
     let syncState: SessionCardSyncState
+
+    /// A completed trace keeps its warm starting history, then spends most of
+    /// the perimeter in the calmer sync green. Pending cards reveal the same
+    /// spectrum progressively; issues remain unambiguously red.
+    private var progressSpectrum: AngularGradient {
+        AngularGradient(
+            stops: [
+                .init(color: Theme.accent, location: 0.00),
+                .init(color: Theme.accentHot, location: 0.08),
+                .init(color: Theme.gold, location: 0.17),
+                .init(color: Theme.syncGreen, location: 0.28),
+                .init(color: Theme.syncGreen, location: 1.00),
+            ],
+            center: .center,
+            startAngle: .degrees(-90),
+            endAngle: .degrees(270))
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -303,11 +388,21 @@ struct SessionCardView: View {
                         : syncState.color.opacity(0.22),
                     lineWidth: 2)
             if let progress = syncState.progress, progress > 0 {
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .trim(from: 0, to: progress)
-                    .stroke(
-                        syncState.color,
-                        style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
+                if syncState.usesProgressSpectrum {
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .trim(from: 0, to: progress)
+                        .stroke(
+                            progressSpectrum,
+                            style: StrokeStyle(
+                                lineWidth: 2.5, lineCap: .round))
+                } else {
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .trim(from: 0, to: progress)
+                        .stroke(
+                            syncState.color,
+                            style: StrokeStyle(
+                                lineWidth: 2.5, lineCap: .round))
+                }
             }
         }
         .shadow(

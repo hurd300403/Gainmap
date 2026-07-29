@@ -65,6 +65,7 @@ final class AppModel: ObservableObject {
     private var refreshTask: Task<Void, Never>?
     private var refreshQueued = false
     private var progressRefreshTask: Task<Void, Never>?
+    private var lastSyncStatusSnapshot: SyncStatusSnapshot?
 
     /// Stable per-install device identity (the `by` in rev metadata).
     static var deviceID: String {
@@ -97,8 +98,11 @@ final class AppModel: ObservableObject {
         activeUID = uid
         let store = FileSessionStore(uid: uid)
         self.store = store
+        let root = await store.root
+            .appendingPathComponent("users/\(uid)", isDirectory: true)
+        lastSyncStatusSnapshot =
+            SyncEngine.persistedStatusSnapshot(root: root)
         if wantSync {
-            let root = await store.root.appendingPathComponent("users/\(uid)", isDirectory: true)
             let engine = SyncEngine(uid: uid, deviceID: Self.deviceID,
                                     backend: FirebaseSyncBackend(),
                                     store: store, root: root)
@@ -112,6 +116,7 @@ final class AppModel: ObservableObject {
                 }
             }
             await engine.start()
+            lastSyncStatusSnapshot = await engine.statusSnapshot
             syncing = true
             syncPassInFlight = true
             Task { [weak self] in
@@ -145,6 +150,7 @@ final class AppModel: ObservableObject {
         syncPassInFlight = false
         pendingWorkCount = 0
         hasSyncIssue = false
+        lastSyncStatusSnapshot = nil
         failedThumbs = []
         if clearCards {
             cards = []
@@ -234,17 +240,26 @@ final class AppModel: ObservableObject {
         // Phase 1 — LOCAL ONLY, no network: publish immediately so the grid
         // never sits on "No sessions yet" behind downloads.
         let sessions = await store.loadAll()
-        var metrics = SessionSyncMetrics.calculate(
-            sessions: sessions, journal: nil, transfers: nil)
+        let status: SyncStatusSnapshot?
         if let engine {
-            let transfers = await engine.transferSnapshot
-            let journal = await engine.journalSnapshot
-            metrics = SessionSyncMetrics.calculate(
-                sessions: sessions, journal: journal, transfers: transfers)
-            pendingWorkCount = journal.entries.count
-                + transfers.transfers.filter { $0.status != .done }.count
-            hasSyncIssue = transfers.hasParked || transfers.isQuotaExceeded
-                || !journal.conflicts.isEmpty
+            let live = await engine.statusSnapshot
+            lastSyncStatusSnapshot = live
+            status = live
+        } else {
+            status = lastSyncStatusSnapshot
+        }
+        let knownSynced = status?.knownSyncedSessionIDs(for: sessions) ?? []
+        let metrics = SessionSyncMetrics.calculate(
+            sessions: sessions,
+            journal: status?.journal,
+            transfers: status?.transfers,
+            persistedSyncedSessionIDs: knownSynced)
+        if let status {
+            pendingWorkCount = status.journal.entries.count
+                + status.transfers.transfers.filter { $0.status != .done }.count
+            hasSyncIssue = status.transfers.hasParked
+                || status.transfers.isQuotaExceeded
+                || !status.journal.conflicts.isEmpty
         } else {
             pendingWorkCount = 0
             hasSyncIssue = false
@@ -325,7 +340,8 @@ final class AppModel: ObservableObject {
                 covers: covers,
                 pendingSync: metrics.pendingSessionIDs.contains(session.id),
                 syncIssue: metrics.issueSessionIDs.contains(session.id),
-                syncProgress: metrics.progressBySessionID[session.id])
+                syncProgress: metrics.progressBySessionID[session.id],
+                knownSynced: metrics.knownSyncedSessionIDs.contains(session.id))
         }
     }
 

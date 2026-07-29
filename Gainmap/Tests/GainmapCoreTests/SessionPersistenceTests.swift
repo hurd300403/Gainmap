@@ -495,12 +495,50 @@ final class SessionPersistenceTests: XCTestCase {
         // current container instead of erroring.
         var legacy = saved!
         legacy.photos[0].origin = .linked(
-            path: "/var/mobile/Containers/Data/OLD-UUID/Gainmap/users/u1/files/imports/a.jpg")
-        let healed = await MergeModel(session: legacy, store: store)
+            path: "/var/mobile/Containers/Data/Application/OLD-UUID/Library/Application Support/Gainmap/users/u1/files/imports/a.jpg")
+        legacy.photos[0].contentHash = try XCTUnwrap(ContentHash.sha256(of: file))
+        legacy.photos[0].byteSize = 7
+        try await store.save(legacy)
+        let migrated = await store.loadAllRepairingManagedOrigins()
+        let migratedSession = try XCTUnwrap(
+            migrated.first(where: { $0.id == legacy.id }))
+        guard case .managed(let migratedPath) = migratedSession.photos[0].origin else {
+            return XCTFail("legacy store path should migrate durably to .managed")
+        }
+        XCTAssertEqual(migratedPath, "imports/a.jpg")
+        let persistedMigration = await store.load(id: legacy.id)
+        XCTAssertEqual(persistedMigration?.photos[0].origin, migratedSession.photos[0].origin)
+
+        let healed = await MergeModel(session: migratedSession, store: store)
         let healedItems = await healed.items
         let healedItem = try XCTUnwrap(healedItems.first)
         XCTAssertEqual(healedItem.sdrURL.path, file.path)
         XCTAssertNotEqual(healedItem.status, .error)
+
+        // Similar-looking external and unsafe paths are never rebound. The
+        // migration is specifically for old iOS Gainmap containers and only
+        // when the current bytes still match the persisted content address.
+        var external = Session(photos: [legacy.photos[0]])
+        external.photos[0].origin = .linked(
+            path: "/Volumes/Archive/files/imports/a.jpg")
+        var traversal = Session(photos: [legacy.photos[0]])
+        traversal.photos[0].origin = .linked(
+            path: "/var/mobile/Containers/Data/Application/OTHER/Library/Application Support/Gainmap/users/u1/files/imports/../imports/a.jpg")
+        var hashMismatch = Session(photos: [legacy.photos[0]])
+        hashMismatch.photos[0].origin = .linked(
+            path: "/var/mobile/Containers/Data/Application/OTHER/Library/Application Support/Gainmap/users/u1/files/imports/a.jpg")
+        hashMismatch.photos[0].contentHash = String(repeating: "ab", count: 32)
+        try await store.save(external)
+        try await store.save(traversal)
+        try await store.save(hashMismatch)
+
+        let guarded = await store.loadAllRepairingManagedOrigins()
+        for id in [external.id, traversal.id, hashMismatch.id] {
+            let session = try XCTUnwrap(guarded.first(where: { $0.id == id }))
+            guard case .linked = session.photos[0].origin else {
+                return XCTFail("unsafe or mismatched path must remain linked")
+            }
+        }
     }
 
     // MARK: inbound reload (P5 review — persistTask must reset after flush)

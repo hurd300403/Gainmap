@@ -8,6 +8,16 @@ state machine (r6)").
 `gainmap-production` was never touched. Every command in this record ran against the
 throwaway project above.
 
+> **Production correction — 2026-07-29:** The IAM interpretation in provisioning
+> finding 1 below is historical and must not be used as the current runbook. On
+> `gainmap-production`, granting `roles/firebaserules.firestoreServiceAgent` only to
+> `service-<NUM>@firebase-rules.iam.gserviceaccount.com` still left every authenticated
+> upload denied. Current Firebase guidance and a live production recovery established
+> that the role is required on the Firebase Storage service agent,
+> `service-<NUM>@gcp-sa-firebasestorage.iam.gserviceaccount.com`. Adding that binding
+> allowed all six queued uploads to complete. The original probe result is retained below
+> as evidence of what was observed in the throwaway project.
+
 **Question:** the spec's two-deadline reservation model rests on one platform claim —
 *"Cloud Storage resumable sessions stay valid up to a week; rules are checked at upload
 start, not finalize"* (spec line 43, restated in `storage.rules` lines 70–72). The emulator
@@ -136,21 +146,21 @@ server-owned ledger key is `renditions.<tier>` (e.g. `renditions.thumbs`), not
 
 ## Provisioning findings (fold into the P0 runbook before `gainmap-production`)
 
-1. **`roles/firebaserules.firestoreServiceAgent` must be granted to the Firebase **Rules**
-   service agent, or every upload is denied.** This is the highest-value finding after E.
-   Cross-service rules (`firestore.get()` inside `storage.rules`) run as
-   `service-<NUM>@firebase-rules.iam.gserviceaccount.com`; without the grant the `get()`
-   fails and **every** create is refused with a bare `403 Permission denied` that names no
-   clause. The emulator cannot catch this — it does not enforce IAM. The service agent may
-   not exist until you create it:
+1. **Corrected production runbook: grant
+   `roles/firebaserules.firestoreServiceAgent` to the Firebase Storage service agent.**
+   Cross-service rules (`firestore.get()` inside `storage.rules`) require:
    ```
-   gcloud beta services identity create --service=firebaserules.googleapis.com --project <P>
    gcloud projects add-iam-policy-binding <P> \
-     --member="serviceAccount:service-<NUM>@firebase-rules.iam.gserviceaccount.com" \
+     --member="serviceAccount:service-<NUM>@gcp-sa-firebasestorage.iam.gserviceaccount.com" \
      --role="roles/firebaserules.firestoreServiceAgent" --condition=None
    ```
-   (Granting the same role to `service-<NUM>@gcp-sa-firebasestorage...` — the account named
-   in some docs — did **not** fix it; the `firebase-rules` agent is the one that matters.)
+   Without the binding, every create can be refused with a bare `403 Permission denied`
+   that names no failed clause. The emulator cannot catch this because it does not enforce
+   IAM. The 2026-07-27 probe appeared to recover only after granting the role to
+   `service-<NUM>@firebase-rules.iam.gserviceaccount.com`, while granting it to the Storage
+   agent appeared ineffective. That attribution was disproved by the 2026-07-29 production
+   incident: the Rules-agent-only configuration failed, and the Storage-agent binding
+   restored every queued upload.
 2. **Firebase Auth config must be initialised before any provider can be enabled.**
    `PATCH .../admin/v2/projects/<P>/config` returns `404 CONFIGURATION_NOT_FOUND` on a fresh
    CLI-created project. Fix: `POST https://identitytoolkit.googleapis.com/v2/projects/<P>/identityPlatform:initializeAuth`

@@ -346,11 +346,26 @@ public struct TransferQueue: Codable, Equatable, Sendable {
         transfers.removeAll { $0.status == .done }
     }
 
+    /// Remove only completed entries whose server-owned blob ledger has been
+    /// persisted. Unconfirmed `.done` entries remain as cold-launch proof
+    /// until that durable ledger snapshot arrives.
+    public mutating func pruneDone(confirmedIDs: Set<String>) {
+        transfers.removeAll {
+            $0.status == .done && confirmedIDs.contains($0.id)
+        }
+    }
+
     /// Forget every transfer for a content hash — used when the blob doc is
     /// physically deleted (GC): a stale `.done` entry must not block a future
     /// re-upload of the same bytes (review P4-17).
     public mutating func remove(contentHash: String) {
         transfers.removeAll { $0.contentHash == contentHash }
+    }
+
+    /// Forget one rendition while preserving any other tier for the same
+    /// content hash.
+    public mutating func remove(id: String) {
+        transfers.removeAll { $0.id == id }
     }
 
     /// Account teardown.

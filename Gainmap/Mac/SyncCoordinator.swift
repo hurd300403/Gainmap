@@ -46,6 +46,7 @@ final class SyncCoordinator: ObservableObject {
     private var refreshQueued = false
     private var progressRefreshTask: Task<Void, Never>?
     private var refreshGeneration = 0
+    private var lastSyncStatusSnapshot: SyncStatusSnapshot?
 
     var hasOutstandingCloudWork: Bool {
         syncing && (pendingWorkCount > 0 || syncPassInFlight)
@@ -128,6 +129,7 @@ final class SyncCoordinator: ObservableObject {
         syncing = false
         initialSyncComplete = false
         syncPassInFlight = false
+        lastSyncStatusSnapshot = nil
         currentUID = uid
 
         // 2. ADOPT — users/local moves under the real uid (newest copy wins).
@@ -136,6 +138,10 @@ final class SyncCoordinator: ObservableObject {
         if uid != "local" {
             await store.adoptLocalSessions()
         }
+        let root = await store.root
+            .appendingPathComponent("users/\(uid)", isDirectory: true)
+        lastSyncStatusSnapshot =
+            SyncEngine.persistedStatusSnapshot(root: root)
         // 3. ATTACH — resetting the model whenever the namespace changed:
         //    keeping the old account's session live over the new store wrote
         //    A's photos into whatever namespace came next (sign-out leak).
@@ -148,7 +154,6 @@ final class SyncCoordinator: ObservableObject {
         scheduleRefresh()
 
         guard withEngine else { return }
-        let root = await store.root.appendingPathComponent("users/\(uid)", isDirectory: true)
         let engine = SyncEngine(uid: uid, deviceID: Self.deviceID,
                                 backend: FirebaseSyncBackend(),
                                 store: store, root: root)
@@ -164,8 +169,13 @@ final class SyncCoordinator: ObservableObject {
             }
         }
         await engine.start()
+        lastSyncStatusSnapshot = await engine.statusSnapshot
         syncing = true
         syncPassInFlight = true
+        // Re-project the persisted acknowledgement ledger immediately. The
+        // pre-engine local refresh cannot know which clean cards were already
+        // synced on the previous launch.
+        scheduleRefresh()
         Task { [weak self] in
             await engine.drainOnce()
             await engine.pumpTransfers()
@@ -268,10 +278,20 @@ final class SyncCoordinator: ObservableObject {
         }
 
         let sessions = await store.loadAll()
-        let journal = await engine?.journalSnapshot
-        let transfers = await engine?.transferSnapshot
+        let status: SyncStatusSnapshot?
+        if let engine {
+            let live = await engine.statusSnapshot
+            lastSyncStatusSnapshot = live
+            status = live
+        } else {
+            status = lastSyncStatusSnapshot
+        }
+        let knownSynced = status?.knownSyncedSessionIDs(for: sessions) ?? []
         let metrics = SessionSyncMetrics.calculate(
-            sessions: sessions, journal: journal, transfers: transfers)
+            sessions: sessions,
+            journal: status?.journal,
+            transfers: status?.transfers,
+            persistedSyncedSessionIDs: knownSynced)
         var missing: [String] = []
         let localCards = buildCards(
             sessions: sessions,
@@ -281,11 +301,12 @@ final class SyncCoordinator: ObservableObject {
         guard generation == refreshGeneration else { return }
         cards = localCards
         initialLoadDone = true
-        if let journal, let transfers {
-            pendingWorkCount = journal.entries.count
-                + transfers.transfers.filter { $0.status != .done }.count
-            hasSyncIssue = transfers.hasParked || transfers.isQuotaExceeded
-                || !journal.conflicts.isEmpty
+        if let status {
+            pendingWorkCount = status.journal.entries.count
+                + status.transfers.transfers.filter { $0.status != .done }.count
+            hasSyncIssue = status.transfers.hasParked
+                || status.transfers.isQuotaExceeded
+                || !status.journal.conflicts.isEmpty
         } else {
             pendingWorkCount = 0
             hasSyncIssue = false
@@ -354,7 +375,8 @@ final class SyncCoordinator: ObservableObject {
                 covers: covers,
                 pendingSync: metrics.pendingSessionIDs.contains(session.id),
                 syncIssue: metrics.issueSessionIDs.contains(session.id),
-                syncProgress: metrics.progressBySessionID[session.id])
+                syncProgress: metrics.progressBySessionID[session.id],
+                knownSynced: metrics.knownSyncedSessionIDs.contains(session.id))
         }
     }
 
