@@ -22,7 +22,10 @@ struct EditorScreen: View {
     @StateObject private var model: MergeModel
     @State private var showAdvancedLook = false
     @State private var expandedGroups: Set<String> = ["glow", "color", "hdr"]
-    @State private var controlsPresented = true
+    // Starts FALSE: presenting a sheet while the fullScreenCover is still
+    // animating in gets silently dropped by UIKit — prepare() raises it once
+    // the cover has settled.
+    @State private var controlsPresented = false
     @State private var comparing = false
     @State private var baseImage: CIImage?
     @State private var hydrating = false
@@ -67,15 +70,6 @@ struct EditorScreen: View {
         .sheet(isPresented: $controlsPresented) {
             controlsSheet
         }
-        .sheet(item: $shareURL) { url in
-            ShareSheet(items: [url])
-        }
-        .alert("Glow in SDR", isPresented: $showGlowInSDRModal) {
-            Button("Turn on") { model.bloom.bakeGlowIntoSDR = true }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("Bakes the soft glow into the standard (non-HDR) version too, so your look shows on every screen. The SDR fallback will be brighter than your original file.")
-        }
         .task { await prepare() }
         .onDisappear {
             controlsPresented = false
@@ -102,7 +96,7 @@ struct EditorScreen: View {
             }
             .buttonStyle(.plain)
             Spacer()
-            Text(sessionTitle.isEmpty ? "Untitled session" : sessionTitle)
+            Text(liveTitle.isEmpty ? "Untitled session" : liveTitle)
                 .font(Theme.ui(14, .semibold)).foregroundStyle(Theme.stone)
                 .lineLimit(1)
             Spacer()
@@ -200,11 +194,26 @@ struct EditorScreen: View {
         .presentationDragIndicator(.visible)
         .interactiveDismissDisabled(true)
         .presentationBackground(Theme.bgDeep)
+        // Stacked presentations live ON the persistent sheet — presenting
+        // them from the base view while this sheet is up silently fails.
+        .sheet(item: $shareURL) { url in
+            ShareSheet(items: [url])
+        }
+        .alert("Glow in SDR", isPresented: $showGlowInSDRModal) {
+            Button("Turn on") { model.bloom.bakeGlowIntoSDR = true }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Bakes the soft glow into the standard (non-HDR) version too, so your look shows on every screen. The SDR fallback will be brighter than your original file.")
+        }
     }
 
     // ------------------------------------------------------------- preview data
 
     @State private var decodedBase: [UUID: CIImage] = [:]
+
+    private var liveTitle: String {
+        model.session.title.isEmpty ? sessionTitle : model.session.title
+    }
 
     private var previewImage: CIImage? {
         guard let base = baseImage else { return nil }
@@ -227,6 +236,11 @@ struct EditorScreen: View {
     private func prepare() async {
         model.onSessionPersisted = { [weak appModel] session in
             Task { @MainActor in appModel?.sessionPersisted(session) }
+        }
+        // Raise the controls once the cover's own transition has settled.
+        Task {
+            try? await Task.sleep(nanoseconds: 600_000_000)
+            controlsPresented = true
         }
         if !importItems.isEmpty {
             await importPicked()

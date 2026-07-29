@@ -101,6 +101,9 @@ public enum SessionNaming {
             "", "/", "desktop", "downloads", "documents", "pictures", "photos",
             "images", "tmp", "temp", "untitled", "export", "exports", "jpeg",
             "jpegs", "jpg", "output", "processed", "finals", "full",
+            // The store's own managed dirs (phone imports, blob cache) are
+            // plumbing, not shoot names.
+            "imports", "blobs", "files",
         ]
         return !generic.contains(name.lowercased())
     }
