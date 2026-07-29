@@ -144,6 +144,51 @@ final class TransferQueueTests: XCTestCase {
             metrics.progressBySessionID[session.id] ?? -1, 0.35, accuracy: 0.001)
     }
 
+    func testSessionMetricsAttributeIssuesToOwningSession() {
+        var firstPhoto = PhotoRecord(origin: .linked(path: "/first.jpg"))
+        firstPhoto.contentHash = hashA
+        let first = Session(photos: [firstPhoto])
+        var secondPhoto = PhotoRecord(origin: .linked(path: "/second.jpg"))
+        secondPhoto.contentHash = hashB
+        let second = Session(photos: [secondPhoto])
+
+        var q = queue([(hashA, "originals", 100), (hashB, "originals", 100)])
+        for _ in 0..<TransferQueue.maxAttempts {
+            q.failed(
+                id: "originals_\(hashA)",
+                failure: .transient("network"),
+                now: t0)
+        }
+
+        let metrics = SessionSyncMetrics.calculate(
+            sessions: [first, second], journal: nil, transfers: q)
+        XCTAssertTrue(metrics.issueSessionIDs.contains(first.id))
+        XCTAssertFalse(metrics.issueSessionIDs.contains(second.id))
+        XCTAssertTrue(metrics.pendingSessionIDs.contains(second.id))
+    }
+
+    func testSessionMetricsMapConflictToOwningSession() {
+        let first = Session()
+        let second = Session()
+        var journal = ChangeJournal()
+        journal.record(
+            target: .session(first.id),
+            value: .title("Local title"),
+            baseRev: 0,
+            deviceID: "iphone")
+        journal.resolveConflict(
+            target: .session(first.id),
+            group: .sessionTitle,
+            supersededBy: "mac")
+
+        let metrics = SessionSyncMetrics.calculate(
+            sessions: [first, second], journal: journal, transfers: nil)
+        XCTAssertEqual(metrics.issueSessionIDs, Set([first.id]))
+        XCTAssertEqual(metrics.pendingSessionIDs, Set([first.id]))
+        XCTAssertEqual(metrics.progressBySessionID[first.id], 0)
+        XCTAssertEqual(metrics.progressBySessionID[second.id], 1)
+    }
+
     func testRepeatedLeaseDenialsParkInsteadOfHotLooping() {
         // A finalize 403 is indistinguishable from a permanent rules denial;
         // a REAL expiry heals after one fresh lease, so consecutive denials

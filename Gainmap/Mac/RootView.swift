@@ -385,7 +385,7 @@ private struct MacSessionLibrary: View {
         case .admitting:
             return .pending(0)
         case .ready:
-            if sync.hasSyncIssue, card.pendingSync {
+            if card.syncIssue {
                 return .issue(card.syncProgress)
             }
             if !sync.initialSyncComplete {

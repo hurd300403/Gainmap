@@ -258,7 +258,7 @@ struct SessionGridScreen: View {
         case .admitting:
             return .pending(0)
         case .ready:
-            if model.hasSyncIssue, card.pendingSync {
+            if card.syncIssue {
                 return .issue(card.syncProgress)
             }
             if !model.initialSyncComplete {

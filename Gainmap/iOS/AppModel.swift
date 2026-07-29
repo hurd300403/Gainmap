@@ -324,6 +324,7 @@ final class AppModel: ObservableObject {
                 updatedAt: session.updatedAt,
                 covers: covers,
                 pendingSync: metrics.pendingSessionIDs.contains(session.id),
+                syncIssue: metrics.issueSessionIDs.contains(session.id),
                 syncProgress: metrics.progressBySessionID[session.id])
         }
     }

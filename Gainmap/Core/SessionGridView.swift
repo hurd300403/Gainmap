@@ -20,17 +20,21 @@ public struct SessionCard: Identifiable, Equatable {
     public let covers: [URL?]
     /// True while local edits/uploads for this session haven't fully synced.
     public let pendingSync: Bool
+    /// True when this session owns parked/quota work or a recoverable conflict.
+    public let syncIssue: Bool
     /// Byte-weighted completion of this session's known upload work.
     public let syncProgress: Double
 
     public init(id: UUID, title: String, photoCount: Int, updatedAt: Date,
-                covers: [URL?], pendingSync: Bool, syncProgress: Double? = nil) {
+                covers: [URL?], pendingSync: Bool, syncIssue: Bool = false,
+                syncProgress: Double? = nil) {
         self.id = id
         self.title = title
         self.photoCount = photoCount
         self.updatedAt = updatedAt
         self.covers = Array(covers.prefix(4))
         self.pendingSync = pendingSync
+        self.syncIssue = syncIssue
         self.syncProgress = min(max(
             syncProgress ?? (pendingSync ? 0 : 1), 0), 1)
     }
@@ -59,6 +63,44 @@ public enum SessionCardSyncState: Equatable {
         case .issue: return .red
         }
     }
+
+    fileprivate var cardLabel: String? {
+        switch self {
+        case .neutral:
+            return "LOCAL ONLY"
+        case .synced:
+            return nil
+        case .pending(let progress):
+            let clamped = min(max(progress, 0), 1)
+            guard clamped > 0.005 else { return "NOT SYNCED" }
+            return "SYNCING \(Int((clamped * 100).rounded()))%"
+        case .issue:
+            return "SYNC ISSUE"
+        }
+    }
+
+    fileprivate var labelColor: Color {
+        switch self {
+        case .neutral: return Theme.stoneDim
+        case .synced: return Theme.syncGreen
+        case .pending: return Theme.gold
+        case .issue: return .red
+        }
+    }
+
+    fileprivate var accessibilityStatus: String {
+        switch self {
+        case .neutral:
+            return "Local only, not synced"
+        case .synced:
+            return "Synced"
+        case .pending(let progress):
+            let percent = Int((min(max(progress, 0), 1) * 100).rounded())
+            return percent > 0 ? "Syncing, \(percent) percent" : "Not synced"
+        case .issue:
+            return "Sync needs attention"
+        }
+    }
 }
 
 /// Shared Mac/iOS projection of persisted sync work into per-session
@@ -66,6 +108,7 @@ public enum SessionCardSyncState: Equatable {
 /// below 100% until the server acknowledges it.
 public struct SessionSyncMetrics {
     public let pendingSessionIDs: Set<UUID>
+    public let issueSessionIDs: Set<UUID>
     public let progressBySessionID: [UUID: Double]
 
     public static func calculate(
@@ -75,8 +118,11 @@ public struct SessionSyncMetrics {
     ) -> SessionSyncMetrics {
         let pendingMetadataSessionIDs = Set(
             (journal?.entries ?? []).compactMap { sessionID(for: $0.target) })
+        let conflictedSessionIDs = Set(
+            (journal?.conflicts ?? []).compactMap { sessionID(for: $0.target) })
         let allTransfers = transfers?.transfers ?? []
         var pending = Set<UUID>()
+        var issues = Set<UUID>()
         var progress: [UUID: Double] = [:]
 
         for session in sessions {
@@ -84,13 +130,23 @@ public struct SessionSyncMetrics {
             let related = allTransfers.filter { hashes.contains($0.contentHash) }
             let metadataIsPending = pendingMetadataSessionIDs.contains(session.id)
             let uploadsArePending = related.contains { $0.status != .done }
+            let conflictNeedsAttention = conflictedSessionIDs.contains(session.id)
+            let uploadNeedsAttention = related.contains {
+                $0.status == .parked || $0.status == .quotaExceeded
+            }
+            let needsAttention = conflictNeedsAttention || uploadNeedsAttention
 
-            guard metadataIsPending || uploadsArePending else {
+            guard metadataIsPending || uploadsArePending || needsAttention else {
                 progress[session.id] = 1
                 continue
             }
 
             pending.insert(session.id)
+            if needsAttention { issues.insert(session.id) }
+            if conflictNeedsAttention && !metadataIsPending && !uploadsArePending {
+                progress[session.id] = 0
+                continue
+            }
             let totalBytes = related.reduce(Int64(0)) { $0 + max($1.byteSize, 0) }
             let completedBytes = related.reduce(Int64(0)) { sum, transfer in
                 sum + (transfer.status == .done
@@ -109,6 +165,7 @@ public struct SessionSyncMetrics {
 
         return SessionSyncMetrics(
             pendingSessionIDs: pending,
+            issueSessionIDs: issues,
             progressBySessionID: progress)
     }
 
@@ -208,9 +265,28 @@ struct SessionCardView: View {
                     .font(Theme.ui(14, .semibold)).foregroundStyle(Theme.stone)
                     .lineLimit(1)
                 HStack(spacing: 5) {
-                    Text("\(card.photoCount) photo\(card.photoCount == 1 ? "" : "s")")
-                    Text("·")
-                    Text(card.updatedAt, style: .relative)
+                    HStack(spacing: 5) {
+                        Text("\(card.photoCount) photo\(card.photoCount == 1 ? "" : "s")")
+                        Text("·")
+                        Text(card.updatedAt, style: .relative)
+                    }
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                    Spacer(minLength: 4)
+                    if let label = syncState.cardLabel {
+                        Text(label)
+                            .font(Theme.mono(8, .bold))
+                            .tracking(0.35)
+                            .foregroundStyle(syncState.labelColor)
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 3)
+                            .background(
+                                syncState.labelColor.opacity(0.14),
+                                in: Capsule())
+                            .accessibilityLabel(syncState.accessibilityStatus)
+                    }
                 }
                 .font(Theme.mono(10)).foregroundStyle(Theme.stoneDim)
             }
