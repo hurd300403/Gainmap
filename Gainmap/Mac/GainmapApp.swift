@@ -70,8 +70,12 @@ struct SettingsView: View {
         Form {
             Section {
                 Toggle("Send anonymous crash reports", isOn: $crashReporting)
-                Text("Helps fix bugs. No photos, file names, or IP address are ever sent. "
-                     + "Takes effect on next launch.")
+                // Scoped to crash reports on purpose (P4): sync — when you
+                // sign in, in a future update — uploads your photos to your
+                // private library, so a blanket "no photos are ever sent"
+                // would become untrue. Crash reports never include them.
+                Text("Helps fix bugs. Crash reports never include your photos, "
+                     + "file names, or IP address. Takes effect on next launch.")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             } header: {
@@ -118,8 +122,9 @@ struct FirstRunCrashNotice: ViewModifier {
             .alert("Anonymous crash reports", isPresented: $present) {
                 Button("OK") { shown = true }
             } message: {
-                Text("Gainmap sends anonymous crash reports — no photos, no file names, "
-                     + "no IP address — to help fix bugs. You can turn this off in Settings (⌘,).")
+                Text("Gainmap sends anonymous crash reports to help fix bugs — they never "
+                     + "include photos, file names, or your IP address. You can turn this "
+                     + "off in Settings (⌘,).")
             }
     }
 }
