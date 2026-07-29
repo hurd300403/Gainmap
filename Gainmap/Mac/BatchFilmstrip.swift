@@ -14,14 +14,23 @@ import GainmapCore
 
 struct BatchFilmstrip: View {
     @ObservedObject var model: MergeModel
+    let sourceRevisions: [UUID: Int]
+
+    init(model: MergeModel, sourceRevisions: [UUID: Int] = [:]) {
+        self.model = model
+        self.sourceRevisions = sourceRevisions
+    }
 
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 10) {
                     ForEach(model.items) { item in
-                        FilmstripCell(item: item, selected: item.id == model.selectedID,
-                                      onRemove: { model.remove(item.id) })
+                        FilmstripCell(
+                            item: item,
+                            selected: item.id == model.selectedID,
+                            sourceRevision: sourceRevisions[item.id, default: 0],
+                            onRemove: { model.remove(item.id) })
                             .id(item.id)
                             .onTapGesture { model.select(item.id) }
                     }
@@ -45,6 +54,7 @@ private let cellH: CGFloat = 64
 struct FilmstripCell: View {
     let item: MergeModel.BatchItem
     let selected: Bool
+    let sourceRevision: Int
     var onRemove: () -> Void
 
     @State private var thumb: CGImage?
@@ -101,13 +111,22 @@ struct FilmstripCell: View {
         .scaleEffect(hovering ? 1.02 : 1)
         .animation(.spring(response: 0.3, dampingFraction: 0.8), value: hovering)
         .onHover { hovering = $0 }
-        .task(id: item.sdrURL) {
+        .task(id: SourceIdentity(
+            url: item.sdrURL,
+            revision: sourceRevision)) {
             let url = item.sdrURL
+            thumb = nil
             let img = await Task.detached(priority: .userInitiated) {
                 ImageInfo.thumbnail(of: url, maxPixel: 200)
             }.value
+            guard !Task.isCancelled else { return }
             thumb = img
         }
+    }
+
+    private struct SourceIdentity: Equatable {
+        let url: URL
+        let revision: Int
     }
 
     @ViewBuilder private var statusBadge: some View {

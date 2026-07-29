@@ -469,24 +469,40 @@ final class SyncCoordinator: ObservableObject {
         let managedRoot = store.managedFilesDir
         let currentURL = session.photos[index].sourceURL(managedRoot: managedRoot)
         if fm.fileExists(atPath: currentURL.path) {
-            if let model, model.session.id == sessionID,
-               model.items.first(where: { $0.id == photoID })?.sdrURL != currentURL {
-                model.reloadFromRemote(session)
+            if let model, model.session.id == sessionID {
+                if model.items.first(where: { $0.id == photoID })?.sdrURL != currentURL {
+                    model.reloadFromRemote(session)
+                }
             }
             return
         }
         guard let hash = session.photos[index].contentHash,
               let hydrated = await engine.hydrateOriginal(hash: hash) else { return }
+        // Hydration can take seconds. Re-read before writing so a look edit,
+        // photo deletion, or inbound peer change that landed meanwhile is
+        // never replaced with the stale pre-download snapshot above.
+        guard var latest = await store.load(id: sessionID),
+              let latestIndex = latest.photos.firstIndex(
+                where: { $0.id == photoID }),
+              latest.photos[latestIndex].contentHash == hash else { return }
         let managedPrefix = managedRoot.path + "/"
         if hydrated.path.hasPrefix(managedPrefix) {
-            session.photos[index].origin = .managed(
+            latest.photos[latestIndex].origin = .managed(
                 relativePath: String(hydrated.path.dropFirst(managedPrefix.count)))
         } else {
-            session.photos[index].origin = .linked(path: hydrated.path)
+            latest.photos[latestIndex].origin = .linked(path: hydrated.path)
         }
-        try? await store.save(session)
+        do {
+            try await store.save(latest)
+        } catch {
+            return
+        }
         if let model, model.session.id == sessionID {
-            model.reloadFromRemote(session)
+            model.reloadFromRemote(latest)
+            // The portable origin normally already points at this exact cache
+            // URL. Its metadata therefore compares equal even though the file
+            // changed from missing to present; explicitly wake image loaders.
+            model.markSourceAvailable(photoID)
         }
         scheduleRefresh()
     }

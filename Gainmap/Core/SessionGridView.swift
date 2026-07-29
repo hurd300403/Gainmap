@@ -317,21 +317,60 @@ private struct NewSessionCardView: View {
     }
 }
 
+/// A rounded perimeter whose trim origin is the bottom-left corner. SwiftUI's
+/// built-in RoundedRectangle path begins elsewhere, which made partial sync
+/// traces appear to start arbitrarily along the top edge.
+private struct BottomLeftRoundedRectangle: Shape {
+    let cornerRadius: CGFloat
+
+    func path(in rect: CGRect) -> Path {
+        let radius = min(
+            cornerRadius,
+            max(0, min(rect.width, rect.height) / 2))
+        var path = Path()
+        path.move(to: CGPoint(
+            x: rect.minX + radius,
+            y: rect.maxY))
+        path.addArc(
+            tangent1End: CGPoint(x: rect.minX, y: rect.maxY),
+            tangent2End: CGPoint(x: rect.minX, y: rect.minY),
+            radius: radius)
+        path.addArc(
+            tangent1End: CGPoint(x: rect.minX, y: rect.minY),
+            tangent2End: CGPoint(x: rect.maxX, y: rect.minY),
+            radius: radius)
+        path.addArc(
+            tangent1End: CGPoint(x: rect.maxX, y: rect.minY),
+            tangent2End: CGPoint(x: rect.maxX, y: rect.maxY),
+            radius: radius)
+        path.addArc(
+            tangent1End: CGPoint(x: rect.maxX, y: rect.maxY),
+            tangent2End: CGPoint(x: rect.minX, y: rect.maxY),
+            radius: radius)
+        path.closeSubpath()
+        return path
+    }
+}
+
 struct SessionCardView: View {
     let card: SessionCard
     let syncState: SessionCardSyncState
 
-    /// A completed trace keeps its warm starting history, then spends most of
-    /// the perimeter in the calmer sync green. Pending cards reveal the same
-    /// spectrum progressively; issues remain unambiguously red.
+    /// A completed trace keeps its warm starting history, then resolves into
+    /// the calmer sync green. Pending cards reveal the same spectrum
+    /// progressively; issues remain unambiguously red.
     private var progressSpectrum: AngularGradient {
         AngularGradient(
             stops: [
                 .init(color: Theme.accent, location: 0.00),
-                .init(color: Theme.accentHot, location: 0.08),
-                .init(color: Theme.gold, location: 0.17),
-                .init(color: Theme.syncGreen, location: 0.28),
-                .init(color: Theme.syncGreen, location: 1.00),
+                .init(color: Theme.accentHot, location: 0.10),
+                .init(color: Theme.gold, location: 0.24),
+                .init(color: Theme.gold, location: 0.32),
+                .init(color: Theme.syncGreen, location: 0.42),
+                .init(color: Theme.syncGreen, location: 0.88),
+                // Match the first stop at the angular wrap, giving the green
+                // a soft return to coral instead of a hard seam.
+                .init(color: Theme.accent, location: 1.00),
             ],
             center: .center,
             startAngle: .degrees(-90),
@@ -385,18 +424,20 @@ struct SessionCardView: View {
                 .stroke(
                     syncState == .neutral
                         ? Theme.line
-                        : syncState.color.opacity(0.22),
+                        : (syncState == .synced
+                           ? Theme.line
+                           : syncState.color.opacity(0.22)),
                     lineWidth: 2)
             if let progress = syncState.progress, progress > 0 {
                 if syncState.usesProgressSpectrum {
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    BottomLeftRoundedRectangle(cornerRadius: 16)
                         .trim(from: 0, to: progress)
                         .stroke(
                             progressSpectrum,
                             style: StrokeStyle(
                                 lineWidth: 2.5, lineCap: .round))
                 } else {
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    BottomLeftRoundedRectangle(cornerRadius: 16)
                         .trim(from: 0, to: progress)
                         .stroke(
                             syncState.color,
@@ -406,7 +447,9 @@ struct SessionCardView: View {
             }
         }
         .shadow(
-            color: syncState.color.opacity(syncState == .neutral ? 0 : 0.12),
+            color: syncState.color.opacity(
+                syncState == .neutral ? 0
+                    : (syncState == .synced ? 0.05 : 0.12)),
             radius: 5)
     }
 }

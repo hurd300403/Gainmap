@@ -59,6 +59,8 @@ struct ContentView: View {
                     VStack(spacing: 10) {
                         HDRPreviewPane(sdrURL: model.sdrURL, params: model.bloom,
                                        bake: model.bloom.bakeGlowIntoSDR,
+                                       sourceRevision: model.sourceRevision(
+                                           for: model.selectedID),
                                        expanded: true,
                                        onRequestAdd: model.items.isEmpty ? { addPhotos() } : nil)
                         Text(model.items.isEmpty ? "click the preview or drop SDR JPEGs anywhere to begin"
@@ -69,7 +71,9 @@ struct ContentView: View {
 
                     ScrollView(.vertical, showsIndicators: false) {
                         VStack(spacing: 0) {
-                            BatchFilmstrip(model: model)
+                            BatchFilmstrip(
+                                model: model,
+                                sourceRevisions: model.sourceRevisions)
                             // Before any photo exists the look controls are inert —
                             // show how to produce the input file instead.
                             if model.items.isEmpty {

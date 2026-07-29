@@ -223,6 +223,7 @@ public final class MergeModel: ObservableObject {
             persistTask = nil
             items = []
             photoMeta = [:]
+            sourceRevisions = [:]
             lastPersistedContent = nil
             session = Session(sameLookForAll: UserDefaults.standard.bool(forKey: Self.sameLookKey))
             sameLookForAll = session.sameLookForAll
@@ -298,6 +299,7 @@ public final class MergeModel: ObservableObject {
         persistTask = nil
         phase = .idle
         dropNotice = nil
+        sourceRevisions = [:]
         session = next
         lastPersistedContent = nil
         restoreItemsFromSession()
@@ -652,6 +654,11 @@ public final class MergeModel: ObservableObject {
 
     @Published public var items: [BatchItem] = []
     @Published public var selectedID: UUID?
+    /// Ephemeral cache-bust tokens for sources that became readable without
+    /// changing URL (for example, a phone original hydrated into `blobs/`).
+    /// Views key their image loaders with the selected photo's revision so a
+    /// first failed read is retried once the bytes arrive.
+    @Published public private(set) var sourceRevisions: [UUID: Int] = [:]
     private var loadingSelection = false
 
     /// The selected photo's file, mirrored for the preview pane.
@@ -736,6 +743,19 @@ public final class MergeModel: ObservableObject {
         select(items[i + delta].id)
     }
 
+    /// Notify image consumers that a photo's bytes are now available at the
+    /// same URL they may already have tried (and failed) to decode.
+    public func markSourceAvailable(_ id: UUID) {
+        var revisions = sourceRevisions
+        revisions[id, default: 0] &+= 1
+        sourceRevisions = revisions
+    }
+
+    public func sourceRevision(for id: UUID?) -> Int {
+        guard let id else { return 0 }
+        return sourceRevisions[id, default: 0]
+    }
+
     // MARK: Queue mutation
 
     /// Transient note shown when dropped files were skipped (wrong type), so a
@@ -801,6 +821,7 @@ public final class MergeModel: ObservableObject {
         // Prune the metadata ledger — a stale hash here made a removed photo
         // impossible to re-add ("duplicate" of itself, P3 review finding).
         photoMeta.removeValue(forKey: id)
+        sourceRevisions.removeValue(forKey: id)
         defer { schedulePersist() }
         guard wasSelected else { return }
         if let next = items[safe: idx] ?? items.last {
@@ -813,6 +834,7 @@ public final class MergeModel: ObservableObject {
     public func clearQueue() {
         items.removeAll()
         photoMeta.removeAll()
+        sourceRevisions.removeAll()
         clearSelection()
         schedulePersist()
     }

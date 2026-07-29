@@ -33,6 +33,23 @@ final class BatchModelTests: XCTestCase {
 
     // MARK: Queue building
 
+    func testSourceAvailabilityRevisionIsScopedToHydratedPhoto() {
+        let model = MergeModel()
+        let first = UUID()
+        let second = UUID()
+
+        XCTAssertEqual(model.sourceRevision(for: first), 0)
+        XCTAssertEqual(model.sourceRevision(for: second), 0)
+
+        model.markSourceAvailable(first)
+        XCTAssertEqual(model.sourceRevision(for: first), 1)
+        XCTAssertEqual(model.sourceRevision(for: second), 0)
+
+        model.markSourceAvailable(first)
+        XCTAssertEqual(model.sourceRevision(for: first), 2)
+        XCTAssertEqual(model.sourceRevision(for: nil), 0)
+    }
+
     func testAddFilesDedupsByPath() {
         let m = MergeModel()
         m.addFiles([url("a"), url("b"), url("a")])   // "a" twice

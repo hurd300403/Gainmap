@@ -112,6 +112,7 @@ final class PreviewRenderer: ObservableObject {
 
     // The cached, downscaled SDR base (for the live proxy).
     private var baseURL: URL?
+    private var baseSourceRevision: Int?
     private var baseImage: CIImage?
     private var loadTask: Task<Void, Never>?
     private var accurateTask: Task<Void, Never>?
@@ -139,7 +140,8 @@ final class PreviewRenderer: ObservableObject {
     ///
     /// Both stages use the SAME params, so the live proxy can't show a different
     /// look than the file actually saves.
-    func request(sdr: URL?, params: AutoHDR.BloomParams, bake: Bool = false) {
+    func request(sdr: URL?, params: AutoHDR.BloomParams, bake: Bool = false,
+                 sourceRevision: Int = 0) {
         // Stash the latest inputs so a base-load that finishes later renders with
         // CURRENT params, not whatever they were when the load kicked off.
         curParams = params; curBake = bake
@@ -147,17 +149,19 @@ final class PreviewRenderer: ObservableObject {
         guard let sdr else {
             loadTask?.cancel(); accurateTask?.cancel()
             image = nil; original = nil; aspect = nil
-            baseImage = nil; baseURL = nil; rendering = false
+            baseImage = nil; baseURL = nil; baseSourceRevision = nil
+            rendering = false
             return
         }
 
-        if sdr != baseURL {
+        if sdr != baseURL || sourceRevision != baseSourceRevision {
             // New photo: cancel any in-flight render of the previous photo and drop
             // BOTH the stale HDR render and its original immediately — otherwise a
             // press-and-hold in the brief load window would compare against (or show)
             // the photo you came from. `hasImage` then stays false until this photo's
             // own render lands, so the gesture can't arm against a stale frame.
             baseURL = sdr
+            baseSourceRevision = sourceRevision
             baseImage = nil; original = nil; image = nil
             loadTask?.cancel(); accurateTask?.cancel()
             loadTask = Task { [weak self] in
@@ -168,7 +172,9 @@ final class PreviewRenderer: ObservableObject {
                 // Guard by PHOTO IDENTITY, not generation: a same-photo re-request
                 // (param/gamut change) must NOT discard this load, or baseImage /
                 // original get stuck on the previous photo.
-                guard let self, self.baseURL == sdr else { return }
+                guard let self,
+                      self.baseURL == sdr,
+                      self.baseSourceRevision == sourceRevision else { return }
                 self.baseImage = base
                 self.original = base
                 self.aspect = base.map { $0.extent.width / max(1, $0.extent.height) }
@@ -274,6 +280,8 @@ struct HDRPreviewPane: View {
     /// Bake the soft bloom into the SDR base (vs HDR-only glow) — affects the
     /// settled render so the preview reflects the chosen export mode.
     var bake: Bool = false
+    /// Changes when bytes arrive at an otherwise unchanged file URL.
+    var sourceRevision: Int = 0
     /// Inline height (ignored when `expanded`, which fills the docked column).
     var height: CGFloat = 203
     /// Docked-to-side mode: taller, fills available height, collapse icon.
@@ -394,6 +402,7 @@ struct HDRPreviewPane: View {
                 }
         )
         .onChange(of: sdrURL) { _, _ in resetHold(); rerender() }
+        .onChange(of: sourceRevision) { _, _ in resetHold(); rerender() }
         // Editing while viewing/locked to the original would leave a frozen,
         // dead-looking control (the SDR base doesn't change with HDR params) —
         // auto-unlock back to HDR so the change is visible.
@@ -403,7 +412,11 @@ struct HDRPreviewPane: View {
     }
 
     private func rerender() {
-        renderer.request(sdr: sdrURL, params: params, bake: bake)
+        renderer.request(
+            sdr: sdrURL,
+            params: params,
+            bake: bake,
+            sourceRevision: sourceRevision)
     }
 
     // MARK: Hold-to-lock helpers
