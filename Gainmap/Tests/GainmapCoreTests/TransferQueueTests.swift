@@ -113,6 +113,37 @@ final class TransferQueueTests: XCTestCase {
         XCTAssertTrue(q.transfers.isEmpty)
     }
 
+    func testUploadProgressIsMonotonicClampedAndCompletes() {
+        var q = queue([(hashA, "originals", 100)])
+        let id = "originals_\(hashA)"
+        q.beganReserving(id: id)
+        q.reserved(id: id, expiresAt: t0.addingTimeInterval(600))
+        q.updateProgress(id: id, completedBytes: 40)
+        q.updateProgress(id: id, completedBytes: 20)
+        XCTAssertEqual(q.transfer(id: id)?.bytesTransferred, 40)
+        q.updateProgress(id: id, completedBytes: 140)
+        XCTAssertEqual(q.transfer(id: id)?.bytesTransferred, 100)
+        q.uploadSucceeded(id: id)
+        XCTAssertEqual(q.transfer(id: id)?.bytesTransferred, 100)
+    }
+
+    func testSessionMetricsUseRealTransferredBytes() {
+        var photo = PhotoRecord(origin: .linked(path: "/photo.jpg"))
+        photo.contentHash = hashA
+        let session = Session(photos: [photo])
+        var q = queue([(hashA, "originals", 100)])
+        let id = "originals_\(hashA)"
+        q.beganReserving(id: id)
+        q.reserved(id: id, expiresAt: t0.addingTimeInterval(600))
+        q.updateProgress(id: id, completedBytes: 35)
+
+        let metrics = SessionSyncMetrics.calculate(
+            sessions: [session], journal: nil, transfers: q)
+        XCTAssertTrue(metrics.pendingSessionIDs.contains(session.id))
+        XCTAssertEqual(
+            metrics.progressBySessionID[session.id] ?? -1, 0.35, accuracy: 0.001)
+    }
+
     func testRepeatedLeaseDenialsParkInsteadOfHotLooping() {
         // A finalize 403 is indistinguishable from a permanent rules denial;
         // a REAL expiry heals after one fresh lease, so consecutive denials
@@ -156,6 +187,7 @@ final class TransferQueueTests: XCTestCase {
         """
         let q = try! JSONDecoder().decode(TransferQueue.self, from: Data(json.utf8))
         XCTAssertEqual(q.transfers.first?.leaseDenials, 0)
+        XCTAssertEqual(q.transfers.first?.bytesTransferred, 0)
         XCTAssertEqual(q.transfers.first?.attempts, 1)
     }
 

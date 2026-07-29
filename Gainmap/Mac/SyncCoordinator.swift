@@ -44,6 +44,7 @@ final class SyncCoordinator: ObservableObject {
     private var failedThumbs: Set<String> = []
     private var refreshTask: Task<Void, Never>?
     private var refreshQueued = false
+    private var progressRefreshTask: Task<Void, Never>?
     private var refreshGeneration = 0
 
     var hasOutstandingCloudWork: Bool {
@@ -117,9 +118,12 @@ final class SyncCoordinator: ObservableObject {
         await model.flushSession()
         if let engine {
             await engine.setOnRemoteChange(nil)
+            await engine.setOnTransferProgress(nil)
             await engine.stop()
             self.engine = nil
         }
+        progressRefreshTask?.cancel()
+        progressRefreshTask = nil
         model.onSessionPersisted = nil
         syncing = false
         initialSyncComplete = false
@@ -152,6 +156,11 @@ final class SyncCoordinator: ObservableObject {
         await engine.setOnRemoteChange { [weak self] sessionID in
             Task { @MainActor in
                 await self?.remoteChanged(sessionID, expectedUID: uid)
+            }
+        }
+        await engine.setOnTransferProgress { [weak self] in
+            Task { @MainActor in
+                self?.transferProgressChanged(expectedUID: uid)
             }
         }
         await engine.start()
@@ -199,6 +208,17 @@ final class SyncCoordinator: ObservableObject {
             }
         }
         scheduleRefresh()
+    }
+
+    private func transferProgressChanged(expectedUID: String) {
+        guard currentUID == expectedUID, progressRefreshTask == nil else { return }
+        progressRefreshTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 120_000_000)
+            guard let self, !Task.isCancelled,
+                  self.currentUID == expectedUID else { return }
+            self.progressRefreshTask = nil
+            self.scheduleRefresh()
+        }
     }
 
     /// Foreground hook: retry parked transfers + drain anything pending.
@@ -250,12 +270,12 @@ final class SyncCoordinator: ObservableObject {
         let sessions = await store.loadAll()
         let journal = await engine?.journalSnapshot
         let transfers = await engine?.transferSnapshot
-        let pendingSessionIDs = Self.pendingSessionIDs(
+        let metrics = SessionSyncMetrics.calculate(
             sessions: sessions, journal: journal, transfers: transfers)
         var missing: [String] = []
         let localCards = buildCards(
             sessions: sessions,
-            pendingSessionIDs: pendingSessionIDs,
+            metrics: metrics,
             collectMissing: &missing)
 
         guard generation == refreshGeneration else { return }
@@ -300,12 +320,12 @@ final class SyncCoordinator: ObservableObject {
         var ignored: [String] = []
         cards = buildCards(
             sessions: fresh,
-            pendingSessionIDs: pendingSessionIDs,
+            metrics: metrics,
             collectMissing: &ignored)
     }
 
     private func buildCards(sessions: [Session],
-                            pendingSessionIDs: Set<UUID>,
+                            metrics: SessionSyncMetrics,
                             collectMissing: inout [String]) -> [SessionCard] {
         guard let store else { return [] }
         let fm = FileManager.default
@@ -332,34 +352,9 @@ final class SyncCoordinator: ObservableObject {
                 photoCount: session.photos.count,
                 updatedAt: session.updatedAt,
                 covers: covers,
-                pendingSync: pendingSessionIDs.contains(session.id))
+                pendingSync: metrics.pendingSessionIDs.contains(session.id),
+                syncProgress: metrics.progressBySessionID[session.id])
         }
-    }
-
-    private static func pendingSessionIDs(
-        sessions: [Session],
-        journal: ChangeJournal?,
-        transfers: TransferQueue?
-    ) -> Set<UUID> {
-        var pending = Set<UUID>()
-        for entry in journal?.entries ?? [] {
-            switch entry.target {
-            case .session(let id), .photo(let id, _):
-                pending.insert(id)
-            case .user:
-                break
-            }
-        }
-        let activeHashes = Set((transfers?.transfers ?? [])
-            .filter { $0.status != .done }
-            .map(\.contentHash))
-        guard !activeHashes.isEmpty else { return pending }
-        for session in sessions where session.photos.contains(where: {
-            $0.contentHash.map(activeHashes.contains) ?? false
-        }) {
-            pending.insert(session.id)
-        }
-        return pending
     }
 
     @discardableResult

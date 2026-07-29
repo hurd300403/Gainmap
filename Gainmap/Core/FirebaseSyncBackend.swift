@@ -230,13 +230,22 @@ public final class FirebaseSyncBackend: SyncBackend, @unchecked Sendable {
 
     // ------------------------------------------------------------- storage
 
-    public func uploadObject(objectName: String, fileURL: URL) async throws {
+    public func uploadObject(
+        objectName: String,
+        fileURL: URL,
+        onProgress: @escaping @Sendable (Int64) -> Void
+    ) async throws {
         let ref = storage.reference(withPath: objectName)
         let metadata = StorageMetadata()
         metadata.contentType = "image/jpeg"
         metadata.cacheControl = "private, max-age=31536000, immutable"
         do {
-            _ = try await ref.putFileAsync(from: fileURL, metadata: metadata)
+            _ = try await ref.putFileAsync(
+                from: fileURL,
+                metadata: metadata,
+                onProgress: { progress in
+                    onProgress(progress?.completedUnitCount ?? 0)
+                })
         } catch {
             throw Self.mapStorageError(error)
         }

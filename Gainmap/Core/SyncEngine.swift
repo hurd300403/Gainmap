@@ -138,9 +138,14 @@ public actor SyncEngine {
     /// Fired after inbound changes land in the local store (materialize,
     /// tombstone adoption, purge) — the app refreshes its grid/editor.
     private var onRemoteChange: (@Sendable (UUID) -> Void)?
+    private var onTransferProgress: (@Sendable () -> Void)?
 
     public func setOnRemoteChange(_ handler: (@Sendable (UUID) -> Void)?) {
         onRemoteChange = handler
+    }
+
+    public func setOnTransferProgress(_ handler: (@Sendable () -> Void)?) {
+        onTransferProgress = handler
     }
 
     private func noteRemoteChange(_ sessionID: UUID) {
@@ -832,18 +837,33 @@ public actor SyncEngine {
             // earlier launch) already finalized it: done.
             if try await backend.objectExists(objectName: objectName) {
                 state.transfers.markAlreadyUploaded(id: t.id)
+                onTransferProgress?()
                 return
             }
             try await backend.uploadObject(
                 objectName: objectName,
-                fileURL: URL(fileURLWithPath: t.sourcePath))
+                fileURL: URL(fileURLWithPath: t.sourcePath),
+                onProgress: { [weak self] completedBytes in
+                    Task {
+                        await self?.recordTransferProgress(
+                            id: t.id, completedBytes: completedBytes)
+                    }
+                })
             state.transfers.uploadSucceeded(id: t.id)
+            onTransferProgress?()
         } catch SyncBackendError.storageDenied {
             state.transfers.failed(id: t.id, failure: .leaseExpired, now: now)
+            onTransferProgress?()
         } catch {
             state.transfers.failed(
                 id: t.id, failure: .transient(String(describing: error)), now: now)
+            onTransferProgress?()
         }
+    }
+
+    private func recordTransferProgress(id: String, completedBytes: Int64) {
+        state.transfers.updateProgress(id: id, completedBytes: completedBytes)
+        onTransferProgress?()
     }
 
     // ------------------------------------------------------------- listeners

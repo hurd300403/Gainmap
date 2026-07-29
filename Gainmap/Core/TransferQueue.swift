@@ -41,6 +41,11 @@ public struct Transfer: Codable, Equatable, Sendable, Identifiable {
     /// Absolute path of the bytes to upload (original file or generated thumb).
     public var sourcePath: String
     public var status: Status
+    /// Bytes accepted by the active upload task. Persisted so the UI can
+    /// restore a truthful perimeter state after ordinary state writes; an
+    /// interrupted transfer resets to zero because Firebase resumes it as a
+    /// fresh task on the next launch.
+    public var bytesTransferred: Int64
     public var attempts: Int
     public var lastError: String?
     /// The reservation's completion deadline (r7 single deadline).
@@ -54,12 +59,16 @@ public struct Transfer: Codable, Equatable, Sendable, Identifiable {
 
     public init(contentHash: String, tier: String, byteSize: Int64, sourcePath: String,
                 status: Status = .queued, attempts: Int = 0, lastError: String? = nil,
-                expiresAt: Date? = nil, nextRetryAt: Date? = nil, leaseDenials: Int = 0) {
+                expiresAt: Date? = nil, nextRetryAt: Date? = nil, leaseDenials: Int = 0,
+                bytesTransferred: Int64 = 0) {
         self.contentHash = contentHash
         self.tier = tier
         self.byteSize = byteSize
         self.sourcePath = sourcePath
         self.status = status
+        self.bytesTransferred = status == .done && bytesTransferred == 0
+            ? byteSize
+            : min(max(bytesTransferred, 0), byteSize)
         self.attempts = attempts
         self.lastError = lastError
         self.expiresAt = expiresAt
@@ -71,7 +80,7 @@ public struct Transfer: Codable, Equatable, Sendable, Identifiable {
     // sync-state.json (a failed decode silently drops the whole queue —
     // review P4-18).
     private enum CodingKeys: String, CodingKey {
-        case contentHash, tier, byteSize, sourcePath, status, attempts
+        case contentHash, tier, byteSize, sourcePath, status, bytesTransferred, attempts
         case lastError, expiresAt, nextRetryAt, leaseDenials
     }
 
@@ -82,6 +91,11 @@ public struct Transfer: Codable, Equatable, Sendable, Identifiable {
         byteSize = try c.decodeIfPresent(Int64.self, forKey: .byteSize) ?? 0
         sourcePath = try c.decodeIfPresent(String.self, forKey: .sourcePath) ?? ""
         status = try c.decodeIfPresent(Status.self, forKey: .status) ?? .queued
+        let restoredBytes = try c.decodeIfPresent(
+            Int64.self, forKey: .bytesTransferred)
+        bytesTransferred = min(
+            max(restoredBytes ?? (status == .done ? byteSize : 0), 0),
+            byteSize)
         attempts = try c.decodeIfPresent(Int.self, forKey: .attempts) ?? 0
         lastError = try c.decodeIfPresent(String.self, forKey: .lastError)
         expiresAt = try c.decodeIfPresent(Date.self, forKey: .expiresAt)
@@ -161,6 +175,7 @@ public struct TransferQueue: Codable, Equatable, Sendable {
             transfers[i].sourcePath = sourcePath
             if transfers[i].status == .parked {
                 transfers[i].status = .queued
+                transfers[i].bytesTransferred = 0
                 transfers[i].attempts = 0
                 transfers[i].nextRetryAt = nil
             }
@@ -174,6 +189,7 @@ public struct TransferQueue: Codable, Equatable, Sendable {
     public mutating func markAlreadyUploaded(id: String) {
         guard let i = index(id) else { return }
         transfers[i].status = .done
+        transfers[i].bytesTransferred = transfers[i].byteSize
         transfers[i].lastError = nil
     }
 
@@ -211,6 +227,7 @@ public struct TransferQueue: Codable, Equatable, Sendable {
     public mutating func beganReserving(id: String) {
         guard let i = index(id) else { return }
         transfers[i].status = .reserving
+        transfers[i].bytesTransferred = 0
     }
 
     public mutating func reserved(id: String, expiresAt: Date) {
@@ -223,13 +240,24 @@ public struct TransferQueue: Codable, Equatable, Sendable {
     public mutating func uploadSucceeded(id: String) {
         guard let i = index(id) else { return }
         transfers[i].status = .done
+        transfers[i].bytesTransferred = transfers[i].byteSize
         transfers[i].lastError = nil
         transfers[i].nextRetryAt = nil
         transfers[i].leaseDenials = 0
     }
 
+    /// Live byte progress from the storage SDK. Monotonic within one upload;
+    /// stale callbacks after success/failure are ignored.
+    public mutating func updateProgress(id: String, completedBytes: Int64) {
+        guard let i = index(id), transfers[i].status == .uploading else { return }
+        transfers[i].bytesTransferred = min(
+            max(transfers[i].bytesTransferred, completedBytes),
+            transfers[i].byteSize)
+    }
+
     public mutating func failed(id: String, failure: TransferFailure, now: Date) {
         guard let i = index(id) else { return }
+        transfers[i].bytesTransferred = 0
         switch failure {
         case .leaseExpired:
             // r7 contract: a genuine mid-upload lease expiry is not a strike —
@@ -277,6 +305,7 @@ public struct TransferQueue: Codable, Equatable, Sendable {
             switch transfers[i].status {
             case .parked:
                 transfers[i].status = .queued
+                transfers[i].bytesTransferred = 0
                 transfers[i].attempts = 0
                 transfers[i].leaseDenials = 0
                 transfers[i].nextRetryAt = nil
@@ -293,6 +322,7 @@ public struct TransferQueue: Codable, Equatable, Sendable {
     public mutating func quotaChanged() {
         for i in transfers.indices where transfers[i].status == .quotaExceeded {
             transfers[i].status = .queued
+            transfers[i].bytesTransferred = 0
             transfers[i].attempts = 0
             transfers[i].nextRetryAt = nil
         }
@@ -306,6 +336,7 @@ public struct TransferQueue: Codable, Equatable, Sendable {
             let s = transfers[i].status
             if s == .reserving || s == .uploading {
                 transfers[i].status = .queued
+                transfers[i].bytesTransferred = 0
             }
         }
     }

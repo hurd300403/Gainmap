@@ -30,6 +30,7 @@ public enum Theme {
     public static let goldDeep  = Color(hex: 0xD4A96A)
     public static let info      = Color(hex: 0xF0A878)   // light orange — info ⓘ glyphs (legible on dark)
     public static let warn      = Color(hex: 0xF0A03C)   // amber — boost/overblow warnings
+    public static let syncGreen = Color(hex: 0x2D8548)   // calm, legible synced state
     public static let stone     = Color(hex: 0xDAD7CE)
     public static let stoneDim  = Color(hex: 0xDAD7CE).opacity(0.45)
     public static let stoneFaint = Color(hex: 0xDAD7CE).opacity(0.32)   // was 0.16 — unreadable at small sizes

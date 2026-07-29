@@ -112,7 +112,11 @@ public protocol SyncBackend: Sendable {
 
     /// Upload a local file to its content-addressed object. Throws
     /// SyncBackendError.storageDenied on a rules 403 (lease expired).
-    func uploadObject(objectName: String, fileURL: URL) async throws
+    func uploadObject(
+        objectName: String,
+        fileURL: URL,
+        onProgress: @escaping @Sendable (Int64) -> Void
+    ) async throws
 
     /// Download an object to a local file (thumbs/originals hydration).
     func downloadObject(objectName: String, to fileURL: URL) async throws

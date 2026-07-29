@@ -350,7 +350,7 @@ private struct MacSessionLibrary: View {
         switch auth.state {
         case .ready:
             return sync.hasSyncIssue ? Theme.warn
-                : (sync.pendingWorkCount > 0 ? Theme.gold : Color.green)
+                : (sync.pendingWorkCount > 0 ? Theme.gold : Theme.syncGreen)
         case .admitting:
             return Theme.gold
         case .signedOut, .failed, .waitlisted:
@@ -381,12 +381,17 @@ private struct MacSessionLibrary: View {
         case .signedOut, .waitlisted:
             return .neutral
         case .failed:
-            return card.pendingSync ? .issue : .neutral
+            return card.pendingSync ? .issue(card.syncProgress) : .neutral
         case .admitting:
-            return .pending
+            return .pending(0)
         case .ready:
-            if sync.hasSyncIssue, card.pendingSync { return .issue }
-            if !sync.initialSyncComplete || card.pendingSync { return .pending }
+            if sync.hasSyncIssue, card.pendingSync {
+                return .issue(card.syncProgress)
+            }
+            if !sync.initialSyncComplete {
+                return .pending(card.pendingSync ? card.syncProgress : 0)
+            }
+            if card.pendingSync { return .pending(card.syncProgress) }
             return .synced
         }
     }
@@ -505,7 +510,7 @@ private struct SyncStatusEmblem: View {
         case .localOnly: return Theme.stoneFaint
         case .connecting: return Theme.gold
         case .syncing: return Theme.accent
-        case .synced: return .green
+        case .synced: return Theme.syncGreen
         case .issue: return Theme.warn
         }
     }

@@ -20,23 +20,104 @@ public struct SessionCard: Identifiable, Equatable {
     public let covers: [URL?]
     /// True while local edits/uploads for this session haven't fully synced.
     public let pendingSync: Bool
+    /// Byte-weighted completion of this session's known upload work.
+    public let syncProgress: Double
 
     public init(id: UUID, title: String, photoCount: Int, updatedAt: Date,
-                covers: [URL?], pendingSync: Bool) {
+                covers: [URL?], pendingSync: Bool, syncProgress: Double? = nil) {
         self.id = id
         self.title = title
         self.photoCount = photoCount
         self.updatedAt = updatedAt
         self.covers = Array(covers.prefix(4))
         self.pendingSync = pendingSync
+        self.syncProgress = min(max(
+            syncProgress ?? (pendingSync ? 0 : 1), 0), 1)
     }
 }
 
 public enum SessionCardSyncState: Equatable {
     case neutral
     case synced
-    case pending
-    case issue
+    case pending(Double)
+    case issue(Double)
+
+    fileprivate var progress: Double? {
+        switch self {
+        case .neutral: return nil
+        case .synced: return 1
+        case .pending(let progress), .issue(let progress):
+            return min(max(progress, 0), 1)
+        }
+    }
+
+    fileprivate var color: Color {
+        switch self {
+        case .neutral: return Theme.line
+        case .synced: return Theme.syncGreen
+        case .pending: return Theme.gold
+        case .issue: return .red
+        }
+    }
+}
+
+/// Shared Mac/iOS projection of persisted sync work into per-session
+/// progress. File uploads are byte-weighted; pending metadata keeps a card
+/// below 100% until the server acknowledges it.
+public struct SessionSyncMetrics {
+    public let pendingSessionIDs: Set<UUID>
+    public let progressBySessionID: [UUID: Double]
+
+    public static func calculate(
+        sessions: [Session],
+        journal: ChangeJournal?,
+        transfers: TransferQueue?
+    ) -> SessionSyncMetrics {
+        let pendingMetadataSessionIDs = Set(
+            (journal?.entries ?? []).compactMap { sessionID(for: $0.target) })
+        let allTransfers = transfers?.transfers ?? []
+        var pending = Set<UUID>()
+        var progress: [UUID: Double] = [:]
+
+        for session in sessions {
+            let hashes = Set(session.photos.compactMap(\.contentHash))
+            let related = allTransfers.filter { hashes.contains($0.contentHash) }
+            let metadataIsPending = pendingMetadataSessionIDs.contains(session.id)
+            let uploadsArePending = related.contains { $0.status != .done }
+
+            guard metadataIsPending || uploadsArePending else {
+                progress[session.id] = 1
+                continue
+            }
+
+            pending.insert(session.id)
+            let totalBytes = related.reduce(Int64(0)) { $0 + max($1.byteSize, 0) }
+            let completedBytes = related.reduce(Int64(0)) { sum, transfer in
+                sum + (transfer.status == .done
+                       ? max(transfer.byteSize, 0)
+                       : min(max(transfer.bytesTransferred, 0),
+                             max(transfer.byteSize, 0)))
+            }
+            var fraction = totalBytes > 0
+                ? Double(completedBytes) / Double(totalBytes)
+                : 0
+            if metadataIsPending {
+                fraction = min(fraction, 0.99)
+            }
+            progress[session.id] = min(max(fraction, 0), 1)
+        }
+
+        return SessionSyncMetrics(
+            pendingSessionIDs: pending,
+            progressBySessionID: progress)
+    }
+
+    private static func sessionID(for target: SyncTarget) -> UUID? {
+        switch target {
+        case .session(let id), .photo(let id, _): return id
+        case .user: return nil
+        }
+    }
 }
 
 public struct SessionGridView: View {
@@ -79,7 +160,10 @@ public struct SessionGridView: View {
         let button = Button { onOpen(card.id) } label: {
             SessionCardView(
                 card: card,
-                syncState: syncState?(card) ?? (card.pendingSync ? .pending : .neutral))
+                syncState: syncState?(card)
+                    ?? (card.pendingSync
+                        ? .pending(card.syncProgress)
+                        : .neutral))
         }
         .buttonStyle(.plain)
 
@@ -119,23 +203,6 @@ struct SessionCardView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                 .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .stroke(Theme.line, lineWidth: 1))
-                .overlay(alignment: .topTrailing) {
-                    if syncState == .pending {
-                        Image(systemName: "arrow.triangle.2.circlepath")
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(Theme.gold)
-                            .padding(5)
-                            .background(.black.opacity(0.55), in: Circle())
-                            .padding(6)
-                    } else if syncState == .issue {
-                        Image(systemName: "exclamationmark")
-                            .font(.system(size: 10, weight: .bold))
-                            .foregroundStyle(.white)
-                            .padding(6)
-                            .background(Color.red.opacity(0.88), in: Circle())
-                            .padding(6)
-                    }
-                }
             VStack(alignment: .leading, spacing: 2) {
                 Text(card.title.isEmpty ? "Untitled session" : card.title)
                     .font(Theme.ui(14, .semibold)).foregroundStyle(Theme.stone)
@@ -154,20 +221,22 @@ struct SessionCardView: View {
                     in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .stroke(cardBorderColor,
-                        lineWidth: syncState == .neutral ? 1 : 2)
+                .stroke(
+                    syncState == .neutral
+                        ? Theme.line
+                        : syncState.color.opacity(0.22),
+                    lineWidth: 2)
+            if let progress = syncState.progress, progress > 0 {
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .trim(from: 0, to: progress)
+                    .stroke(
+                        syncState.color,
+                        style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
+            }
         }
-        .shadow(color: cardBorderColor.opacity(syncState == .neutral ? 0 : 0.18),
-                radius: 6)
-    }
-
-    private var cardBorderColor: Color {
-        switch syncState {
-        case .neutral: return Theme.line
-        case .synced: return .green
-        case .pending: return Theme.gold
-        case .issue: return .red
-        }
+        .shadow(
+            color: syncState.color.opacity(syncState == .neutral ? 0 : 0.12),
+            radius: 5)
     }
 }
 

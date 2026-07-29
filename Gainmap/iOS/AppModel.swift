@@ -64,6 +64,7 @@ final class AppModel: ObservableObject {
     private var failedThumbs: Set<String> = []
     private var refreshTask: Task<Void, Never>?
     private var refreshQueued = false
+    private var progressRefreshTask: Task<Void, Never>?
 
     /// Stable per-install device identity (the `by` in rev metadata).
     static var deviceID: String {
@@ -105,6 +106,11 @@ final class AppModel: ObservableObject {
             await engine.setOnRemoteChange { [weak self] id in
                 Task { @MainActor in await self?.remoteChanged(id, expectedUID: uid) }
             }
+            await engine.setOnTransferProgress { [weak self] in
+                Task { @MainActor in
+                    self?.transferProgressChanged(expectedUID: uid)
+                }
+            }
             await engine.start()
             syncing = true
             syncPassInFlight = true
@@ -123,9 +129,12 @@ final class AppModel: ObservableObject {
     private func deactivate(clearCards: Bool = true) async {
         refreshTask?.cancel()
         refreshTask = nil
+        progressRefreshTask?.cancel()
+        progressRefreshTask = nil
         refreshQueued = false
         if let engine {
             await engine.setOnRemoteChange(nil)
+            await engine.setOnTransferProgress(nil)
             await engine.stop()
         }
         engine = nil
@@ -179,6 +188,17 @@ final class AppModel: ObservableObject {
         scheduleRefresh()
     }
 
+    private func transferProgressChanged(expectedUID: String) {
+        guard activeUID == expectedUID, progressRefreshTask == nil else { return }
+        progressRefreshTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 120_000_000)
+            guard let self, !Task.isCancelled,
+                  self.activeUID == expectedUID else { return }
+            self.progressRefreshTask = nil
+            self.scheduleRefresh()
+        }
+    }
+
     // ------------------------------------------------------------- grid data
 
     /// Coalesced refresh: at most one in flight; calls that land mid-run
@@ -214,11 +234,12 @@ final class AppModel: ObservableObject {
         // Phase 1 — LOCAL ONLY, no network: publish immediately so the grid
         // never sits on "No sessions yet" behind downloads.
         let sessions = await store.loadAll()
-        var pendingSessionIDs = Set<UUID>()
+        var metrics = SessionSyncMetrics.calculate(
+            sessions: sessions, journal: nil, transfers: nil)
         if let engine {
             let transfers = await engine.transferSnapshot
             let journal = await engine.journalSnapshot
-            pendingSessionIDs = Self.pendingSessionIDs(
+            metrics = SessionSyncMetrics.calculate(
                 sessions: sessions, journal: journal, transfers: transfers)
             pendingWorkCount = journal.entries.count
                 + transfers.transfers.filter { $0.status != .done }.count
@@ -231,7 +252,7 @@ final class AppModel: ObservableObject {
         var missing: [String] = []   // thumb hashes to hydrate in phase 2
         cards = buildCards(
             sessions: sessions,
-            pendingSessionIDs: pendingSessionIDs,
+            metrics: metrics,
             collectMissing: &missing)
         initialLoadDone = true
 
@@ -266,14 +287,14 @@ final class AppModel: ObservableObject {
         var ignored: [String] = []
         cards = buildCards(
             sessions: fresh,
-            pendingSessionIDs: pendingSessionIDs,
+            metrics: metrics,
             collectMissing: &ignored)
     }
 
     /// Cover URL preference: local thumb file if present; else the photo's
     /// own local source file (imports on this device); else nil (placeholder)
     /// with the hash queued for hydration.
-    private func buildCards(sessions: [Session], pendingSessionIDs: Set<UUID>,
+    private func buildCards(sessions: [Session], metrics: SessionSyncMetrics,
                             collectMissing: inout [String]) -> [SessionCard] {
         let fm = FileManager.default
         guard let store else { return [] }
@@ -302,34 +323,9 @@ final class AppModel: ObservableObject {
                 photoCount: session.photos.count,
                 updatedAt: session.updatedAt,
                 covers: covers,
-                pendingSync: pendingSessionIDs.contains(session.id))
+                pendingSync: metrics.pendingSessionIDs.contains(session.id),
+                syncProgress: metrics.progressBySessionID[session.id])
         }
-    }
-
-    private static func pendingSessionIDs(
-        sessions: [Session],
-        journal: ChangeJournal,
-        transfers: TransferQueue
-    ) -> Set<UUID> {
-        var pending = Set<UUID>()
-        for entry in journal.entries {
-            switch entry.target {
-            case .session(let id), .photo(let id, _):
-                pending.insert(id)
-            case .user:
-                break
-            }
-        }
-        let activeHashes = Set(transfers.transfers
-            .filter { $0.status != .done }
-            .map(\.contentHash))
-        guard !activeHashes.isEmpty else { return pending }
-        for session in sessions where session.photos.contains(where: {
-            $0.contentHash.map(activeHashes.contains) ?? false
-        }) {
-            pending.insert(session.id)
-        }
-        return pending
     }
 
     // ------------------------------------------------------------- actions

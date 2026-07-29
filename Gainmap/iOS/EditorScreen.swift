@@ -2,12 +2,13 @@
 //  EditorScreen.swift
 //  Gainmap for iPhone (P5)
 //
-//  The compact editor, built around SCREEN REAL ESTATE: no header row —
-//  back/share float over the photo; the session title cubbyholes into the
-//  controls sheet; and the sheet's RESTING height is computed from the
-//  photo's aspect ratio, so it rises to kiss the bottom of the image
-//  (landscape = tall sheet, portrait = image gets the room) instead of
-//  covering it. Same LookControlsPanel as the Mac, tabbed (concept D).
+//  The compact editor, built around SCREEN REAL ESTATE: back/share use spare
+//  gutters or a top rail when the fitted image leaves room, and fall back to
+//  contrast-sampled overlays only when it fills the stage. The session title
+//  cubbyholes into the controls sheet; and the sheet's RESTING height is
+//  computed from the photo's aspect ratio, so it rises to kiss the bottom of
+//  the image (landscape = tall sheet, portrait = image gets the room) instead
+//  of covering it. Same LookControlsPanel as the Mac, tabbed (concept D).
 //
 
 import SwiftUI
@@ -15,6 +16,17 @@ import CoreImage
 import ImageIO
 import PhotosUI
 import GainmapCore
+
+private enum PreviewChromePlacement: Equatable {
+    case topRail
+    case sideGutters
+    case overlay
+}
+
+private struct PreviewChromeTone: Equatable, Sendable {
+    var leadingIsDark = true
+    var trailingIsDark = true
+}
 
 struct EditorScreen: View {
     @EnvironmentObject private var appModel: AppModel
@@ -29,6 +41,7 @@ struct EditorScreen: View {
     @State private var controlsPresented = false
     @State private var comparing = false
     @State private var baseImage: CIImage?
+    @State private var previewChromeTone = PreviewChromeTone()
     @State private var hydrating = false
     @State private var showGlowInSDRModal = false
     @State private var shareURL: URL?
@@ -79,6 +92,7 @@ struct EditorScreen: View {
     private let stripHeight: CGFloat = 58
     private let hGap: CGFloat = 10
     private let minResting: CGFloat = 190
+    private let chromeRailHeight: CGFloat = 42
 
     private var controlsCollapsed: Bool {
         detentSelection == .height(collapsedDetentHeight)
@@ -89,9 +103,14 @@ struct EditorScreen: View {
             ZStack {
                 Theme.bg.ignoresSafeArea()
                 let fitted = fittedImageSize(in: geo)
+                let chromePlacement = previewChromePlacement(in: geo, fitted: fitted)
                 VStack(spacing: hGap) {
-                    preview
-                        .frame(width: fitted.width, height: fitted.height)
+                    previewStage(
+                        fitted: fitted,
+                        availableWidth: geo.size.width - 20,
+                        placement: chromePlacement)
+                        .frame(height: fitted.height
+                               + (chromePlacement == .topRail ? chromeRailHeight : 0))
                         .frame(maxWidth: .infinity)
                     if controlsCollapsed {
                         thumbnailGrid
@@ -140,7 +159,9 @@ struct EditorScreen: View {
     /// (clamped so it never eats more than ~half the screen at rest).
     private func recomputeResting(geo: GeometryProxy) {
         let fitted = fittedImageSize(in: geo)
-        let usedAbove = fitted.height + stripHeight + hGap * 2 + 2
+        let chromeHeight = previewChromePlacement(in: geo, fitted: fitted) == .topRail
+            ? chromeRailHeight : 0
+        let usedAbove = fitted.height + chromeHeight + stripHeight + hGap * 2 + 2
         let free = geo.size.height + geo.safeAreaInsets.bottom - usedAbove
         let clamped = max(minResting, min(free, geo.size.height * 0.48))
         guard abs(clamped - restingDetent) > 1 else { return }
@@ -149,9 +170,95 @@ struct EditorScreen: View {
         if wasResting { detentSelection = .height(clamped) }
     }
 
+    private func previewChromePlacement(
+        in geo: GeometryProxy,
+        fitted: CGSize
+    ) -> PreviewChromePlacement {
+        let availableWidth = geo.size.width - 20
+        let sideGutter = max(0, (availableWidth - fitted.width) / 2)
+        if sideGutter >= 42 { return .sideGutters }
+
+        let maxImageHeight = geo.size.height - stripHeight - hGap * 2
+            - max(0, minResting - geo.safeAreaInsets.bottom)
+        if maxImageHeight - fitted.height >= chromeRailHeight {
+            return .topRail
+        }
+        return .overlay
+    }
+
     // ------------------------------------------------------------- pieces
 
-    private var preview: some View {
+    @ViewBuilder
+    private func previewStage(
+        fitted: CGSize,
+        availableWidth: CGFloat,
+        placement: PreviewChromePlacement
+    ) -> some View {
+        switch placement {
+        case .topRail:
+            VStack(spacing: 0) {
+                previewChrome(
+                    width: availableWidth,
+                    leadingImageIsDark: nil,
+                    trailingImageIsDark: nil)
+                    .frame(height: chromeRailHeight)
+                previewSurface
+                    .frame(width: fitted.width, height: fitted.height)
+            }
+        case .sideGutters:
+            ZStack {
+                previewSurface
+                    .frame(width: fitted.width, height: fitted.height)
+                previewChrome(
+                    width: availableWidth,
+                    leadingImageIsDark: nil,
+                    trailingImageIsDark: nil)
+                    .frame(maxHeight: .infinity, alignment: .top)
+            }
+        case .overlay:
+            ZStack {
+                previewSurface
+                    .frame(width: fitted.width, height: fitted.height)
+                previewChrome(
+                    width: fitted.width,
+                    leadingImageIsDark: previewChromeTone.leadingIsDark,
+                    trailingImageIsDark: previewChromeTone.trailingIsDark)
+                    .frame(maxHeight: .infinity, alignment: .top)
+            }
+        }
+    }
+
+    private func previewChrome(
+        width: CGFloat,
+        leadingImageIsDark: Bool?,
+        trailingImageIsDark: Bool?
+    ) -> some View {
+        HStack {
+            floatingButton(
+                system: "chevron.left",
+                imageIsDark: leadingImageIsDark
+            ) {
+                controlsPresented = false
+                Task {
+                    await model.flushSession()
+                    dismiss()
+                }
+            }
+            Spacer()
+            floatingButton(
+                system: exporting ? nil : "square.and.arrow.up",
+                spinning: exporting,
+                disabled: !model.canSaveSelected || exporting,
+                imageIsDark: trailingImageIsDark
+            ) {
+                exportSelected()
+            }
+        }
+        .padding(.horizontal, 8)
+        .frame(width: width, height: chromeRailHeight)
+    }
+
+    private var previewSurface: some View {
         ZStack {
             if let image = comparing ? baseImage : previewImage {
                 EDRMetalView(image: image)
@@ -184,25 +291,6 @@ struct EditorScreen: View {
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
             .stroke(Theme.line, lineWidth: 1))
-        // Floating chrome: no header row — these ride ON the photo.
-        .overlay(alignment: .topLeading) {
-            floatingButton(system: "chevron.left") {
-                controlsPresented = false
-                Task {
-                    await model.flushSession()
-                    dismiss()
-                }
-            }
-            .padding(8)
-        }
-        .overlay(alignment: .topTrailing) {
-            floatingButton(system: exporting ? nil : "square.and.arrow.up",
-                           spinning: exporting,
-                           disabled: !model.canSaveSelected || exporting) {
-                exportSelected()
-            }
-            .padding(8)
-        }
         .overlay(alignment: .bottomLeading) {
             if !screenSupportsEDR {
                 Text("SDR SCREEN")
@@ -231,22 +319,47 @@ struct EditorScreen: View {
 
     private func floatingButton(system: String?, spinning: Bool = false,
                                 disabled: Bool = false,
+                                imageIsDark: Bool? = nil,
                                 action: @escaping () -> Void) -> some View {
-        Button(action: action) {
+        let fill = floatingButtonFill(imageIsDark: imageIsDark)
+        let foreground = floatingButtonForeground(imageIsDark: imageIsDark)
+        return Button(action: action) {
             ZStack {
-                Circle().fill(.black.opacity(0.55))
+                Circle()
+                    .fill(fill)
+                    .overlay {
+                        Circle().stroke(
+                            foreground.opacity(imageIsDark == nil ? 0.22 : 0.48),
+                            lineWidth: 1)
+                    }
                 if spinning {
-                    ProgressView().tint(Theme.gold).controlSize(.small)
+                    ProgressView()
+                        .tint(imageIsDark == true ? Theme.bgDeep : Theme.gold)
+                        .controlSize(.small)
                 } else if let system {
                     Image(systemName: system)
                         .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(disabled ? Theme.stoneFaint : Theme.stone)
+                        .foregroundStyle(
+                            disabled ? foreground.opacity(0.38) : foreground)
                 }
             }
             .frame(width: 34, height: 34)
+            .shadow(color: .black.opacity(0.32), radius: 4, y: 2)
         }
         .buttonStyle(.plain)
         .disabled(disabled)
+    }
+
+    private func floatingButtonFill(imageIsDark: Bool?) -> Color {
+        switch imageIsDark {
+        case .some(true): return Theme.stone.opacity(0.92)
+        case .some(false): return .black.opacity(0.76)
+        case .none: return Theme.surfaceHi.opacity(0.96)
+        }
+    }
+
+    private func floatingButtonForeground(imageIsDark: Bool?) -> Color {
+        imageIsDark == true ? Theme.bgDeep : Theme.stone
     }
 
     private var filmstrip: some View {
@@ -401,16 +514,23 @@ struct EditorScreen: View {
     /// on big sessions (P5 review). Six covers back-and-forth comparison
     /// without holding a whole filmstrip walk.
     @State private var decodedBase: [UUID: CIImage] = [:]
+    @State private var decodedChromeTone: [UUID: PreviewChromeTone] = [:]
     @State private var decodedOrder: [UUID] = []
     private static let decodedCap = 6
 
-    private func cacheDecoded(_ image: CIImage, for id: UUID) {
+    private func cacheDecoded(
+        _ image: CIImage,
+        tone: PreviewChromeTone,
+        for id: UUID
+    ) {
         decodedBase[id] = image
+        decodedChromeTone[id] = tone
         decodedOrder.removeAll { $0 == id }
         decodedOrder.append(id)
         while decodedOrder.count > Self.decodedCap {
             let evict = decodedOrder.removeFirst()
             decodedBase.removeValue(forKey: evict)
+            decodedChromeTone.removeValue(forKey: evict)
         }
     }
 
@@ -499,6 +619,7 @@ struct EditorScreen: View {
         guard let item = model.selectedItem else { return }
         if let cached = decodedBase[item.id] {
             baseImage = cached
+            previewChromeTone = decodedChromeTone[item.id] ?? PreviewChromeTone()
             hydrateFailedID = nil
             return
         }
@@ -509,11 +630,17 @@ struct EditorScreen: View {
         }
         hydrateFailedID = nil
         let decoded = await Task.detached(priority: .userInitiated) {
-            Self.decodeBase(url)
+            guard let image = Self.decodeBase(url) else {
+                return Optional<(CIImage, PreviewChromeTone)>.none
+            }
+            return (image, Self.chromeTone(for: image))
         }.value
-        if let decoded {
-            cacheDecoded(decoded, for: item.id)
-            if model.selectedItem?.id == item.id { baseImage = decoded }
+        if let (image, tone) = decoded {
+            cacheDecoded(image, tone: tone, for: item.id)
+            if model.selectedItem?.id == item.id {
+                baseImage = image
+                previewChromeTone = tone
+            }
         }
     }
 
@@ -546,6 +673,52 @@ struct EditorScreen: View {
             return nil
         }
         return CIImage(cgImage: cg)
+    }
+
+    nonisolated private static func chromeTone(for image: CIImage) -> PreviewChromeTone {
+        let extent = image.extent
+        guard !extent.isEmpty else { return PreviewChromeTone() }
+        let sampleWidth = max(1, extent.width * 0.24)
+        let sampleHeight = max(1, extent.height * 0.18)
+        let top = extent.maxY - sampleHeight
+        let leadingRect = CGRect(
+            x: extent.minX, y: top,
+            width: sampleWidth, height: sampleHeight)
+        let trailingRect = CGRect(
+            x: extent.maxX - sampleWidth, y: top,
+            width: sampleWidth, height: sampleHeight)
+        let context = CIContext(options: [.cacheIntermediates: false])
+        return PreviewChromeTone(
+            leadingIsDark: averageLuminance(
+                image: image, rect: leadingRect, context: context) < 0.46,
+            trailingIsDark: averageLuminance(
+                image: image, rect: trailingRect, context: context) < 0.46)
+    }
+
+    nonisolated private static func averageLuminance(
+        image: CIImage,
+        rect: CGRect,
+        context: CIContext
+    ) -> Double {
+        guard let average = CIFilter(
+            name: "CIAreaAverage",
+            parameters: [
+                kCIInputImageKey: image,
+                kCIInputExtentKey: CIVector(cgRect: rect),
+            ])?.outputImage else { return 0 }
+        var pixel = [UInt8](repeating: 0, count: 4)
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        context.render(
+            average,
+            toBitmap: &pixel,
+            rowBytes: 4,
+            bounds: CGRect(x: 0, y: 0, width: 1, height: 1),
+            format: .RGBA8,
+            colorSpace: colorSpace)
+        let red = Double(pixel[0]) / 255
+        let green = Double(pixel[1]) / 255
+        let blue = Double(pixel[2]) / 255
+        return red * 0.2126 + green * 0.7152 + blue * 0.0722
     }
 
     // ------------------------------------------------------------- export
