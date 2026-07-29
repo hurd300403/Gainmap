@@ -12,6 +12,7 @@
 import SwiftUI
 import CoreImage
 import ImageIO
+import PhotosUI
 import GainmapCore
 
 struct EditorScreen: View {
@@ -30,13 +31,20 @@ struct EditorScreen: View {
     @State private var exporting = false
 
     private let sessionTitle: String
+    private let store: FileSessionStore?
+    /// Photos picked for a brand-new session — imported in prepare().
+    private let importItems: [PhotosPickerItem]
+    @State private var importing = false
 
-    init(session: Session) {
+    init(session: Session, store: FileSessionStore?, importItems: [PhotosPickerItem] = []) {
         sessionTitle = session.title
-        // store: nil — the editor mutates its in-memory copy; saves flow
-        // through flushSession -> AppModel.sessionPersisted (the sync bridge).
+        self.store = store
+        self.importItems = importItems
+        // The REAL store: flushSession persists the session file AND fires
+        // onSessionPersisted — the sync bridge. (A nil store would silently
+        // disable persistence and sync for everything edited here.)
         _model = StateObject(wrappedValue: MergeModel(session: session,
-                                                      store: nil,
+                                                      store: store,
                                                       output: .managedDirectory(Self.exportsDir)))
     }
 
@@ -121,10 +129,10 @@ struct EditorScreen: View {
                 EDRMetalView(image: image)
             } else {
                 Theme.inset
-                if hydrating {
+                if hydrating || importing {
                     VStack(spacing: 8) {
                         ProgressView().tint(Theme.stoneDim)
-                        Text("Downloading original…")
+                        Text(importing ? "Importing…" : "Downloading original…")
                             .font(Theme.mono(9)).foregroundStyle(Theme.stoneDim)
                     }
                 }
@@ -220,10 +228,38 @@ struct EditorScreen: View {
         model.onSessionPersisted = { [weak appModel] session in
             Task { @MainActor in appModel?.sessionPersisted(session) }
         }
+        if !importItems.isEmpty {
+            await importPicked()
+        }
         if model.selectedID == nil, let first = model.items.first?.id {
             model.select(first)
         }
         await loadSelectedBase()
+    }
+
+    /// Phone-native import (P5): stage the picked photos as JPEGs in the
+    /// store's managed files, then feed them through the same addFiles
+    /// pipeline the Mac drop uses (hashing, dedup, naming, persistence —
+    /// and from there the sync bridge uploads them).
+    private func importPicked() async {
+        guard let store else { return }
+        importing = true
+        defer { importing = false }
+        let managedRoot = await store.managedFilesDir
+        var staged: [URL] = []
+        for item in importItems {
+            guard let data = try? await item.loadTransferable(type: Data.self) else { continue }
+            if let url = try? PhotoImport.stage(data: data, managedRoot: managedRoot) {
+                staged.append(url)
+            }
+        }
+        guard !staged.isEmpty else { return }
+        model.addFiles(staged)
+        await model.flushSession()
+        if model.selectedID == nil, let first = model.items.first?.id {
+            model.select(first)
+            await loadSelectedBase()
+        }
     }
 
     private func select(_ id: UUID) {

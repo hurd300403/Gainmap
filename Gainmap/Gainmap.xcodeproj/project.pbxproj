@@ -54,6 +54,7 @@
 		91324CFC4C0982668AC0B4B9 /* GainmapApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6F7CC53DFEBAA64DB496A218 /* GainmapApp.swift */; };
 		95210A4E34C87597B8FA685C /* GainmapCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 332CD2C6C38C777A9F43D875 /* GainmapCore.framework */; };
 		9C28F8EA83C73D698B780DA6 /* FirebaseSyncBackend.swift in Sources */ = {isa = PBXBuildFile; fileRef = 48E2E8039BBA6D525B957E45 /* FirebaseSyncBackend.swift */; };
+		A08002FCA40F9B7D2279C223 /* PhotoImport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8949E8EF804BF17B3364867E /* PhotoImport.swift */; };
 		A131E01EC10F722DA9B0FB09 /* encoder.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 3D0F67B3CD9921CF2F332B9E /* encoder.cpp */; };
 		A5ABD1C3590625457C6F6B6B /* Session.swift in Sources */ = {isa = PBXBuildFile; fileRef = 643458A92911E46854C1760D /* Session.swift */; };
 		A7B50B61F55AB544BE4DFEED /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = 8A46E4F2749932129E2112D8 /* Sparkle */; };
@@ -206,6 +207,7 @@
 		818B66704EA800F8D79E99AB /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
 		873F3284796168D1CFD591C1 /* CrashReportingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CrashReportingTests.swift; sourceTree = "<group>"; };
 		88E06FF39A7F9C16CBCE2F09 /* UHDREncoding.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UHDREncoding.swift; sourceTree = "<group>"; };
+		8949E8EF804BF17B3364867E /* PhotoImport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoImport.swift; sourceTree = "<group>"; };
 		8D34FEBB0D393FE8A1F80BF9 /* EDRMetalUIView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EDRMetalUIView.swift; sourceTree = "<group>"; };
 		965418D8B7E8F5E39232DAA9 /* Emblem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Emblem.swift; sourceTree = "<group>"; };
 		9725C349943A1D1E42128D01 /* SessionGridScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionGridScreen.swift; sourceTree = "<group>"; };
@@ -359,6 +361,7 @@
 				F8781BCF8D84E651139AA24A /* ImageInfo.swift */,
 				DD60B70B5E2C985E4FECF5CB /* LookControls.swift */,
 				FFEEC538A5C8327C552FA6A7 /* MergeModel.swift */,
+				8949E8EF804BF17B3364867E /* PhotoImport.swift */,
 				60A60C791EED9EFFF22D952E /* RemoteSchema.swift */,
 				643458A92911E46854C1760D /* Session.swift */,
 				C247FA658C54395BBD898A50 /* SessionGridView.swift */,
@@ -767,6 +770,7 @@
 				BD89D3D40ADB525D2F35C4DC /* ImageInfo.swift in Sources */,
 				51EDD15E0BD10278B037AC27 /* LookControls.swift in Sources */,
 				77F6D432E61C4B5BB3AE9EE4 /* MergeModel.swift in Sources */,
+				A08002FCA40F9B7D2279C223 /* PhotoImport.swift in Sources */,
 				FE919413C4ADF85E2E3DDEDF /* RemoteSchema.swift in Sources */,
 				A5ABD1C3590625457C6F6B6B /* Session.swift in Sources */,
 				687B49BAC27AD3E723A3C9B7 /* SessionGridView.swift in Sources */,

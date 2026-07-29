@@ -6,12 +6,22 @@
 //
 
 import SwiftUI
+import PhotosUI
 import GainmapCore
+
+/// What the editor cover opens: an existing session, or a brand-new one
+/// seeded with photos picked on this phone.
+struct EditorRequest: Identifiable {
+    let id = UUID()
+    let session: Session
+    let importItems: [PhotosPickerItem]
+}
 
 struct SessionGridScreen: View {
     @EnvironmentObject private var auth: AuthController
     @EnvironmentObject private var model: AppModel
-    @State private var openSession: Session?
+    @State private var editorRequest: EditorRequest?
+    @State private var pickedItems: [PhotosPickerItem] = []
 
     var body: some View {
         NavigationStack {
@@ -27,7 +37,8 @@ struct SessionGridScreen: View {
                         SessionGridView(cards: model.cards) { id in
                             Task {
                                 if let session = await model.session(id: id) {
-                                    openSession = session
+                                    editorRequest = EditorRequest(session: session,
+                                                                  importItems: [])
                                 }
                             }
                         }
@@ -37,6 +48,14 @@ struct SessionGridScreen: View {
             .navigationTitle("Sessions")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    // Phone-native session: pick photos, land in the editor.
+                    PhotosPicker(selection: $pickedItems, matching: .images,
+                                 photoLibrary: .shared()) {
+                        Image(systemName: "plus")
+                            .foregroundStyle(Theme.gold)
+                    }
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
                         if let email = auth.email {
@@ -49,9 +68,18 @@ struct SessionGridScreen: View {
                     }
                 }
             }
-            .fullScreenCover(item: $openSession) { session in
-                EditorScreen(session: session)
+            .fullScreenCover(item: $editorRequest, onDismiss: {
+                Task { await model.refresh() }
+            }) { request in
+                EditorScreen(session: request.session,
+                             store: model.store,
+                             importItems: request.importItems)
                     .environmentObject(model)
+            }
+            .onChange(of: pickedItems) { _, items in
+                guard !items.isEmpty else { return }
+                pickedItems = []
+                editorRequest = EditorRequest(session: Session(), importItems: items)
             }
             .task { await model.refresh() }
             .refreshable { await model.refresh() }
@@ -85,7 +113,7 @@ struct SessionGridScreen: View {
                 .font(.system(size: 40)).foregroundStyle(Theme.stoneFaint)
             Text("No sessions yet")
                 .font(Theme.ui(16, .semibold)).foregroundStyle(Theme.stone)
-            Text("Drop photos into Gainmap on your Mac —\nthe session shows up here, ready to tune.")
+            Text("Tap + to import photos from this phone,\nor drop them into Gainmap on your Mac —\neither way they show up everywhere.")
                 .font(Theme.ui(13)).foregroundStyle(Theme.stoneDim)
                 .multilineTextAlignment(.center)
             if model.syncing {
