@@ -113,6 +113,52 @@ final class TransferQueueTests: XCTestCase {
         XCTAssertTrue(q.transfers.isEmpty)
     }
 
+    func testRepeatedLeaseDenialsParkInsteadOfHotLooping() {
+        // A finalize 403 is indistinguishable from a permanent rules denial;
+        // a REAL expiry heals after one fresh lease, so consecutive denials
+        // must park rather than re-upload the full file forever.
+        var q = queue([(hashA, "originals", 100)])
+        let id = "originals_\(hashA)"
+        for n in 1..<TransferQueue.maxLeaseDenials {
+            q.failed(id: id, failure: .leaseExpired, now: t0)
+            XCTAssertEqual(q.transfer(id: id)?.status, .queued, "denial \(n) still retries")
+        }
+        q.failed(id: id, failure: .leaseExpired, now: t0)
+        XCTAssertEqual(q.transfer(id: id)?.status, .parked)
+        // Success resets the counter…
+        q.retryTrigger()
+        q.beganReserving(id: id)
+        q.reserved(id: id, expiresAt: t0.addingTimeInterval(60))
+        q.uploadSucceeded(id: id)
+        XCTAssertEqual(q.transfer(id: id)?.leaseDenials, 0)
+    }
+
+    func testRemoveByContentHashForgetsDoneEntries() {
+        // Blob GC deleted the objects server-side: stale .done entries must
+        // not block a future re-upload of the same bytes.
+        var q = queue([(hashA, "originals", 100), (hashA, "thumbs", 10),
+                       (hashB, "thumbs", 5)])
+        q.markAlreadyUploaded(id: "originals_\(hashA)")
+        q.remove(contentHash: hashA)
+        XCTAssertNil(q.transfer(id: "originals_\(hashA)"))
+        XCTAssertNil(q.transfer(id: "thumbs_\(hashA)"))
+        XCTAssertNotNil(q.transfer(id: "thumbs_\(hashB)"))
+        q.enqueue(contentHash: hashA, tier: "originals", byteSize: 100, sourcePath: "/re")
+        XCTAssertEqual(q.transfer(id: "originals_\(hashA)")?.status, .queued)
+    }
+
+    func testTransferDecodeToleratesMissingNewFields() {
+        // Adding a field must never invalidate persisted state (a dropped
+        // queue strands uploads). Decode a JSON without leaseDenials.
+        let json = """
+        {"transfers":[{"contentHash":"\(hashA)","tier":"thumbs","byteSize":5,
+        "sourcePath":"/t","status":"queued","attempts":1}]}
+        """
+        let q = try! JSONDecoder().decode(TransferQueue.self, from: Data(json.utf8))
+        XCTAssertEqual(q.transfers.first?.leaseDenials, 0)
+        XCTAssertEqual(q.transfers.first?.attempts, 1)
+    }
+
     func testLeaseExpiredAtFinalizeIsNotAStrike() {
         // r7: 403 at finalize -> re-reserve + NEW upload session; attempts
         // unchanged so a slow connection is never punished into parking.

@@ -122,15 +122,14 @@ if [ "$MODE" = "swift" ]; then
     --project demo-gainmap \
     --only auth,firestore,storage,functions \
     ${CONFIG_ARGS[@]+"${CONFIG_ARGS[@]}"} \
-    "TEST_RUNNER_GM_EMULATOR=1 \
+    "set -o pipefail; TEST_RUNNER_GM_EMULATOR=1 \
      TEST_RUNNER_GM_EMULATOR_HOST=127.0.0.1 \
      TEST_RUNNER_GM_AUTH_PORT=$AUTH_PORT \
      TEST_RUNNER_GM_FIRESTORE_PORT=$FS_PORT \
      TEST_RUNNER_GM_STORAGE_PORT=$ST_PORT \
      TEST_RUNNER_GM_FUNCTIONS_PORT=$FN_PORT \
      xcodebuild test -project Gainmap/Gainmap.xcodeproj -scheme Gainmap \
-       -destination 'platform=macOS,arch=arm64' \
-       -only-testing SyncIntegrationTests 2>&1 | tail -30"
+       -destination 'platform=macOS,arch=arm64' 2>&1 | tail -40"
 else
   firebase emulators:exec \
     --project demo-gainmap \

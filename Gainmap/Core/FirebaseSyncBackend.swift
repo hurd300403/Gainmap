@@ -154,13 +154,26 @@ public final class FirebaseSyncBackend: SyncBackend, @unchecked Sendable {
         path: String,
         onEvents: @escaping @Sendable ([DocEvent]) -> Void
     ) -> SyncListener {
-        let reg = db.collection(path).addSnapshotListener { snapshot, _ in
+        // includeMetadataChanges so the pending -> server-acknowledged
+        // transition fires an event: the filter below suppresses unconfirmed
+        // echoes, and WITHOUT metadata changes the later confirmation would
+        // never be delivered at all (data is unchanged — only metadata flips).
+        let reg = db.collection(path).addSnapshotListener(includeMetadataChanges: true) { snapshot, _ in
             guard let snapshot else { return }
-            let events = snapshot.documentChanges.map { change -> DocEvent in
+            let changes = snapshot.documentChanges(includeMetadataChanges: true)
+            let events = changes.compactMap { change -> DocEvent? in
                 switch change.type {
                 case .removed:
                     return DocEvent(id: change.document.documentID, data: nil)
                 case .added, .modified:
+                    // NEVER deliver latency-compensated echoes of our own
+                    // un-acknowledged writes: if the server later rejects the
+                    // write (rules), Firestore rolls it back with a .removed
+                    // change — which, had we acked the echo, would read as a
+                    // server-side purge and delete the user's local data
+                    // (review P4-19). The server-confirmed snapshot follows
+                    // and is delivered normally.
+                    if change.document.metadata.hasPendingWrites { return nil }
                     return DocEvent(id: change.document.documentID,
                                     data: FSBridge.fsMap(change.document.data()))
                 }

@@ -78,12 +78,17 @@ final class SyncEmulatorTests: XCTestCase {
         request.setValue("Bearer owner", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONSerialization.data(withJSONObject: ["fields": fields])
-        let (_, response) = try await URLSession.shared.data(for: request)
-        let code = (response as? HTTPURLResponse)?.statusCode ?? 0
-        guard (200..<300).contains(code) else {
-            throw NSError(domain: "seed", code: code,
-                          userInfo: [NSLocalizedDescriptionKey: "REST PATCH \(path) -> \(code)"])
+        // The emulator 409s under transaction contention (a previous test's
+        // listeners may still be draining); retry briefly.
+        var lastCode = 0
+        for attempt in 0..<5 {
+            if attempt > 0 { try await Task.sleep(nanoseconds: 300_000_000) }
+            let (_, response) = try await URLSession.shared.data(for: request)
+            lastCode = (response as? HTTPURLResponse)?.statusCode ?? 0
+            if (200..<300).contains(lastCode) { return }
         }
+        throw NSError(domain: "seed", code: lastCode,
+                      userInfo: [NSLocalizedDescriptionKey: "REST PATCH \(path) -> \(lastCode)"])
     }
 
     private func restDelete(_ path: String) async throws {
@@ -460,7 +465,7 @@ final class SyncEmulatorTests: XCTestCase {
         let session = makeSession(title: "Killed", photos: [p1])
         try await store.save(session)
 
-        // First life: create docs + reserve, then "die" before uploading.
+        // First life: create docs + enqueue, then "die" before uploading.
         let engine1 = SyncEngine(uid: uid, deviceID: "mac-A",
                                  backend: FirebaseSyncBackend(), store: store,
                                  root: engineRoot)
@@ -469,7 +474,26 @@ final class SyncEmulatorTests: XCTestCase {
         await engine1.drainOnce()
         await engine1.stop()   // persisted queue still has queued transfers
 
-        // Second life: relaunch restarts incomplete work (#147).
+        // Simulate death MID-FLIGHT (#147): a REAL reservation was granted
+        // and the process died while `uploading`. Rewrite the persisted state
+        // so the original transfer is in-flight with the live server lease —
+        // relaunch must requeue it and the pump must finish against that
+        // same reservation (Storage rules check it at finalize).
+        let backend = FirebaseSyncBackend()
+        let grant = try await backend.reserveUpload(
+            contentHash: p1.hash, tier: "originals", byteSize: p1.size)
+        let stateURL = engineRoot.appendingPathComponent("sync-state.json")
+        var syncState = try JSONDecoder().decode(
+            SyncState.self, from: Data(contentsOf: stateURL))
+        var transfers = syncState.transfers
+        transfers.beganReserving(id: "originals_\(p1.hash)")
+        transfers.reserved(id: "originals_\(p1.hash)", expiresAt: grant.expiresAt)
+        syncState.transfers = transfers
+        try JSONEncoder().encode(syncState).write(to: stateURL)
+        XCTAssertEqual(transfers.transfer(id: "originals_\(p1.hash)")?.status, .uploading)
+
+        // Second life: relaunch requeues the in-flight transfer (keeping the
+        // unexpired lease) and completes it.
         let engine2 = SyncEngine(uid: uid, deviceID: "mac-A",
                                  backend: FirebaseSyncBackend(), store: store,
                                  root: engineRoot)
@@ -477,11 +501,43 @@ final class SyncEmulatorTests: XCTestCase {
         await engine2.pumpTransfers()
         let queue = await engine2.transferSnapshot
         XCTAssertEqual(queue.activeCount, 0, "everything finishes after relaunch")
-        let origExists = try await FirebaseSyncBackend().objectExists(
+        let origExists = try await backend.objectExists(
             objectName: SyncSchema.objectName(uid: uid, tier: "originals",
                                               contentHash: p1.hash))
         XCTAssertTrue(origExists)
         await engine2.stop()
+    }
+
+    func testSameBytesInTwoSessionsDedupNoOp() async throws {
+        // Plan's "dedup no-op": the same file in a second session must reuse
+        // the blob — no second upload, no rules-denied blob-shell rewrite.
+        let (engineA, storeA) = makeEngine("mac-A")
+        let p1 = try makeSourceJPEG("p1")
+        let session1 = makeSession(title: "First", photos: [p1])
+        try await storeA.save(session1)
+        await engineA.start()
+        await engineA.noteLocalSession(session1)
+        await engineA.drainOnce()
+        await engineA.pumpTransfers()
+        let firstPass = await engineA.transferSnapshot
+        XCTAssertEqual(firstPass.transfer(id: "originals_\(p1.hash)")?.status, .done)
+
+        let session2 = makeSession(title: "Second", photos: [p1])   // same bytes
+        try await storeA.save(session2)
+        await engineA.noteLocalSession(session2)
+        await engineA.drainOnce()
+        await engineA.pumpTransfers()
+
+        // Photo doc exists in BOTH sessions, one blob doc, nothing stuck.
+        let backend = FirebaseSyncBackend()
+        let photo2Path = SyncTarget.photo(session: session2.id,
+                                          photo: session2.photos[0].id).path(uid: uid)
+        let photo2 = try await backend.getDocument(path: photo2Path)
+        XCTAssertEqual(photo2?["contentHash"]?.stringValue, p1.hash)
+        let queue = await engineA.transferSnapshot
+        XCTAssertEqual(queue.activeCount, 0)
+        XCTAssertFalse(queue.hasParked, "no denied writes / stuck transfers")
+        await engineA.stop()
     }
 
     func testQuotaExceededIsTerminal() async throws {

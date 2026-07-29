@@ -46,10 +46,15 @@ public struct Transfer: Codable, Equatable, Sendable, Identifiable {
     /// The reservation's completion deadline (r7 single deadline).
     public var expiresAt: Date?
     public var nextRetryAt: Date?
+    /// Consecutive finalize denials (403 with a live lease). A real lease
+    /// expiry heals after ONE re-reserve; repeated denials mean the rules
+    /// will never accept this object (size drift, misconfig) — park it
+    /// instead of hot-looping full-file uploads (review P4-14/21).
+    public var leaseDenials: Int
 
     public init(contentHash: String, tier: String, byteSize: Int64, sourcePath: String,
                 status: Status = .queued, attempts: Int = 0, lastError: String? = nil,
-                expiresAt: Date? = nil, nextRetryAt: Date? = nil) {
+                expiresAt: Date? = nil, nextRetryAt: Date? = nil, leaseDenials: Int = 0) {
         self.contentHash = contentHash
         self.tier = tier
         self.byteSize = byteSize
@@ -59,6 +64,29 @@ public struct Transfer: Codable, Equatable, Sendable, Identifiable {
         self.lastError = lastError
         self.expiresAt = expiresAt
         self.nextRetryAt = nextRetryAt
+        self.leaseDenials = leaseDenials
+    }
+
+    // Tolerant decoding: adding a field must never invalidate a persisted
+    // sync-state.json (a failed decode silently drops the whole queue —
+    // review P4-18).
+    private enum CodingKeys: String, CodingKey {
+        case contentHash, tier, byteSize, sourcePath, status, attempts
+        case lastError, expiresAt, nextRetryAt, leaseDenials
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        contentHash = try c.decodeIfPresent(String.self, forKey: .contentHash) ?? ""
+        tier = try c.decodeIfPresent(String.self, forKey: .tier) ?? "originals"
+        byteSize = try c.decodeIfPresent(Int64.self, forKey: .byteSize) ?? 0
+        sourcePath = try c.decodeIfPresent(String.self, forKey: .sourcePath) ?? ""
+        status = try c.decodeIfPresent(Status.self, forKey: .status) ?? .queued
+        attempts = try c.decodeIfPresent(Int.self, forKey: .attempts) ?? 0
+        lastError = try c.decodeIfPresent(String.self, forKey: .lastError)
+        expiresAt = try c.decodeIfPresent(Date.self, forKey: .expiresAt)
+        nextRetryAt = try c.decodeIfPresent(Date.self, forKey: .nextRetryAt)
+        leaseDenials = try c.decodeIfPresent(Int.self, forKey: .leaseDenials) ?? 0
     }
 }
 
@@ -91,6 +119,8 @@ public struct TransferQueue: Codable, Equatable, Sendable {
 
     /// Park after this many failed attempts (backoff exhausted).
     public static let maxAttempts = 5
+    /// Park after this many consecutive finalize denials (see .leaseExpired).
+    public static let maxLeaseDenials = 3
     /// Backoff schedule per attempt count (seconds).
     public static let backoff: [TimeInterval] = [2, 15, 60, 300, 900]
 
@@ -195,17 +225,28 @@ public struct TransferQueue: Codable, Equatable, Sendable {
         transfers[i].status = .done
         transfers[i].lastError = nil
         transfers[i].nextRetryAt = nil
+        transfers[i].leaseDenials = 0
     }
 
     public mutating func failed(id: String, failure: TransferFailure, now: Date) {
         guard let i = index(id) else { return }
         switch failure {
         case .leaseExpired:
-            // r7 contract: not a strike. Drop the dead reservation; the next
-            // plan re-reserves (idempotent refresh) and re-uploads fresh.
-            transfers[i].status = .queued
+            // r7 contract: a genuine mid-upload lease expiry is not a strike —
+            // re-reserve and go again. But a finalize 403 is indistinguishable
+            // from a PERMANENT rules denial, and a real expiry heals after one
+            // fresh lease; repeated denials mean this object will never be
+            // accepted. Park after 3 so a misconfig can't hot-loop full-file
+            // uploads forever.
+            transfers[i].leaseDenials += 1
             transfers[i].expiresAt = nil
-            transfers[i].lastError = "Upload lease expired; re-reserving."
+            if transfers[i].leaseDenials >= Self.maxLeaseDenials {
+                transfers[i].status = .parked
+                transfers[i].lastError = "Upload repeatedly denied by the server."
+            } else {
+                transfers[i].status = .queued
+                transfers[i].lastError = "Upload lease expired; re-reserving."
+            }
         case .quotaExceeded:
             transfers[i].status = .quotaExceeded
             transfers[i].expiresAt = nil
@@ -237,6 +278,7 @@ public struct TransferQueue: Codable, Equatable, Sendable {
             case .parked:
                 transfers[i].status = .queued
                 transfers[i].attempts = 0
+                transfers[i].leaseDenials = 0
                 transfers[i].nextRetryAt = nil
             case .queued:
                 transfers[i].nextRetryAt = nil
@@ -271,6 +313,13 @@ public struct TransferQueue: Codable, Equatable, Sendable {
     /// Remove completed entries (housekeeping after the ledger confirms).
     public mutating func pruneDone() {
         transfers.removeAll { $0.status == .done }
+    }
+
+    /// Forget every transfer for a content hash — used when the blob doc is
+    /// physically deleted (GC): a stale `.done` entry must not block a future
+    /// re-upload of the same bytes (review P4-17).
+    public mutating func remove(contentHash: String) {
+        transfers.removeAll { $0.contentHash == contentHash }
     }
 
     /// Account teardown.

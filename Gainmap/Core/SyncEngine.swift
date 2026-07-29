@@ -28,6 +28,9 @@ import UniformTypeIdentifiers
 // MARK: - Persisted engine state
 
 /// Everything the engine must remember across launches, in ONE atomic file.
+/// Decoding is TOLERANT (missing keys get defaults): a version that adds a
+/// field must never invalidate the whole state — a silently-dropped queue
+/// permanently strands un-uploaded renditions (review P4-18).
 struct SyncState: Codable, Equatable {
     var journal = ChangeJournal()
     var acks = AckLedger()
@@ -38,6 +41,24 @@ struct SyncState: Codable, Equatable {
     var shadowPhotos: [String: [String: [String: FSValue]]] = [:]
     /// contentHash -> absolute local path (Mac rehydration index).
     var hashIndex: [String: String] = [:]
+
+    init() {}
+
+    private enum CodingKeys: String, CodingKey {
+        case journal, acks, transfers, shadowSessions, shadowPhotos, hashIndex
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        journal = (try? c.decodeIfPresent(ChangeJournal.self, forKey: .journal)) ?? ChangeJournal()
+        acks = (try? c.decodeIfPresent(AckLedger.self, forKey: .acks)) ?? AckLedger()
+        transfers = (try? c.decodeIfPresent(TransferQueue.self, forKey: .transfers)) ?? TransferQueue()
+        shadowSessions = (try? c.decodeIfPresent([String: [String: FSValue]].self,
+                                                 forKey: .shadowSessions)) ?? [:]
+        shadowPhotos = (try? c.decodeIfPresent([String: [String: [String: FSValue]]].self,
+                                               forKey: .shadowPhotos)) ?? [:]
+        hashIndex = (try? c.decodeIfPresent([String: String].self, forKey: .hashIndex)) ?? [:]
+    }
 }
 
 // MARK: - Engine
@@ -53,6 +74,12 @@ public actor SyncEngine {
 
     private var state = SyncState()
     private var listeners: [SyncListener] = []
+    /// One consumer task per listener: events flow through an AsyncStream so
+    /// they are applied IN DELIVERY ORDER. Wrapping each callback in its own
+    /// unstructured Task gives no ordering guarantee on an actor — a stale
+    /// snapshot applied after a newer one rolls the shadow (and the local
+    /// file) backwards (review P4-9/20).
+    private var eventPumps: [Task<Void, Never>] = []
     /// Sessions whose photo subcollections we listen to.
     private var photoListenerSessions: Set<UUID> = []
     /// Wi-Fi policy input (Mac: always true; iOS wires Settings later).
@@ -77,6 +104,16 @@ public actor SyncEngine {
         loadState()
         state.journal.requeueInFlightAfterRelaunch()
         state.transfers.relaunch()
+        // A launch is a natural retry trigger: revive parked transfers, give
+        // quota-terminal ones a fresh test, shed completed entries, and drop
+        // rehydration-index entries whose files are gone (bounded state —
+        // review P4-5/6/16).
+        state.transfers.retryTrigger()
+        state.transfers.quotaChanged()
+        state.transfers.pruneDone()
+        state.hashIndex = state.hashIndex.filter {
+            FileManager.default.fileExists(atPath: $0.value)
+        }
         persistState()
         startListeners()
     }
@@ -84,8 +121,18 @@ public actor SyncEngine {
     public func stop() {
         for l in listeners { l.cancel() }
         listeners.removeAll()
+        for t in eventPumps { t.cancel() }
+        eventPumps.removeAll()
         photoListenerSessions.removeAll()
         persistState()
+    }
+
+    /// Foreground / network-change / user-tapped-retry hook (P5/P7 wire this
+    /// to app lifecycle): revives parked + quota-terminal transfers and pumps.
+    public func retryTransfers(now: Date = Date()) async {
+        state.transfers.retryTrigger()
+        state.transfers.quotaChanged()
+        await pumpTransfers(now: now)
     }
 
     private func loadState() {
@@ -97,6 +144,8 @@ public actor SyncEngine {
     }
 
     private func persistState() {
+        persistTask?.cancel()
+        persistTask = nil
         do {
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
             let enc = JSONEncoder()
@@ -109,6 +158,25 @@ public actor SyncEngine {
             // Never fatal: worst case the next launch re-derives from remote
             // + local files (reconcile handles both directions).
         }
+    }
+
+    private var persistTask: Task<Void, Never>?
+
+    /// Debounced persist for high-frequency paths (listener events): the full
+    /// state is re-encoded on every write, so coalescing bursts matters once
+    /// libraries get large (review P4-6/13). Drains/stop persist immediately.
+    private func persistSoon() {
+        guard persistTask == nil else { return }
+        persistTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            guard !Task.isCancelled else { return }
+            await self?.persistNowFromDebounce()
+        }
+    }
+
+    private func persistNowFromDebounce() {
+        guard persistTask != nil else { return }
+        persistState()
     }
 
     // Test/diagnostic visibility.
@@ -170,28 +238,31 @@ public actor SyncEngine {
 
         let shadowPhotoMaps = state.shadowPhotos[session.id.uuidString] ?? [:]
         var seen = Set<String>()
-        for (index, photo) in session.photos.enumerated() {
+        for photo in session.photos {
             seen.insert(photo.id.uuidString)
             guard let remote = shadowPhoto(session: session.id, photo: photo.id) else {
                 continue   // create is pushed by drainOnce
             }
+            // A photo the shadow says is deleted is on its way out locally
+            // too (the next materialize drops it). NEVER infer an undo from
+            // its mere presence in a possibly-stale Session snapshot — undo
+            // is an explicit user action only (review P4-2).
+            guard remote.deletedAt == nil else { continue }
             let pTarget = SyncTarget.photo(session: session.id, photo: photo.id)
             if photo.look != remote.look {
                 state.journal.record(target: pTarget, value: .look(photo.look),
                                      baseRev: remote.lookMeta.rev, deviceID: deviceID)
             }
-            let localOrder = Double(index + 1)
-            if remote.orderKey != localOrder {
-                state.journal.record(target: pTarget, value: .order(localOrder),
-                                     baseRev: remote.orderMeta.rev, deviceID: deviceID)
-            }
-            if remote.deletedAt != nil {
-                // Present locally but tombstoned in shadow: local undo.
-                state.journal.record(target: pTarget, value: .tombstone(nil),
-                                     baseRev: remote.delMeta.rev, deviceID: deviceID)
-            }
+            // NOTE: orderKey is deliberately NOT diffed here. Keys are sparse
+            // and assigned once at create; reorder becomes an explicit
+            // engine API when a reorder UI exists (P5/P7). Diffing dense
+            // array indices made every deletion renumber the whole queue on
+            // every device and manufactured conflicts (review P4-11/12).
         }
         // Photos in the shadow that vanished locally were removed here.
+        // (P5 wiring note: this relies on MergeModel flushes never being
+        // older than the last materialize — the debounced flush pipeline
+        // guarantees that today; an epoch guard lands with the UI wiring.)
         for (photoIdString, map) in shadowPhotoMaps where !seen.contains(photoIdString) {
             guard let photoId = UUID(uuidString: photoIdString),
                   let remote = RemotePhotoDoc(id: photoId, fsMap: map),
@@ -284,44 +355,67 @@ public actor SyncEngine {
         persistState()
     }
 
+    /// Create a document remotely — but ONLY if it does not already exist.
+    /// A merge:false set over an existing doc is an UPDATE to the rules, and
+    /// a create payload strips rev metadata, so it would be denied (or worse,
+    /// on a rules gap, clobber history). If the doc exists (ack ledger was
+    /// lost or another device created it), adopt it instead (review P4-4/10).
+    private func createOrAdopt(path: String, data: [String: FSValue],
+                               target: SyncTarget) async -> [String: FSValue]? {
+        do {
+            if let existing = try await backend.getDocument(path: path) {
+                state.acks.markAcked(target)
+                return existing
+            }
+            try await backend.setDocument(path: path, data: data, merge: false)
+            state.acks.markAcked(target)
+            return data
+        } catch {
+            return nil   // offline etc. — retried next drain
+        }
+    }
+
     private func pushCreates(now: Date) async {
         let sessions = await store.loadAll()
         for session in sessions {
             let target = SyncTarget.session(session.id)
             if !state.acks.everAcked(target) {
                 let remote = remoteSessionDoc(from: session)
-                do {
-                    try await backend.setDocument(
-                        path: target.path(uid: uid), data: remote.fsMap(), merge: false)
-                    state.acks.markAcked(target)
-                    setShadow(remote)
-                } catch {
-                    continue   // offline etc. — retried next drain
+                guard let landed = await createOrAdopt(
+                    path: target.path(uid: uid), data: remote.fsMap(),
+                    target: target) else { continue }
+                if let doc = RemoteSessionDoc(id: session.id, fsMap: landed) {
+                    setShadow(doc)
                 }
             }
-            // Photo creates (hashed, syncable, not yet acked).
-            for (index, photo) in session.photos.enumerated() {
+            // Photo creates (hashed, syncable, not yet acked). Order keys are
+            // SPARSE — appended after the highest key the shadow knows, so a
+            // deletion never renumbers anything (review P4-12).
+            var nextOrderKey = ((state.shadowPhotos[session.id.uuidString] ?? [:])
+                .compactMap { (pid, map) -> Double? in
+                    UUID(uuidString: pid).flatMap { RemotePhotoDoc(id: $0, fsMap: map) }?.orderKey
+                }.max() ?? 0)
+            for photo in session.photos {
                 guard let hash = photo.contentHash, !photo.tooLargeToSync,
                       SyncSchema.isValidContentHash(hash) else { continue }
                 let pTarget = SyncTarget.photo(session: session.id, photo: photo.id)
                 guard !state.acks.everAcked(pTarget) else { continue }
                 await ensureBlobShell(hash: hash, byteSize: photo.byteSize, now: now)
+                nextOrderKey += 1
                 let doc = RemotePhotoDoc(
                     id: photo.id, contentHash: hash, look: photo.look,
-                    orderKey: Double(index + 1),
+                    orderKey: nextOrderKey,
                     gamut: nil,
                     pixelWidth: photo.pixelWidth, pixelHeight: photo.pixelHeight,
                     looksMerged: photo.looksMerged,
                     createdAt: now, updatedAt: now)
-                do {
-                    try await backend.setDocument(
-                        path: pTarget.path(uid: uid), data: doc.fsMap(), merge: false)
-                    state.acks.markAcked(pTarget)
-                    setShadow(doc, session: session.id)
-                    enqueueUploads(photo: photo, hash: hash)
-                } catch {
-                    continue
+                guard let landed = await createOrAdopt(
+                    path: pTarget.path(uid: uid), data: doc.fsMap(),
+                    target: pTarget) else { continue }
+                if let adopted = RemotePhotoDoc(id: photo.id, fsMap: landed) {
+                    setShadow(adopted, session: session.id)
                 }
+                enqueueUploads(photo: photo, hash: hash)
             }
             // Derived, LWW: covers + photoCount (only when acked).
             if state.acks.everAcked(target) {
@@ -377,24 +471,49 @@ public actor SyncEngine {
         } catch { /* retried on a later drain */ }
     }
 
+    /// Blob docs we know exist remotely — avoids re-sending shells, whose
+    /// fresh `createdAt` the rules reject as an immutable-field change on an
+    /// existing doc (review P4-7/24). Rebuilt from the blobs listener.
+    private var knownBlobDocs: Set<String> = []
+
     private func ensureBlobShell(hash: String, byteSize: Int64, now: Date) async {
+        guard !knownBlobDocs.contains(hash) else { return }
         let path = "users/\(uid)/blobs/\(hash)"
+        if (try? await backend.getDocument(path: path)) != nil {
+            knownBlobDocs.insert(hash)
+            return
+        }
         let shell = RemoteBlobDoc(contentHash: hash, byteSize: byteSize, createdAt: now)
-        // merge:true — creating over an existing blob doc must not clobber
-        // server-owned renditions/state (and same-value fields diff to nothing).
-        try? await backend.setDocument(path: path, data: shell.shellFSMap(), merge: true)
+        do {
+            try await backend.setDocument(path: path, data: shell.shellFSMap(), merge: false)
+            knownBlobDocs.insert(hash)
+        } catch { /* offline etc. — the next create attempt retries */ }
     }
 
     private func drainJournal(now: Date) async {
         var conflictedSessions: Set<UUID> = []
-        for entry in state.journal.pendingEntries {
-            // Skip mutations whose target was never created remotely yet.
-            if case .photo = entry.target,
-               !state.acks.everAcked(entry.target) { continue }
-            if case .session = entry.target,
-               !state.acks.everAcked(entry.target) { continue }
-
-            state.journal.markInFlight(target: entry.target, group: entry.group)
+        // Mark EVERYTHING in-flight BEFORE the first suspension. Actors are
+        // reentrant: while one entry's transaction is awaiting, a local edit
+        // can run record() — and record() coalesces destructively into
+        // `.pending` entries (value overwritten, `next` cleared). With every
+        // entry already `.inFlight`, that edit parks in `next` and re-arms
+        // after the commit instead of being silently lost (review P4-1/8).
+        func drainable(_ target: SyncTarget) -> Bool {
+            // The user doc always exists (admitSyncUser provisions it);
+            // session/photo mutations wait until their create is pushed.
+            if case .user = target { return true }
+            return state.acks.everAcked(target)
+        }
+        let keys = state.journal.pendingEntries
+            .filter { drainable($0.target) }
+            .map { ($0.target, $0.group) }
+        for (target, group) in keys {
+            state.journal.markInFlight(target: target, group: group)
+        }
+        for (target, group) in keys {
+            // Re-read the LIVE entry — never a pre-await snapshot.
+            guard let entry = state.journal.entry(target: target, group: group),
+                  entry.state == .inFlight else { continue }
             do {
                 let result = try await backend.drainMutation(
                     docPath: entry.target.path(uid: uid),
@@ -504,8 +623,18 @@ public actor SyncEngine {
             state.transfers.enqueue(contentHash: hash, tier: "thumbs",
                                     byteSize: thumb.size, sourcePath: thumb.path)
         }
+        // Reservation byteSize must equal the UPLOADED size exactly (rules).
+        // If the file on disk no longer matches the record's size, the
+        // CONTENT changed too — the recorded hash is stale, and uploading new
+        // bytes under it would poison the content addressing. Skip; import
+        // re-hashing mints a new photo record for replaced files (spec).
+        let statSize = (try? FileManager.default.attributesOfItem(atPath: sourcePath))?[
+            .size] as? Int64
+        guard let onDisk = statSize, onDisk == photo.byteSize || photo.byteSize == 0 else {
+            return
+        }
         state.transfers.enqueue(contentHash: hash, tier: "originals",
-                                byteSize: photo.byteSize, sourcePath: sourcePath)
+                                byteSize: onDisk, sourcePath: sourcePath)
     }
 
     private func linkedPath(_ photo: PhotoRecord) -> String? {
@@ -531,9 +660,19 @@ public actor SyncEngine {
         }
     }
 
+    private var pumpRunning = false
+
     /// One transfer-pump pass: execute what the queue plans, feed results
     /// back. Loops until the queue has nothing eligible (bounded).
+    /// Re-entrancy-safe: listeners (config flips, usage changes) also pump,
+    /// and two interleaved pumps would double-plan the same transfer (the
+    /// duplicate reserve aborts the first transaction and knocks the
+    /// transfer into backoff). The running pump's loop picks up anything
+    /// new, so a second entry can simply bail.
     public func pumpTransfers(now: Date = Date()) async {
+        guard !pumpRunning else { return }
+        pumpRunning = true
+        defer { pumpRunning = false }
         var guardRail = 0
         while guardRail < 64 {
             guardRail += 1
@@ -595,24 +734,55 @@ public actor SyncEngine {
 
     // ------------------------------------------------------------- listeners
 
+    /// Attach a collection listener whose events are consumed strictly in
+    /// order by a single task (see `eventPumps`).
+    private func listenOrdered(path: String,
+                               handler: @escaping (SyncEngine) -> ([DocEvent]) async -> Void) {
+        let (stream, continuation) = AsyncStream.makeStream(of: [DocEvent].self)
+        listeners.append(backend.listenCollection(path: path) { events in
+            continuation.yield(events)
+        })
+        eventPumps.append(Task { [weak self] in
+            for await events in stream {
+                guard let self else { break }
+                await handler(self)(events)
+            }
+        })
+    }
+
     private func startListeners() {
-        let sessionsPath = "users/\(uid)/sessions"
-        listeners.append(backend.listenCollection(path: sessionsPath) { [weak self] events in
-            Task { await self?.handleSessionEvents(events) }
-        })
-        listeners.append(backend.listenCollection(path: "users/\(uid)/blobs") { [weak self] events in
-            Task { await self?.handleBlobEvents(events) }
-        })
+        listenOrdered(path: "users/\(uid)/sessions") { engine in
+            { await engine.handleSessionEvents($0) }
+        }
+        listenOrdered(path: "users/\(uid)/blobs") { engine in
+            { await engine.handleBlobEvents($0) }
+        }
+        // config/flags flips (kill switch off -> on) revive parked transfers
+        // without waiting for a relaunch (review P4-5).
+        listenOrdered(path: "config") { engine in
+            { _ in await engine.retryTransfers() }
+        }
+        // usage changes (reconciler frees/converts bytes, quota raises land
+        // here indirectly) re-test quota-terminal transfers (review P4-16).
+        listenOrdered(path: "users/\(uid)/usage") { engine in
+            { _ in
+                await engine.noteUsageChanged()
+            }
+        }
+    }
+
+    private func noteUsageChanged() async {
+        state.transfers.quotaChanged()
+        await pumpTransfers()
     }
 
     /// Photos listeners: the open session + the N most recent (spec: 5).
     public func listenPhotos(session id: UUID) {
         guard !photoListenerSessions.contains(id) else { return }
         photoListenerSessions.insert(id)
-        let path = "users/\(uid)/sessions/\(id.uuidString)/photos"
-        listeners.append(backend.listenCollection(path: path) { [weak self] events in
-            Task { await self?.handlePhotoEvents(session: id, events: events) }
-        })
+        listenOrdered(path: "users/\(uid)/sessions/\(id.uuidString)/photos") { engine in
+            { await engine.handlePhotoEvents(session: id, events: $0) }
+        }
     }
 
     private func handleSessionEvents(_ events: [DocEvent]) async {
@@ -638,36 +808,71 @@ public actor SyncEngine {
                 await materializeLocal(session: id)
             }
         }
-        persistState()
+        persistSoon()
     }
 
     private func handlePhotoEvents(session sid: UUID, events: [DocEvent]) async {
         for event in events {
             guard let pid = UUID(uuidString: event.id) else { continue }
+            let target = SyncTarget.photo(session: sid, photo: pid)
             guard let data = event.data else {
+                // Physical purge (maintenance after tombstone retention).
+                // Adopt it fully: drop the LOCAL record too, don't just
+                // un-ack — an un-acked-but-present record reads as an
+                // offline-created photo and gets resurrected by the next
+                // pushCreates (review P4-10). Only records we know the
+                // server once had are purged; a rollback of a never-acked
+                // create no-ops here.
+                guard state.acks.everAcked(target) else { continue }
                 state.shadowPhotos[sid.uuidString]?.removeValue(forKey: pid.uuidString)
-                state.acks.remove(.photo(session: sid, photo: pid))
+                state.acks.remove(target)
+                state.journal.dropAll(for: target)
+                if var session = await store.load(id: sid) {
+                    session.photos.removeAll { $0.id == pid }
+                    try? await store.save(session)
+                }
                 continue
             }
             guard let doc = RemotePhotoDoc(id: pid, fsMap: data) else { continue }
-            state.acks.markAcked(.photo(session: sid, photo: pid))
+            state.acks.markAcked(target)
             setShadow(doc, session: sid)
         }
         await materializeLocal(session: sid)
-        persistState()
+        persistSoon()
     }
 
     private func handleBlobEvents(_ events: [DocEvent]) async {
         for event in events {
-            guard let doc = RemoteBlobDoc(contentHash: event.id,
-                                          fsMap: event.data ?? [:]) else { continue }
-            // Server finalize is the completion signal we trust but never write.
-            for tier in SyncSchema.tiers where doc.isUploaded(tier: tier) {
-                state.transfers.markAlreadyUploaded(
-                    id: SyncSchema.reservationId(tier: tier, contentHash: doc.contentHash))
+            guard let data = event.data else {
+                // Blob doc physically deleted (GC): whatever "done" claims we
+                // hold about its renditions are void — a future re-add of the
+                // same bytes must re-upload (review P4-17).
+                knownBlobDocs.remove(event.id)
+                state.transfers.remove(contentHash: event.id)
+                continue
+            }
+            guard let doc = RemoteBlobDoc(contentHash: event.id, fsMap: data) else { continue }
+            knownBlobDocs.insert(doc.contentHash)
+            for tier in ["thumbs", "originals"] {
+                if doc.isUploaded(tier: tier) {
+                    // Server finalize — the completion signal we trust.
+                    state.transfers.markAlreadyUploaded(
+                        id: SyncSchema.reservationId(tier: tier, contentHash: doc.contentHash))
+                } else if let path = state.hashIndex[doc.contentHash],
+                          FileManager.default.fileExists(atPath: path) {
+                    // The server's own ledger says this rendition is missing
+                    // and we hold the bytes: (re-)enqueue. This is what makes
+                    // uploads self-healing after a lost sync-state.json —
+                    // the queue is re-derived from the blob docs, not only
+                    // from photo-create time (review P4-18).
+                    let record = PhotoRecord(origin: .linked(path: path),
+                                             contentHash: doc.contentHash,
+                                             byteSize: doc.byteSize)
+                    enqueueUploads(photo: record, hash: doc.contentHash)
+                }
             }
         }
-        persistState()
+        persistSoon()
     }
 
     private func adoptRemotePurge(session id: UUID) async {
@@ -685,54 +890,65 @@ public actor SyncEngine {
         guard let remote = shadowSession(id) else { return }
         let overlay = state.journal.overlay(for: .session(id))
         let merged = InboundMerge.merged(session: remote, overlay: overlay)
-        guard merged.deletedAt == nil else { return }
+        guard merged.deletedAt == nil else {
+            // A tombstoned winner must actually disappear locally — this is
+            // the path a LOST undo takes (undo conflicted, remote deletion
+            // stands); returning without deleting left a ghost session that
+            // never went away (review P4-3).
+            await store.delete(id: id)
+            return
+        }
 
         let photoMaps = state.shadowPhotos[id.uuidString] ?? [:]
-        var photos: [RemotePhotoDoc] = []
+        var aliveByID: [UUID: RemotePhotoDoc] = [:]
         for (pidString, map) in photoMaps {
             guard let pid = UUID(uuidString: pidString),
                   let doc = RemotePhotoDoc(id: pid, fsMap: map) else { continue }
             let pOverlay = state.journal.overlay(for: .photo(session: id, photo: pid))
             let m = InboundMerge.merged(photo: doc, overlay: pOverlay)
-            if m.deletedAt == nil { photos.append(m) }
+            if m.deletedAt == nil { aliveByID[pid] = m }
         }
 
         let existing = await store.load(id: id)
-        let existingByID = Dictionary(uniqueKeysWithValues:
-            (existing?.photos ?? []).map { ($0.id, $0) })
-
         var local = existing ?? Session(id: id, createdAt: merged.createdAt)
         local.title = merged.title
         local.sameLookForAll = merged.sameLookForAll
         local.runningLook = merged.runningLook
         local.updatedAt = merged.updatedAt
 
+        // Ordering: the EXISTING local arrangement is the base — local-only
+        // photos (tooLargeToSync, unhashed, pending create) keep their exact
+        // positions instead of being shoved to the tail on every snapshot
+        // (review P4-11). Remote photos we already hold are updated in place;
+        // genuinely new remote photos append in remote order.
         var records: [PhotoRecord] = []
-        for doc in RemotePhotoDoc.ordered(photos) {
-            if var prior = existingByID[doc.id] {
+        var placed = Set<UUID>()
+        for var prior in existing?.photos ?? [] {
+            if let doc = aliveByID[prior.id] {
                 prior.look = doc.look
                 prior.looksMerged = doc.looksMerged
                 records.append(prior)
+                placed.insert(prior.id)
+            } else if photoMaps[prior.id.uuidString] != nil {
+                continue   // known remotely but tombstoned: drop locally
             } else {
-                let origin: PhotoRecord.Origin
-                if let path = state.hashIndex[doc.contentHash] {
-                    origin = .linked(path: path)
-                } else {
-                    origin = .managed(relativePath: "blobs/\(doc.contentHash).jpg")
-                }
-                records.append(PhotoRecord(
-                    id: doc.id, origin: origin, contentHash: doc.contentHash,
-                    byteSize: 0, pixelWidth: doc.pixelWidth, pixelHeight: doc.pixelHeight,
-                    tooLargeToSync: false, looksMerged: doc.looksMerged,
-                    look: doc.look))
+                records.append(prior)   // local-only: keep, in place
+                placed.insert(prior.id)
             }
         }
-        // Local-only photos (unhashed yet, too large, or pending create) stay.
-        let remoteIDs = Set(records.map(\.id))
-        for p in existing?.photos ?? [] where !remoteIDs.contains(p.id) {
-            let isKnownRemotely = photoMaps[p.id.uuidString] != nil
-            if !isKnownRemotely { records.append(p) }
-            // Known remotely but filtered out => tombstoned: drop it locally.
+        for doc in RemotePhotoDoc.ordered(Array(aliveByID.values))
+        where !placed.contains(doc.id) {
+            let origin: PhotoRecord.Origin
+            if let path = state.hashIndex[doc.contentHash] {
+                origin = .linked(path: path)
+            } else {
+                origin = .managed(relativePath: "blobs/\(doc.contentHash).jpg")
+            }
+            records.append(PhotoRecord(
+                id: doc.id, origin: origin, contentHash: doc.contentHash,
+                byteSize: 0, pixelWidth: doc.pixelWidth, pixelHeight: doc.pixelHeight,
+                tooLargeToSync: false, looksMerged: doc.looksMerged,
+                look: doc.look))
         }
         local.photos = records
         try? await store.save(local)
