@@ -32,13 +32,33 @@ public struct SessionCard: Identifiable, Equatable {
     }
 }
 
+public enum SessionCardSyncState: Equatable {
+    case neutral
+    case synced
+    case pending
+    case issue
+}
+
 public struct SessionGridView: View {
     let cards: [SessionCard]
     let onOpen: (UUID) -> Void
+    let onExport: ((UUID) -> Void)?
+    let onRename: ((SessionCard) -> Void)?
+    let onDelete: ((UUID) -> Void)?
+    let syncState: ((SessionCard) -> SessionCardSyncState)?
 
-    public init(cards: [SessionCard], onOpen: @escaping (UUID) -> Void) {
+    public init(cards: [SessionCard],
+                onOpen: @escaping (UUID) -> Void,
+                onExport: ((UUID) -> Void)? = nil,
+                onRename: ((SessionCard) -> Void)? = nil,
+                onDelete: ((UUID) -> Void)? = nil,
+                syncState: ((SessionCard) -> SessionCardSyncState)? = nil) {
         self.cards = cards
         self.onOpen = onOpen
+        self.onExport = onExport
+        self.onRename = onRename
+        self.onDelete = onDelete
+        self.syncState = syncState
     }
 
     private let columns = [GridItem(.adaptive(minimum: 160, maximum: 260), spacing: 14)]
@@ -47,19 +67,50 @@ public struct SessionGridView: View {
         ScrollView {
             LazyVGrid(columns: columns, spacing: 14) {
                 ForEach(cards) { card in
-                    Button { onOpen(card.id) } label: {
-                        SessionCardView(card: card)
-                    }
-                    .buttonStyle(.plain)
+                    cardButton(card)
                 }
             }
             .padding(16)
+        }
+    }
+
+    @ViewBuilder
+    private func cardButton(_ card: SessionCard) -> some View {
+        let button = Button { onOpen(card.id) } label: {
+            SessionCardView(
+                card: card,
+                syncState: syncState?(card) ?? (card.pendingSync ? .pending : .neutral))
+        }
+        .buttonStyle(.plain)
+
+        if onExport != nil || onRename != nil || onDelete != nil {
+            button.contextMenu {
+                if let onExport {
+                    Button("Export All…", systemImage: "square.and.arrow.up.on.square") {
+                        onExport(card.id)
+                    }
+                }
+                if let onRename {
+                    Button("Rename…", systemImage: "pencil") { onRename(card) }
+                }
+                if onDelete != nil && (onExport != nil || onRename != nil) {
+                    Divider()
+                }
+                if let onDelete {
+                    Button("Delete Session", systemImage: "trash", role: .destructive) {
+                        onDelete(card.id)
+                    }
+                }
+            }
+        } else {
+            button
         }
     }
 }
 
 struct SessionCardView: View {
     let card: SessionCard
+    let syncState: SessionCardSyncState
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -69,12 +120,19 @@ struct SessionCardView: View {
                 .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .stroke(Theme.line, lineWidth: 1))
                 .overlay(alignment: .topTrailing) {
-                    if card.pendingSync {
+                    if syncState == .pending {
                         Image(systemName: "arrow.triangle.2.circlepath")
                             .font(.system(size: 10, weight: .semibold))
                             .foregroundStyle(Theme.gold)
                             .padding(5)
                             .background(.black.opacity(0.55), in: Circle())
+                            .padding(6)
+                    } else if syncState == .issue {
+                        Image(systemName: "exclamationmark")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(.white)
+                            .padding(6)
+                            .background(Color.red.opacity(0.88), in: Circle())
                             .padding(6)
                     }
                 }
@@ -82,9 +140,33 @@ struct SessionCardView: View {
                 Text(card.title.isEmpty ? "Untitled session" : card.title)
                     .font(Theme.ui(14, .semibold)).foregroundStyle(Theme.stone)
                     .lineLimit(1)
-                Text("\(card.photoCount) photo\(card.photoCount == 1 ? "" : "s")")
-                    .font(Theme.mono(10)).foregroundStyle(Theme.stoneDim)
+                HStack(spacing: 5) {
+                    Text("\(card.photoCount) photo\(card.photoCount == 1 ? "" : "s")")
+                    Text("·")
+                    Text(card.updatedAt, style: .relative)
+                }
+                .font(Theme.mono(10)).foregroundStyle(Theme.stoneDim)
             }
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.surface.opacity(0.24),
+                    in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(cardBorderColor,
+                        lineWidth: syncState == .neutral ? 1 : 2)
+        }
+        .shadow(color: cardBorderColor.opacity(syncState == .neutral ? 0 : 0.18),
+                radius: 6)
+    }
+
+    private var cardBorderColor: Color {
+        switch syncState {
+        case .neutral: return Theme.line
+        case .synced: return .green
+        case .pending: return Theme.gold
+        case .issue: return .red
         }
     }
 }
@@ -182,7 +264,7 @@ struct CoverTile: View {
         }
     }
 
-    private static func decode(_ url: URL, maxPixel: Int) -> CGImage? {
+    nonisolated private static func decode(_ url: URL, maxPixel: Int) -> CGImage? {
         let srcOpts: [CFString: Any] = [kCGImageSourceShouldCache: false]
         guard let src = CGImageSourceCreateWithURL(url as CFURL, srcOpts as CFDictionary) else {
             return nil

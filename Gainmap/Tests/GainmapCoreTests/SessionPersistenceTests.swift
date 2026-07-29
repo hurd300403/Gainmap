@@ -67,6 +67,20 @@ final class SessionPersistenceTests: XCTestCase {
         XCTAssertEqual(back.photos[0].readout?.targetNits, 507)
     }
 
+    func testLegacyWholeSecondSessionDatesStillLoad() async throws {
+        let store = FileSessionStore(root: root)
+        let legacy = Session(title: "Legacy Date")
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try encoder.encode(legacy)
+        let dir = root.appendingPathComponent("users/local/sessions")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try data.write(to: dir.appendingPathComponent("\(legacy.id.uuidString).json"))
+
+        let loaded = await store.load(id: legacy.id)
+        XCTAssertEqual(loaded?.title, "Legacy Date")
+    }
+
     // MARK: Crash safety
 
     func testCorruptSessionFileIsSkippedNotFatal() async throws {
@@ -211,6 +225,108 @@ final class SessionPersistenceTests: XCTestCase {
                        "the look dialed on the selected photo must survive relaunch")
         XCTAssertEqual(m2.runningLook.glow, 1.31, accuracy: 1e-9)
         XCTAssertEqual(m2.selectedID, m2.items[0].id, "restore selects the first photo")
+    }
+
+    func testOpeningAnotherSessionFlushesTheOneBeingLeft() async throws {
+        let store = FileSessionStore(root: root)
+        let first = Session(title: "First", photos: [
+            PhotoRecord(origin: .linked(path: jpg("first").path))
+        ])
+        let second = Session(title: "Second", photos: [
+            PhotoRecord(origin: .linked(path: jpg("second").path))
+        ])
+        try await store.save(first)
+        try await store.save(second)
+
+        let model = MergeModel(session: first, store: store)
+        model.bloom.glow = 1.37
+        let opened = await model.openSession(id: second.id)
+        XCTAssertTrue(opened)
+
+        XCTAssertEqual(model.session.id, second.id)
+        XCTAssertEqual(model.items.map(\.sdrURL.lastPathComponent), ["second.jpg"])
+        let loadedFirst = await store.load(id: first.id)
+        let flushedFirst = try XCTUnwrap(loadedFirst)
+        XCTAssertEqual(flushedFirst.photos[0].look?.glow ?? 0, 1.37, accuracy: 1e-9,
+                       "switching sessions must flush the live look first")
+    }
+
+    func testStartingNewSessionKeepsPriorBatchAndUsesSignature() async throws {
+        let store = FileSessionStore(root: root)
+        let model = MergeModel(store: store)
+        model.addFiles([jpg("prior")])
+        let priorID = model.session.id
+        var signature = AutoHDR.BloomParams()
+        signature.glow = 0.82
+        model.signature = signature
+
+        let started = await model.startNewSession()
+        XCTAssertTrue(started)
+        XCTAssertNotEqual(model.session.id, priorID)
+        XCTAssertTrue(model.items.isEmpty)
+        XCTAssertEqual(model.runningLook.glow, 0.82, accuracy: 1e-9)
+        let savedPrior = await store.load(id: priorID)
+        XCTAssertEqual(savedPrior?.photos.count, 1,
+                       "the previous batch remains a resumable session")
+    }
+
+    func testThreeBatchesRemainThreeSessionsAcrossRelaunch() async throws {
+        let store = FileSessionStore(root: root)
+        let model = MergeModel(store: store)
+
+        model.addFiles([jpg("batch-one")])
+        let startedSecond = await model.startNewSession()
+        XCTAssertTrue(startedSecond)
+        model.addFiles([jpg("batch-two")])
+        let startedThird = await model.startNewSession()
+        XCTAssertTrue(startedThird)
+        model.addFiles([jpg("batch-three")])
+        await model.flushSession()
+
+        let saved = await store.loadAll()
+        XCTAssertEqual(saved.count, 3)
+        let storedNames = Set(saved.compactMap {
+            $0.photos.first?.sourceURL(managedRoot: store.managedFilesDir).lastPathComponent
+        })
+        XCTAssertEqual(storedNames,
+                       Set(["batch-one.jpg", "batch-two.jpg", "batch-three.jpg"]))
+
+        let relaunched = MergeModel()
+        await relaunched.attachStoreAndRestore(FileSessionStore(root: root))
+        XCTAssertEqual(relaunched.items.map(\.sdrURL.lastPathComponent),
+                       ["batch-three.jpg"])
+    }
+
+    func testFiveHundredSessionLibraryLoadsWithinOneSecond() async throws {
+        let store = FileSessionStore(root: root)
+        let base = Date()
+        for index in 0..<500 {
+            try await store.save(Session(
+                title: "Session \(index)",
+                updatedAt: base.addingTimeInterval(Double(index))))
+        }
+
+        let clock = ContinuousClock()
+        let start = clock.now
+        let saved = await store.loadAll()
+        let elapsed = start.duration(to: clock.now)
+
+        XCTAssertEqual(saved.count, 500)
+        XCTAssertEqual(saved.first?.title, "Session 499")
+        XCTAssertLessThan(elapsed, .seconds(1),
+                          "the lazy grid still needs its local library snapshot promptly")
+    }
+
+    func testRenamingLiveSessionPersists() async throws {
+        let store = FileSessionStore(root: root)
+        let model = MergeModel(store: store)
+        model.addFiles([jpg("rename")])
+        model.setSessionTitle("  July Campaign  ")
+        await model.flushSession()
+
+        XCTAssertEqual(model.session.title, "July Campaign")
+        let renamed = await store.load(id: model.session.id)
+        XCTAssertEqual(renamed?.title, "July Campaign")
     }
 
     func testTerminationFlushIsSynchronous() throws {
@@ -463,8 +579,6 @@ final class SessionPersistenceTests: XCTestCase {
 
 private extension JSONDecoder {
     static var p3: JSONDecoder {
-        let d = JSONDecoder()
-        d.dateDecodingStrategy = .iso8601
-        return d
+        SessionJSONCoding.decoder()
     }
 }

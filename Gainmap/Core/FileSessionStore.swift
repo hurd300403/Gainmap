@@ -13,6 +13,45 @@
 
 import Foundation
 
+/// Session files originally used JSONEncoder's whole-second ISO-8601 dates.
+/// Preserve that read compatibility, but write full-precision epoch seconds
+/// so two batches created within the same second still have a deterministic
+/// "most recent" order.
+enum SessionJSONCoding {
+    static func encoder() -> JSONEncoder {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        encoder.dateEncodingStrategy = .custom { date, target in
+            var value = target.singleValueContainer()
+            try value.encode(date.timeIntervalSince1970)
+        }
+        return encoder
+    }
+
+    static func decoder() -> JSONDecoder {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .custom { source in
+            let value = try source.singleValueContainer()
+            if let seconds = try? value.decode(Double.self) {
+                return Date(timeIntervalSince1970: seconds)
+            }
+            let string = try value.decode(String.self)
+
+            let precise = ISO8601DateFormatter()
+            precise.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            if let date = precise.date(from: string) { return date }
+
+            let legacy = ISO8601DateFormatter()
+            legacy.formatOptions = [.withInternetDateTime]
+            if let date = legacy.date(from: string) { return date }
+
+            throw DecodingError.dataCorruptedError(
+                in: value, debugDescription: "Invalid ISO-8601 session date: \(string)")
+        }
+        return decoder
+    }
+}
+
 public actor FileSessionStore {
 
     public let root: URL
@@ -58,9 +97,7 @@ public actor FileSessionStore {
     /// complete file, never a torn one.
     public func save(_ session: Session) throws {
         try ensureDirs()
-        let enc = JSONEncoder()
-        enc.outputFormatting = [.sortedKeys]
-        enc.dateEncodingStrategy = .iso8601
+        let enc = SessionJSONCoding.encoder()
         let data = try enc.encode(session)
         let final = url(for: session.id)
         let tmp = sessionsDir.appendingPathComponent(".tmp-\(UUID().uuidString).json")
@@ -95,8 +132,7 @@ public actor FileSessionStore {
     }
 
     private static func decode(_ data: Data) -> Session? {
-        let dec = JSONDecoder()
-        dec.dateDecodingStrategy = .iso8601
+        let dec = SessionJSONCoding.decoder()
         guard let s = try? dec.decode(Session.self, from: data),
               s.schemaVersion <= Session.currentSchemaVersion else { return nil }
         return s

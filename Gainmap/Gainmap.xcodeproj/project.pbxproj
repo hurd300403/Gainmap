@@ -48,6 +48,7 @@
 		780BD17117126B92CF61683E /* SyncBackend.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7D72D07C22019F5DD5A2BC4 /* SyncBackend.swift */; };
 		78FF931FCF92790BD0765D3B /* Sentry in Frameworks */ = {isa = PBXBuildFile; productRef = 44B06E6BBE8DB15B991067DB /* Sentry */; };
 		7D0537C510B04F199FFA4718 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 818B66704EA800F8D79E99AB /* Theme.swift */; };
+		7F0815CC44447D4F2A905D66 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E714682FEA97DEF69FB59246 /* RootView.swift */; };
 		82545DAEB1E67B42A2BF07DB /* BatchModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C5CC3CEB11980BEB71ABF803 /* BatchModelTests.swift */; };
 		8473060905CBB6658F3A480C /* GlowBakeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9EE006A9D318DEDEB40C9B8B /* GlowBakeTests.swift */; };
 		85D2B8A091E537B85A978171 /* SessionSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 502B475B8D234D69113EFF10 /* SessionSupport.swift */; };
@@ -229,6 +230,7 @@
 		DD60B70B5E2C985E4FECF5CB /* LookControls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LookControls.swift; sourceTree = "<group>"; };
 		DFAE322A1C38669037476396 /* UHDRTool.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UHDRTool.swift; sourceTree = "<group>"; };
 		E31D3B58C1C7661BFA0D3E2D /* Gainmap.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Gainmap.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		E714682FEA97DEF69FB59246 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
 		E7D72D07C22019F5DD5A2BC4 /* SyncBackend.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncBackend.swift; sourceTree = "<group>"; };
 		ECE0EEB1EEFA33DB157C887C /* GainmapIOSApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GainmapIOSApp.swift; sourceTree = "<group>"; };
 		F41738FE1697478729D273DE /* SyncEmulatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncEmulatorTests.swift; sourceTree = "<group>"; };
@@ -301,6 +303,7 @@
 				F86867ECF5D1B007D2A8C74E /* ContentView.swift */,
 				6F7CC53DFEBAA64DB496A218 /* GainmapApp.swift */,
 				6217F04A9CC118CB3DDAF78A /* HDRPreview.swift */,
+				E714682FEA97DEF69FB59246 /* RootView.swift */,
 				9ACB0EA71DABFB883ABB4951 /* SyncCoordinator.swift */,
 			);
 			path = Mac;
@@ -796,6 +799,7 @@
 				E053F38938114B06452877CD /* ContentView.swift in Sources */,
 				91324CFC4C0982668AC0B4B9 /* GainmapApp.swift in Sources */,
 				DCAB7346655E06163E209EA7 /* HDRPreview.swift in Sources */,
+				7F0815CC44447D4F2A905D66 /* RootView.swift in Sources */,
 				000DAD0AD94F834C6F3991EE /* SyncCoordinator.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

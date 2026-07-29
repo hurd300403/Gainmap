@@ -9,11 +9,68 @@
 
 import SwiftUI
 import Combine
+import AppKit
 import Sparkle
 import GainmapCore
 
+@MainActor
+final class GainmapApplicationDelegate: NSObject, NSApplicationDelegate {
+    private weak var model: MergeModel?
+    private weak var sync: SyncCoordinator?
+
+    func configure(model: MergeModel, sync: SyncCoordinator) {
+        self.model = model
+        self.sync = sync
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let model, let sync else { return .terminateNow }
+        let hadUnflushedEdit = model.hasUnflushedSessionChanges
+
+        // "Quit Anyway" is never "throw away my edit": make the local file
+        // durable before asking about the still-in-flight cloud copy.
+        if hadUnflushedEdit {
+            model.flushNowForTermination()
+        }
+
+        guard sync.syncing,
+              hadUnflushedEdit || sync.hasOutstandingCloudWork else {
+            return .terminateNow
+        }
+
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Gainmap is still syncing"
+        if sync.pendingWorkCount > 0 {
+            let count = sync.pendingWorkCount
+            alert.informativeText =
+                "\(count) sync item\(count == 1 ? " is" : "s are") still pending. "
+                + "Keep Gainmap open until the flask ring turns green so the latest "
+                + "images and looks are available on your iPhone. If you quit now, "
+                + "everything remains saved on this Mac and will resume next launch."
+        } else {
+            alert.informativeText =
+                "Your latest session change is still being sent. Keep Gainmap open "
+                + "until the flask ring turns green so it is available on your iPhone. "
+                + "If you quit now, it remains saved on this Mac and will resume next launch."
+        }
+        alert.addButton(withTitle: "Keep Syncing")
+        alert.addButton(withTitle: "Quit Anyway")
+        return alert.runModal() == .alertSecondButtonReturn
+            ? .terminateNow
+            : .terminateCancel
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        model?.flushNowForTermination()
+    }
+}
+
 @main
 struct GainmapApp: App {
+    @NSApplicationDelegateAdaptor(GainmapApplicationDelegate.self)
+    private var applicationDelegate
+
     // Arm crash reporting FIRST — declared before any other stored property so
     // Swift's in-order initialization runs it before Sparkle starts (so an
     // early-launch crash is still captured). No-op if the user opted out or no DSN.
@@ -39,12 +96,16 @@ struct GainmapApp: App {
 
     var body: some Scene {
         Window("Gainmap", id: "main") {
-            ContentView(model: model)
+            MacRootView(model: model)
+                .environmentObject(auth)
+                .environmentObject(sync)
                 .modifier(IntelUnsupportedNotice())
                 .modifier(FirstRunCrashNotice())
                 .modifier(VersionGateOverlay(gate: versionGate, updater: updaterController.updater))
                 .task { await versionGate.check() }
                 .task {
+                    applicationDelegate.configure(model: model, sync: sync)
+                    await sync.bind(model: model)
                     guard !SyncCoordinator.isEphemeralLaunch else { return }
                     auth.start()
                     await sync.apply(authState: auth.state, model: model)
@@ -68,7 +129,12 @@ struct GainmapApp: App {
         .windowResizability(.contentSize)
         .windowStyle(.hiddenTitleBar)
         .commands {
-            CommandGroup(replacing: .newItem) {}  // single-window app
+            CommandGroup(replacing: .newItem) {
+                Button("New Session…") {
+                    NotificationCenter.default.post(name: .gainmapNewSession, object: nil)
+                }
+                .keyboardShortcut("n", modifiers: .command)
+            }
             CommandGroup(after: .appInfo) {
                 CheckForUpdatesView(updater: updaterController.updater)
             }

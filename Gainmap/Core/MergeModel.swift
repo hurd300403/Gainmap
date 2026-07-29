@@ -148,6 +148,11 @@ public final class MergeModel: ObservableObject {
     public var outputPolicy: OutputPolicy
     private var persistTask: Task<Void, Never>?
 
+    /// True while a debounced edit has not reached the session file yet.
+    /// The Mac quit guard uses this to save locally and warn when that edit
+    /// also still needs its cloud pass.
+    public var hasUnflushedSessionChanges: Bool { persistTask != nil }
+
     /// Import-time metadata (content hash + pixel dims) keyed by photo id —
     /// the source of truth `syncToSession` folds into the records. Lives
     /// OUTSIDE `session` because hashing lands async while `session.photos`
@@ -236,6 +241,66 @@ public final class MergeModel: ObservableObject {
             session = recent
             restoreItemsFromSession()
         }
+    }
+
+    /// Leave the current session cleanly and open another session from the
+    /// attached store. The flush happens BEFORE the load so returning to the
+    /// session that's already in memory never replaces a just-flushed edit
+    /// with an older snapshot fetched by the caller.
+    @discardableResult
+    public func openSession(id: UUID) async -> Bool {
+        guard phase != .merging, !isExportingAll, let store else { return false }
+        await flushSession()
+        guard let next = await store.load(id: id) else { return false }
+        adoptSession(next)
+        return true
+    }
+
+    /// Start a distinct, empty batch without losing the session being left.
+    /// The saved signature is the new session's running look; batch mode keeps
+    /// the user's last-used value as the existing migration behavior promises.
+    @discardableResult
+    public func startNewSession() async -> Bool {
+        guard phase != .merging, !isExportingAll else { return false }
+        await flushSession()
+        adoptSession(Session(
+            sameLookForAll: UserDefaults.standard.bool(forKey: Self.sameLookKey),
+            runningLook: signature))
+        return true
+    }
+
+    /// Rename the live session through the same debounce/persist bridge as
+    /// look edits, so SyncEngine sees a real title mutation with a baseline.
+    public func setSessionTitle(_ title: String) {
+        let clean = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty, clean != session.title else { return }
+        session.title = clean
+        schedulePersist()
+    }
+
+    /// A peer tombstoned the open session. The sync coordinator flushes any
+    /// pending edit into the conflict machinery first, then calls this to
+    /// prevent a later navigation flush from recreating the deleted file.
+    @discardableResult
+    public func discardSessionIfCurrent(_ id: UUID) -> Bool {
+        guard session.id == id, phase != .merging, !isExportingAll else { return false }
+        adoptSession(Session(
+            sameLookForAll: UserDefaults.standard.bool(forKey: Self.sameLookKey),
+            runningLook: signature))
+        return true
+    }
+
+    /// Replace all view-facing state with one persisted session. This is not
+    /// itself an edit: restoreItemsFromSession establishes the loaded snapshot
+    /// as the persistence baseline and does not arm the debounce.
+    private func adoptSession(_ next: Session) {
+        persistTask?.cancel()
+        persistTask = nil
+        phase = .idle
+        dropNotice = nil
+        session = next
+        lastPersistedContent = nil
+        restoreItemsFromSession()
     }
 
     /// Rebuild the view-facing queue from `session.photos` (init-with-session
@@ -449,9 +514,7 @@ public final class MergeModel: ObservableObject {
         let dir = store.root.appendingPathComponent("users/\(store.uid)/sessions",
                                                     isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let enc = JSONEncoder()
-        enc.outputFormatting = [.sortedKeys]
-        enc.dateEncodingStrategy = .iso8601
+        let enc = SessionJSONCoding.encoder()
         guard let data = try? enc.encode(session) else { return }
         let final = dir.appendingPathComponent("\(session.id.uuidString).json")
         let tmp = dir.appendingPathComponent(".tmp-\(UUID().uuidString).json")

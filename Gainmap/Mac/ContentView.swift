@@ -17,6 +17,8 @@ struct ContentView: View {
     // store when auth state changes, so the model must outlive this view's
     // identity churn.
     @ObservedObject var model: MergeModel
+    var onShowSessions: (() -> Void)? = nil
+    var onHydrateSelected: (() async -> Void)? = nil
     @Environment(\.scenePhase) private var scenePhase
     // Look-panel disclosure state lives HERE (session lifetime), not in the
     // panel: the panel is torn down when the queue empties, and these must
@@ -149,16 +151,16 @@ struct ContentView: View {
             #if DEBUG
             model.applyDebugSeedIfRequested()
             #endif
-        }
-        // P3 persistence: adopt the store + resume the last session. Signed
-        // out this is the classic local store; once auth resolves, the
-        // SyncCoordinator re-attaches the per-uid store (adopting these
-        // sessions). Ephemeral launches (-gm-seed screenshots, -gm-no-store
-        // test host) skip stores entirely.
-        .task {
-            if !SyncCoordinator.isEphemeralLaunch {
-                await model.attachStoreAndRestore(FileSessionStore())
+            // P7: an existing session already has items before this view
+            // appears, so the old empty→nonempty observer never fired.
+            Task {
+                try? await Task.sleep(for: .milliseconds(50))
+                sizeWindowForFirstPhoto()
             }
+        }
+        .task(id: model.selectedID) {
+            guard model.selectedID != nil else { return }
+            await onHydrateSelected?()
         }
         // Live-look flush: debounce covers editing; background/quit flush the
         // rest (willTerminate needs the synchronous path — no async grace).
@@ -180,6 +182,13 @@ struct ContentView: View {
                   let size = ImageInfo.pixelSize(of: url), size.height > 0 else { return }
             sizeWindowToAspect(size.width / size.height)
         }
+    }
+
+    private func sizeWindowForFirstPhoto() {
+        guard let url = model.items.first?.sdrURL,
+              let size = ImageInfo.pixelSize(of: url),
+              size.height > 0 else { return }
+        sizeWindowToAspect(size.width / size.height)
     }
 
     /// Set the window so the left preview column matches `aspect` (no bars).
@@ -232,12 +241,25 @@ struct ContentView: View {
         // Branding right-justified (clears the macOS traffic-light buttons); a small
         // native share button fills the otherwise-empty top-left.
         HStack(spacing: 16) {
-            shareButton
+            HStack(spacing: 10) {
+                if onShowSessions != nil {
+                    sessionsButton
+                }
+                shareButton
+            }
+            .padding(.leading, 44)        // clear the macOS traffic-light buttons
             Spacer()
             VStack(alignment: .trailing, spacing: 2) {
                 (Text("Gain").foregroundStyle(Color.white)
                  + Text("map").foregroundStyle(Theme.accent))
                     .font(Theme.display(30, .semibold))
+                if !model.session.title.isEmpty {
+                    Text(model.session.title.uppercased())
+                        .font(Theme.mono(9.5, .semibold))
+                        .tracking(1.3)
+                        .foregroundStyle(Theme.gold)
+                        .lineLimit(1)
+                }
                 Text("Turn your SDR JPEG into an UltraHDR that glows on HDR screens — clean fallback everywhere else.")
                     .font(Theme.ui(12.5))
                     .foregroundStyle(Theme.stoneDim)
@@ -246,6 +268,29 @@ struct ContentView: View {
                 .frame(width: 54, height: 54)
                 .shadow(color: .black.opacity(0.5), radius: 7, y: 4)
         }
+    }
+
+    private var sessionsButton: some View {
+        Button {
+            onShowSessions?()
+        } label: {
+            HStack(spacing: 7) {
+                Image(systemName: "chevron.left")
+                    .font(.system(size: 10, weight: .bold))
+                Text("Sessions")
+                    .font(Theme.mono(11, .semibold))
+            }
+            .foregroundStyle(Theme.stone)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
+            .background(Theme.surface, in: Capsule())
+            .overlay(Capsule().stroke(Theme.line, lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .disabled(model.phase == .merging || model.isExportingAll)
+        .help(model.phase == .merging || model.isExportingAll
+              ? "Finish or stop exporting before leaving this session"
+              : "Back to Sessions")
     }
 
     // MARK: Bench (idle / error / merging)
@@ -538,7 +583,6 @@ struct ContentView: View {
             .shadow(color: Theme.accent.opacity(shareHover ? 0.45 : 0), radius: 12, y: 4)
         }
         .buttonStyle(.plain)
-        .padding(.leading, 44)        // clear the macOS traffic-light buttons
         .onHover { shareHover = $0 }
         .help("Share the download link with someone")
     }

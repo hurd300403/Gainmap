@@ -12,11 +12,40 @@ import Foundation
 import SwiftUI
 import GainmapCore
 
+struct SessionExportResult {
+    let urls: [URL]
+    let failedCount: Int
+}
+
+enum SessionExportError: LocalizedError {
+    case busy
+    case missingSession
+    case noExports
+
+    var errorDescription: String? {
+        switch self {
+        case .busy:
+            return "Another session is already exporting."
+        case .missingSession:
+            return "That session is no longer available."
+        case .noExports:
+            return "None of the photos could be exported. Make sure their originals have finished syncing and try again."
+        }
+    }
+}
+
 @MainActor
 final class AppModel: ObservableObject {
 
     @Published private(set) var cards: [SessionCard] = []
     @Published private(set) var syncing = false
+    @Published private(set) var initialSyncComplete = false
+    @Published private(set) var syncPassInFlight = false
+    @Published private(set) var pendingWorkCount = 0
+    @Published private(set) var hasSyncIssue = false
+    @Published private(set) var exportingSessionID: UUID?
+    @Published private(set) var exportCompletedCount = 0
+    @Published private(set) var exportTotalCount = 0
     /// False until the first card build lands — the grid shows a spinner,
     /// not "No sessions yet", while the truth is still unknown.
     @Published private(set) var initialLoadDone = false
@@ -74,13 +103,17 @@ final class AppModel: ObservableObject {
                                     store: store, root: root)
             self.engine = engine
             await engine.setOnRemoteChange { [weak self] id in
-                Task { @MainActor in await self?.remoteChanged(id) }
+                Task { @MainActor in await self?.remoteChanged(id, expectedUID: uid) }
             }
             await engine.start()
             syncing = true
-            Task {
+            syncPassInFlight = true
+            Task { [weak self] in
                 await engine.drainOnce()
                 await engine.pumpTransfers()
+                guard let self, self.activeUID == uid else { return }
+                self.syncPassInFlight = false
+                self.initialSyncComplete = true
                 self.scheduleRefresh()
             }
         }
@@ -99,6 +132,10 @@ final class AppModel: ObservableObject {
         store = nil
         activeUID = nil
         syncing = false
+        initialSyncComplete = false
+        syncPassInFlight = false
+        pendingWorkCount = 0
+        hasSyncIssue = false
         failedThumbs = []
         if clearCards {
             cards = []
@@ -109,24 +146,32 @@ final class AppModel: ObservableObject {
     func appBecameActive() async {
         failedThumbs = []   // give failed thumb downloads another chance
         guard let engine else { return }
+        syncPassInFlight = true
         await engine.retryTransfers()
         await engine.drainOnce()
+        syncPassInFlight = false
         scheduleRefresh()
     }
 
     /// The editor's persist hook: journal + drain local edits.
     func sessionPersisted(_ session: Session, before: Session?) {
         guard let engine else { return }
-        Task {
+        let expectedUID = activeUID
+        syncPassInFlight = true
+        Task { [weak self] in
             await engine.noteLocalSession(session, before: before)
             await engine.drainOnce()
             await engine.pumpTransfers()
+            guard let self, self.activeUID == expectedUID else { return }
+            self.syncPassInFlight = false
+            self.scheduleRefresh()
         }
     }
 
     /// Inbound change: fold into the open editor (if it's this session),
     /// then rebuild the grid.
-    private func remoteChanged(_ sessionID: UUID) async {
+    private func remoteChanged(_ sessionID: UUID, expectedUID: String) async {
+        guard activeUID == expectedUID else { return }
         if let editorModel = activeEditorModel, editorModel.session.id == sessionID,
            let fresh = await store?.load(id: sessionID) {
             editorModel.reloadFromRemote(fresh)
@@ -169,14 +214,25 @@ final class AppModel: ObservableObject {
         // Phase 1 — LOCAL ONLY, no network: publish immediately so the grid
         // never sits on "No sessions yet" behind downloads.
         let sessions = await store.loadAll()
-        var pending = false
+        var pendingSessionIDs = Set<UUID>()
         if let engine {
             let transfers = await engine.transferSnapshot
             let journal = await engine.journalSnapshot
-            pending = transfers.activeCount > 0 || !journal.pendingEntries.isEmpty
+            pendingSessionIDs = Self.pendingSessionIDs(
+                sessions: sessions, journal: journal, transfers: transfers)
+            pendingWorkCount = journal.entries.count
+                + transfers.transfers.filter { $0.status != .done }.count
+            hasSyncIssue = transfers.hasParked || transfers.isQuotaExceeded
+                || !journal.conflicts.isEmpty
+        } else {
+            pendingWorkCount = 0
+            hasSyncIssue = false
         }
         var missing: [String] = []   // thumb hashes to hydrate in phase 2
-        cards = buildCards(sessions: sessions, pending: pending, collectMissing: &missing)
+        cards = buildCards(
+            sessions: sessions,
+            pendingSessionIDs: pendingSessionIDs,
+            collectMissing: &missing)
         initialLoadDone = true
 
         // Phase 2 — hydrate missing thumbs (bounded, deduped, no eternal
@@ -208,13 +264,16 @@ final class AppModel: ObservableObject {
         guard anyLanded, !Task.isCancelled else { return }
         let fresh = await store.loadAll()
         var ignored: [String] = []
-        cards = buildCards(sessions: fresh, pending: pending, collectMissing: &ignored)
+        cards = buildCards(
+            sessions: fresh,
+            pendingSessionIDs: pendingSessionIDs,
+            collectMissing: &ignored)
     }
 
     /// Cover URL preference: local thumb file if present; else the photo's
     /// own local source file (imports on this device); else nil (placeholder)
     /// with the hash queued for hydration.
-    private func buildCards(sessions: [Session], pending: Bool,
+    private func buildCards(sessions: [Session], pendingSessionIDs: Set<UUID>,
                             collectMissing: inout [String]) -> [SessionCard] {
         let fm = FileManager.default
         guard let store else { return [] }
@@ -243,8 +302,125 @@ final class AppModel: ObservableObject {
                 photoCount: session.photos.count,
                 updatedAt: session.updatedAt,
                 covers: covers,
-                pendingSync: pending)
+                pendingSync: pendingSessionIDs.contains(session.id))
         }
+    }
+
+    private static func pendingSessionIDs(
+        sessions: [Session],
+        journal: ChangeJournal,
+        transfers: TransferQueue
+    ) -> Set<UUID> {
+        var pending = Set<UUID>()
+        for entry in journal.entries {
+            switch entry.target {
+            case .session(let id), .photo(let id, _):
+                pending.insert(id)
+            case .user:
+                break
+            }
+        }
+        let activeHashes = Set(transfers.transfers
+            .filter { $0.status != .done }
+            .map(\.contentHash))
+        guard !activeHashes.isEmpty else { return pending }
+        for session in sessions where session.photos.contains(where: {
+            $0.contentHash.map(activeHashes.contains) ?? false
+        }) {
+            pending.insert(session.id)
+        }
+        return pending
+    }
+
+    // ------------------------------------------------------------- actions
+
+    func renameSession(id: UUID, to title: String) async {
+        let clean = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty, let store,
+              var session = await store.load(id: id),
+              session.title != clean else { return }
+        let before = session
+        session.title = clean
+        session.updatedAt = Date()
+        try? await store.save(session)
+        if let engine {
+            syncPassInFlight = true
+            await engine.noteLocalSession(session, before: before)
+            await engine.drainOnce()
+            await engine.pumpTransfers()
+            syncPassInFlight = false
+        }
+        scheduleRefresh()
+    }
+
+    func deleteSession(id: UUID) async {
+        guard exportingSessionID != id, let store else { return }
+        if let engine {
+            syncPassInFlight = true
+            await engine.deleteSessionLocally(id)
+            await engine.drainOnce()
+            syncPassInFlight = false
+        } else {
+            await store.delete(id: id)
+        }
+        scheduleRefresh()
+    }
+
+    func exportSession(id: UUID) async throws -> SessionExportResult {
+        guard exportingSessionID == nil else { throw SessionExportError.busy }
+        guard let store, let session = await store.load(id: id) else {
+            throw SessionExportError.missingSession
+        }
+
+        exportingSessionID = id
+        exportCompletedCount = 0
+        exportTotalCount = session.photos.count
+        defer {
+            exportingSessionID = nil
+            exportCompletedCount = 0
+            exportTotalCount = 0
+        }
+
+        let exportDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("gm-exports/\(id.uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: exportDir, withIntermediateDirectories: true)
+        let merge = MergeModel(
+            session: session,
+            store: store,
+            output: .managedDirectory(exportDir))
+        merge.onSessionPersisted = { [weak self] updated, before in
+            Task { @MainActor in self?.sessionPersisted(updated, before: before) }
+        }
+
+        var outputs: [URL] = []
+        var failed = 0
+        for item in merge.items {
+            if !FileManager.default.fileExists(atPath: item.sdrURL.path) {
+                let hash = session.photos.first(where: { $0.id == item.id })?.contentHash
+                guard let hash, await engine?.hydrateOriginal(hash: hash) != nil else {
+                    failed += 1
+                    exportCompletedCount += 1
+                    continue
+                }
+            }
+            let itemExportDir = exportDir
+                .appendingPathComponent(item.id.uuidString, isDirectory: true)
+            try? FileManager.default.createDirectory(
+                at: itemExportDir, withIntermediateDirectories: true)
+            merge.outputPolicy = .managedDirectory(itemExportDir)
+            await merge.mergeItem(item.id)
+            if let output = merge.items.first(where: { $0.id == item.id })?.outputURL {
+                outputs.append(output)
+            } else {
+                failed += 1
+            }
+            exportCompletedCount += 1
+        }
+        await merge.flushSession()
+        scheduleRefresh()
+        guard !outputs.isEmpty else { throw SessionExportError.noExports }
+        return SessionExportResult(urls: outputs, failedCount: failed)
     }
 
     func session(id: UUID) async -> Session? {
