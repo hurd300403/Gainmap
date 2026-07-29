@@ -227,6 +227,11 @@ public final class MergeModel: ObservableObject {
     /// visible, never silently dropped. `done` survives only while the export
     /// file still exists.
     private func restoreItemsFromSession() {
+        // Heal titles minted before the store-plumbing blocklist landed
+        // ("imports"/"blobs"/"files" leaked in as session names).
+        if ["imports", "blobs", "files"].contains(session.title.lowercased()) {
+            session.title = SessionNaming.suggest(from: [], date: session.createdAt)
+        }
         sameLookForAll = session.sameLookForAll
         runningLook = session.runningLook
         loadingSelection = true

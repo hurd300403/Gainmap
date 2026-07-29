@@ -2,11 +2,12 @@
 //  EditorScreen.swift
 //  Gainmap for iPhone (P5)
 //
-//  The compact editor: full-bleed EDR preview + horizontal filmstrip up top,
-//  the SAME LookControlsPanel as the Mac in a persistent bottom sheet
-//  (150pt / medium / large detents) with the tabbed advanced groups
-//  (concept D). Press-and-hold the preview to compare against the original;
-//  an "SDR SCREEN" badge appears when the display can't show EDR.
+//  The compact editor, built around SCREEN REAL ESTATE: no header row —
+//  back/share float over the photo; the session title cubbyholes into the
+//  controls sheet; and the sheet's RESTING height is computed from the
+//  photo's aspect ratio, so it rises to kiss the bottom of the image
+//  (landscape = tall sheet, portrait = image gets the room) instead of
+//  covering it. Same LookControlsPanel as the Mac, tabbed (concept D).
 //
 
 import SwiftUI
@@ -33,6 +34,10 @@ struct EditorScreen: View {
     @State private var shareURL: URL?
     @State private var exporting = false
 
+    // Dynamic sheet: the resting detent hugs the fitted image.
+    @State private var restingDetent: CGFloat = 190
+    @State private var detentSelection: PresentationDetent = .height(190)
+
     private let sessionTitle: String
     private let store: FileSessionStore?
     /// Photos picked for a brand-new session — imported in prepare().
@@ -56,16 +61,29 @@ struct EditorScreen: View {
                                                                       isDirectory: true)
     }
 
+    // ------------------------------------------------------------- layout
+
+    private let stripHeight: CGFloat = 58
+    private let hGap: CGFloat = 10
+    private let minResting: CGFloat = 190
+
     var body: some View {
-        ZStack {
-            Theme.bg.ignoresSafeArea()
-            VStack(spacing: 10) {
-                header
-                preview
-                filmstrip
-                Spacer(minLength: 0)
+        GeometryReader { geo in
+            ZStack {
+                Theme.bg.ignoresSafeArea()
+                let fitted = fittedImageSize(in: geo)
+                VStack(spacing: hGap) {
+                    preview
+                        .frame(width: fitted.width, height: fitted.height)
+                        .frame(maxWidth: .infinity)
+                    filmstrip
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 10)
+                .padding(.top, 2)
             }
-            .padding(.horizontal, 12)
+            .onAppear { recomputeResting(geo: geo) }
+            .onChange(of: previewAspect) { _, _ in recomputeResting(geo: geo) }
         }
         .sheet(isPresented: $controlsPresented) {
             controlsSheet
@@ -77,45 +95,33 @@ struct EditorScreen: View {
         }
     }
 
-    // ------------------------------------------------------------- pieces
-
-    private var header: some View {
-        HStack(spacing: 12) {
-            Button {
-                controlsPresented = false
-                Task {
-                    await model.flushSession()
-                    dismiss()
-                }
-            } label: {
-                HStack(spacing: 4) {
-                    Image(systemName: "chevron.left").font(.system(size: 13, weight: .semibold))
-                    Text("Sessions").font(Theme.ui(14, .medium))
-                }
-                .foregroundStyle(Theme.stoneDim)
-            }
-            .buttonStyle(.plain)
-            Spacer()
-            Text(liveTitle.isEmpty ? "Untitled session" : liveTitle)
-                .font(Theme.ui(14, .semibold)).foregroundStyle(Theme.stone)
-                .lineLimit(1)
-            Spacer()
-            Button {
-                exportSelected()
-            } label: {
-                if exporting {
-                    ProgressView().tint(Theme.gold)
-                } else {
-                    Image(systemName: "square.and.arrow.up")
-                        .font(.system(size: 15, weight: .medium))
-                        .foregroundStyle(model.canSaveSelected ? Theme.gold : Theme.stoneFaint)
-                }
-            }
-            .buttonStyle(.plain)
-            .disabled(!model.canSaveSelected || exporting)
-        }
-        .padding(.top, 8)
+    /// Fit the image between the top of the content area and the resting
+    /// sheet: portrait shrinks to leave the sheet its minimum; landscape
+    /// keeps its natural height (the sheet grows into the leftover instead).
+    private func fittedImageSize(in geo: GeometryProxy) -> CGSize {
+        let w = geo.size.width - 20
+        let aspect = previewAspect
+        let naturalH = w / aspect
+        let maxH = geo.size.height - stripHeight - hGap * 2
+            - max(0, minResting - geo.safeAreaInsets.bottom)
+        let h = max(120, min(naturalH, maxH))
+        return CGSize(width: min(w, h * aspect), height: h)
     }
+
+    /// The sheet's resting height = whatever the image + strip leave free
+    /// (clamped so it never eats more than ~half the screen at rest).
+    private func recomputeResting(geo: GeometryProxy) {
+        let fitted = fittedImageSize(in: geo)
+        let usedAbove = fitted.height + stripHeight + hGap * 2 + 2
+        let free = geo.size.height + geo.safeAreaInsets.bottom - usedAbove
+        let clamped = max(minResting, min(free, geo.size.height * 0.48))
+        guard abs(clamped - restingDetent) > 1 else { return }
+        let wasResting = detentSelection == .height(restingDetent)
+        restingDetent = clamped
+        if wasResting { detentSelection = .height(clamped) }
+    }
+
+    // ------------------------------------------------------------- pieces
 
     private var preview: some View {
         ZStack {
@@ -132,12 +138,29 @@ struct EditorScreen: View {
                 }
             }
         }
-        .aspectRatio(previewAspect, contentMode: .fit)
-        .frame(maxWidth: .infinity)
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
             .stroke(Theme.line, lineWidth: 1))
+        // Floating chrome: no header row — these ride ON the photo.
         .overlay(alignment: .topLeading) {
+            floatingButton(system: "chevron.left") {
+                controlsPresented = false
+                Task {
+                    await model.flushSession()
+                    dismiss()
+                }
+            }
+            .padding(8)
+        }
+        .overlay(alignment: .topTrailing) {
+            floatingButton(system: exporting ? nil : "square.and.arrow.up",
+                           spinning: exporting,
+                           disabled: !model.canSaveSelected || exporting) {
+                exportSelected()
+            }
+            .padding(8)
+        }
+        .overlay(alignment: .bottomLeading) {
             if !screenSupportsEDR {
                 Text("SDR SCREEN")
                     .font(Theme.mono(8, .bold)).tracking(1)
@@ -147,7 +170,7 @@ struct EditorScreen: View {
                     .padding(8)
             }
         }
-        .overlay(alignment: .topTrailing) {
+        .overlay(alignment: .bottomTrailing) {
             if comparing {
                 Text("ORIGINAL")
                     .font(Theme.mono(8, .bold)).tracking(1)
@@ -163,6 +186,26 @@ struct EditorScreen: View {
         }
     }
 
+    private func floatingButton(system: String?, spinning: Bool = false,
+                                disabled: Bool = false,
+                                action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            ZStack {
+                Circle().fill(.black.opacity(0.55))
+                if spinning {
+                    ProgressView().tint(Theme.gold).controlSize(.small)
+                } else if let system {
+                    Image(systemName: system)
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(disabled ? Theme.stoneFaint : Theme.stone)
+                }
+            }
+            .frame(width: 34, height: 34)
+        }
+        .buttonStyle(.plain)
+        .disabled(disabled)
+    }
+
     private var filmstrip: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
@@ -174,22 +217,32 @@ struct EditorScreen: View {
                         .onTapGesture { select(item.id) }
                 }
             }
-            .padding(.vertical, 2)
+            .padding(.vertical, 1)
         }
-        .frame(height: 64)
+        .frame(height: stripHeight)
     }
 
     private var controlsSheet: some View {
         ScrollView {
-            LookControlsPanel(model: model,
-                              showAdvancedLook: $showAdvancedLook,
-                              expandedGroups: $expandedGroups,
-                              advancedStyle: .tabbed,
-                              onGlowInSDRInfo: { showGlowInSDRModal = true })
-                .padding(.horizontal, 10)
-                .padding(.top, 12)
+            VStack(spacing: 8) {
+                // The cubbyholed title — the header row it replaced cost 44pt
+                // of photo. Tiny, quiet, exactly where the thumb already is.
+                Text(liveTitle.isEmpty ? "Untitled session" : liveTitle)
+                    .font(Theme.mono(9, .semibold)).tracking(1.5)
+                    .foregroundStyle(Theme.stoneFaint)
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity)
+                LookControlsPanel(model: model,
+                                  showAdvancedLook: $showAdvancedLook,
+                                  expandedGroups: $expandedGroups,
+                                  advancedStyle: .tabbed,
+                                  onGlowInSDRInfo: { showGlowInSDRModal = true })
+            }
+            .padding(.horizontal, 10)
+            .padding(.top, 8)
         }
-        .presentationDetents([.height(170), .medium, .large])
+        .presentationDetents([.height(restingDetent), .medium, .large],
+                             selection: $detentSelection)
         .presentationBackgroundInteraction(.enabled(upThrough: .medium))
         .presentationDragIndicator(.visible)
         .interactiveDismissDisabled(true)
@@ -240,6 +293,7 @@ struct EditorScreen: View {
         // Raise the controls once the cover's own transition has settled.
         Task {
             try? await Task.sleep(nanoseconds: 600_000_000)
+            detentSelection = .height(restingDetent)
             controlsPresented = true
         }
         if !importItems.isEmpty {
@@ -259,7 +313,7 @@ struct EditorScreen: View {
         guard let store else { return }
         importing = true
         defer { importing = false }
-        let managedRoot = await store.managedFilesDir
+        let managedRoot = store.managedFilesDir
         var staged: [URL] = []
         for item in importItems {
             guard let data = try? await item.loadTransferable(type: Data.self) else { continue }
@@ -362,7 +416,7 @@ private struct FilmstripThumb: View {
                     .foregroundStyle(Theme.stoneFaint)
             }
         }
-        .frame(width: 56, height: 56)
+        .frame(width: 52, height: 52)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous)
             .stroke(selected ? Theme.gold : Theme.line, lineWidth: selected ? 2 : 1))
