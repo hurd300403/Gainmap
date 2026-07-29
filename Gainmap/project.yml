@@ -39,6 +39,11 @@ packages:
   Sentry:
     url: https://github.com/getsentry/sentry-cocoa
     from: "8.0.0"
+  # P4 sync backend. (S3 spike used 11.15.0; Xcode 26.5 rejects the 11.x
+  # manifest's tools version, so the main project rides the 12.x line.)
+  Firebase:
+    url: https://github.com/firebase/firebase-ios-sdk
+    from: "12.0.0"
 
 targets:
   GainmapCore:
@@ -59,6 +64,16 @@ targets:
       # libultrahdr + libjpeg-turbo static slices (S1 artifact, pinned 13a058f).
       - framework: Vendor/GainmapUHDR.xcframework
         embed: false
+      # P4 sync engine (SyncEngine/FirebaseSyncBackend live in Core). Firebase
+      # links statically INTO GainmapCore — apps must NOT add these products.
+      - package: Firebase
+        product: FirebaseAuth
+      - package: Firebase
+        product: FirebaseFirestore
+      - package: Firebase
+        product: FirebaseStorage
+      - package: Firebase
+        product: FirebaseFunctions
     settings:
       base:
         PRODUCT_NAME: GainmapCore
@@ -115,6 +130,11 @@ targets:
         COMBINE_HIDPI_IMAGES: YES
         LD_RUNPATH_SEARCH_PATHS: "@executable_path/../Frameworks"
       configs:
+        Debug:
+          # + keychain-access-groups (FirebaseAuth on macOS; S3 finding).
+          # Release keeps the profile-free entitlements until the first
+          # sync-enabled release ships.
+          CODE_SIGN_ENTITLEMENTS: Mac/Support/Gainmap-Debug.entitlements
         Release:
           # gainmap project in the sam-hurd-photo Sentry org.
           SENTRY_DSN: "https://553956a1d0e59a781e1ec7dedeee33ba@o4510926726365184.ingest.us.sentry.io/4511583301795840"
@@ -141,6 +161,29 @@ targets:
         INFOPLIST_KEY_CFBundleDisplayName: Gainmap Demo
         TARGETED_DEVICE_FAMILY: "1"
         LD_RUNPATH_SEARCH_PATHS: "@executable_path/Frameworks"
+
+  # P4 emulator integration suite — HOSTED by the Mac app because FirebaseAuth
+  # needs a real keychain (a bare xctest bundle has none; every test errors
+  # with a keychain failure). Skips itself unless GM_EMULATOR=1 is in the
+  # environment; run via scripts/test-sync.sh swift.
+  SyncIntegrationTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: Tests/SyncIntegrationTests
+      # Same fixtures folder the unit tests use (source JPEG for uploads).
+      - path: Tests/GainmapCoreTests/Fixtures
+        type: folder
+        buildPhase: resources
+    dependencies:
+      - target: Gainmap
+      - target: GainmapCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.legacylab.gainmap.sync.tests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Gainmap.app/Contents/MacOS/Gainmap"
+        BUNDLE_LOADER: "$(TEST_HOST)"
 
   GainmapCoreTests:
     type: bundle.unit-test
@@ -185,13 +228,19 @@ schemes:
       targets:
         Gainmap: all
         GainmapCoreTests: [test]
+        SyncIntegrationTests: [test]
     run:
       config: Debug
     test:
       config: Debug
       gatherCoverageData: true
+      # -gm-seed keeps the HOST app from attaching the real session store
+      # while the integration tests drive their own temp stores.
+      commandLineArguments:
+        "-gm-seed test-host": true
       targets:
         - GainmapCoreTests
+        - SyncIntegrationTests
     profile:
       config: Release
     analyze:

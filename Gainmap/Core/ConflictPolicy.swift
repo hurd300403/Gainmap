@@ -104,6 +104,31 @@ public enum ConflictPolicy {
     }
 }
 
+extension RemoteGroupState {
+    /// Build a group's remote state from a raw document map (nil = doc gone).
+    /// Pure, shared by the Firebase drain transaction and the tests.
+    public static func from(doc: [String: FSValue]?, group: FieldGroup) -> RemoteGroupState {
+        guard let doc else { return RemoteGroupState(docExists: false) }
+        func int(_ key: String) -> Int { doc[key]?.intValue.map(Int.init) ?? 0 }
+        let revField = group.revField
+        // by/mut share the rev field's prefix ("lookRev" -> "lookBy"/"lookMut").
+        let prefix = revField.map { String($0.dropLast(3)) }
+        return RemoteGroupState(
+            docExists: true,
+            rev: revField.map(int) ?? 0,
+            mut: prefix.flatMap { doc["\($0)Mut"]?.stringValue } ?? "",
+            deletedAt: doc["deletedAt"]?.dateValue,
+            delRev: int("delRev"))
+    }
+
+    /// The remote group's author (for ConflictRecord.supersededBy).
+    public static func author(doc: [String: FSValue]?, group: FieldGroup) -> String {
+        guard let doc, let revField = group.revField else { return "" }
+        let prefix = String(revField.dropLast(3))
+        return doc["\(prefix)By"]?.stringValue ?? ""
+    }
+}
+
 // MARK: - Inbound merge (dirty-group overlay)
 
 /// Applies the journal's dirty-value overlay onto an inbound remote doc:

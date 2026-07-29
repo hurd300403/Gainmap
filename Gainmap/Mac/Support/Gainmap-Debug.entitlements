@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- DEBUG-ONLY entitlements. Same sandbox stance as release, PLUS the
+         keychain access group FirebaseAuth needs on macOS (it stores auth
+         state in the data-protection keychain; without the group every
+         sign-in fails with FIRAuthErrorDomain 17995 — the S3 spike finding).
+         Debug builds sign automatically with the dev team, so Xcode's Mac
+         Team provisioning profile grants the group. The RELEASE entitlements
+         stay in Gainmap.entitlements until the first sync-enabled release
+         ships (which is when the provisioning-profile machinery lands in
+         release.sh per the plan). -->
+    <key>com.apple.security.app-sandbox</key>
+    <false/>
+    <key>keychain-access-groups</key>
+    <array>
+        <string>$(AppIdentifierPrefix)com.legacylab.gainmap</string>
+    </array>
+</dict>
+</plist>

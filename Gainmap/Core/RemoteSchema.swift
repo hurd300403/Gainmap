@@ -21,7 +21,7 @@ import Foundation
 /// The subset of Firestore field types the Gainmap schema uses. Decoding is
 /// tolerant the same way the local store is: accessors coerce int <-> double,
 /// unknown keys in maps are ignored by the document decoders.
-public indirect enum FSValue: Equatable, Sendable {
+public indirect enum FSValue: Equatable, Sendable, Codable {
     case null
     case bool(Bool)
     case int(Int64)
