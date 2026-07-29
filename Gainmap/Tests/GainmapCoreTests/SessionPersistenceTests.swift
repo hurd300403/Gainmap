@@ -341,6 +341,51 @@ final class SessionPersistenceTests: XCTestCase {
         XCTAssertFalse(back?.bakeGlowIntoSDR ?? true,
                        "the saved default never carries GLOW-IN-SDR")
     }
+
+    // MARK: portable managed origins (P5 — iOS container UUIDs rotate)
+
+    func testManagedImportsPersistRelativeAndHealStalePaths() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("gm-managed-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = FileSessionStore(root: root, uid: "u1")
+        let importsDir = store.managedFilesDir.appendingPathComponent("imports")
+        try FileManager.default.createDirectory(at: importsDir,
+                                                withIntermediateDirectories: true)
+        let file = importsDir.appendingPathComponent("a.jpg")
+        try Data([0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3]).write(to: file)
+
+        // Import via the normal pipeline: the persisted record must be
+        // RELATIVE (managed), never an absolute path into the container.
+        let model = await MergeModel(session: Session(), store: store)
+        await model.addFiles([file])
+        await model.flushSession()
+        let saved = await store.load(id: model.session.id)
+        let record = try XCTUnwrap(saved?.photos.first)
+        guard case .managed(let rel) = record.origin else {
+            return XCTFail("import inside the store must persist as .managed, got \(record.origin)")
+        }
+        XCTAssertEqual(rel, "imports/a.jpg")
+
+        // Reopening resolves against the CURRENT managed root.
+        let reopened = await MergeModel(session: saved!, store: store)
+        let reopenedItems = await reopened.items
+        let item = try XCTUnwrap(reopenedItems.first)
+        XCTAssertEqual(item.sdrURL.path, file.path)
+        XCTAssertNotEqual(item.status, .error)
+
+        // Legacy heal: a stale absolute path from a PREVIOUS container
+        // (different UUID prefix, same /files/ suffix) re-roots to the
+        // current container instead of erroring.
+        var legacy = saved!
+        legacy.photos[0].origin = .linked(
+            path: "/var/mobile/Containers/Data/OLD-UUID/Gainmap/users/u1/files/imports/a.jpg")
+        let healed = await MergeModel(session: legacy, store: store)
+        let healedItems = await healed.items
+        let healedItem = try XCTUnwrap(healedItems.first)
+        XCTAssertEqual(healedItem.sdrURL.path, file.path)
+        XCTAssertNotEqual(healedItem.status, .error)
+    }
 }
 
 private extension JSONDecoder {

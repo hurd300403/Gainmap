@@ -264,10 +264,15 @@ public actor SyncEngine {
     /// against the shadow and journals exactly the changed field groups.
     /// Sessions with no shadow are handled at drain time (create push).
     public func noteLocalSession(_ session: Session) {
-        // Rehydration index: remember where hashed originals live locally.
+        // Rehydration index: remember where hashed originals live locally —
+        // linked files AND store-managed imports (resolved to this launch's
+        // container; start() prunes stale entries).
+        let managedRoot = store.managedFilesDir
         for p in session.photos {
-            if let hash = p.contentHash, case .linked(let path) = p.origin {
-                state.hashIndex[hash] = path
+            guard let hash = p.contentHash else { continue }
+            let url = p.sourceURL(managedRoot: managedRoot)
+            if FileManager.default.fileExists(atPath: url.path) {
+                state.hashIndex[hash] = url.path
             }
         }
 
@@ -671,7 +676,11 @@ public actor SyncEngine {
     // ------------------------------------------------------------- transfers
 
     private func enqueueUploads(photo: PhotoRecord, hash: String) {
-        guard let sourcePath = state.hashIndex[hash] ?? linkedPath(photo) else { return }
+        let resolved = photo.sourceURL(managedRoot: store.managedFilesDir).path
+        let candidate = state.hashIndex[hash]
+            ?? (FileManager.default.fileExists(atPath: resolved) ? resolved : nil)
+            ?? linkedPath(photo)
+        guard let sourcePath = candidate else { return }
         // Thumb first (generated beside the state), then the original.
         if let thumb = ensureThumb(hash: hash, sourcePath: sourcePath) {
             state.transfers.enqueue(contentHash: hash, tier: "thumbs",

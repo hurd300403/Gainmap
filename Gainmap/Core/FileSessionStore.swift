@@ -35,9 +35,10 @@ public actor FileSessionStore {
         root.appendingPathComponent("users/\(uid)/sessions", isDirectory: true)
     }
 
-    /// Store-managed photo files (iOS `.managed` origins, P6). Exposed now so
-    /// PhotoRecord.sourceURL has a stable resolution root from day one.
-    public var managedFilesDir: URL {
+    /// Store-managed photo files (iOS `.managed` origins). Nonisolated —
+    /// derived from immutable lets — so MergeModel/SyncEngine can resolve
+    /// managed paths without hopping onto the actor.
+    nonisolated public var managedFilesDir: URL {
         root.appendingPathComponent("users/\(uid)/files", isDirectory: true)
     }
 

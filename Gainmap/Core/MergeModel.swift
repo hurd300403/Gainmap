@@ -241,8 +241,19 @@ public final class MergeModel: ObservableObject {
                               exportDone: $0.done))
         }, uniquingKeysWith: { first, _ in first })
         let fm = FileManager.default
+        let managedRoot = store?.managedFilesDir
         items = session.photos.map { p in
-            let src = p.sourceURL(managedRoot: nil)
+            var src = p.sourceURL(managedRoot: managedRoot)
+            // Heal records that predate portable origins: iOS rotates the app
+            // container UUID on reinstall, so an absolute `.linked` path into
+            // OUR OWN managed files goes stale even though iOS migrated the
+            // bytes. Re-root it against the current container.
+            if !fm.fileExists(atPath: src.path), let managedRoot,
+               let range = src.path.range(of: "/files/") {
+                let healed = managedRoot.appendingPathComponent(
+                    String(src.path[range.upperBound...]))
+                if fm.fileExists(atPath: healed.path) { src = healed }
+            }
             var item = BatchItem(id: p.id, sdrURL: src, look: p.look,
                                  looksMerged: p.looksMerged,
                                  byteSize: p.byteSize,
@@ -277,8 +288,19 @@ public final class MergeModel: ObservableObject {
     /// session is what persists). Computed metadata (contentHash, pixel dims)
     /// is carried over from the existing records by id.
     func syncToSession() {
+        // Files living inside the store's managed root persist as RELATIVE
+        // paths — iOS rotates the app-container UUID on reinstall, so an
+        // absolute path in there is stale by the next update.
+        let managedPrefix = store.map { $0.managedFilesDir.path + "/" }
         session.photos = items.map { item in
-            var p = PhotoRecord(id: item.id, origin: .linked(path: item.sdrURL.path))
+            let origin: PhotoRecord.Origin
+            if let managedPrefix, item.sdrURL.path.hasPrefix(managedPrefix) {
+                origin = .managed(relativePath:
+                    String(item.sdrURL.path.dropFirst(managedPrefix.count)))
+            } else {
+                origin = .linked(path: item.sdrURL.path)
+            }
+            var p = PhotoRecord(id: item.id, origin: origin)
             let meta = photoMeta[item.id]
             p.contentHash = meta?.hash
             p.pixelWidth = meta?.pixelWidth
