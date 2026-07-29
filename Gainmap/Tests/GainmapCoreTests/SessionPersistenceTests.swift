@@ -386,6 +386,79 @@ final class SessionPersistenceTests: XCTestCase {
         XCTAssertEqual(healedItem.sdrURL.path, file.path)
         XCTAssertNotEqual(healedItem.status, .error)
     }
+
+    // MARK: inbound reload (P5 review — persistTask must reset after flush)
+
+    func testInboundReloadAppliesAfterAFlushCycle() async throws {
+        let store = FileSessionStore(root: root)
+        let a = jpg("a")
+        var photo = PhotoRecord(origin: .linked(path: a.path))
+        photo.contentHash = "known-hash"
+        let starting = Session(photos: [photo])
+        let model = await MergeModel(session: starting, store: store)
+        await model.select(photo.id)  // arm the same debounce a user action does
+        await model.flushSession()   // debounce handle must reset to nil here
+
+        var remote = await model.session
+        remote.title = "Renamed on the phone"
+        remote.updatedAt = Date().addingTimeInterval(60)
+        await model.reloadFromRemote(remote)
+        let title = await model.session.title
+        XCTAssertEqual(title, "Renamed on the phone",
+                       "an idle model (flushed, no pending debounce) must fold "
+                       + "inbound changes in — a spent persistTask used to block "
+                       + "this forever")
+    }
+
+    // MARK: adoption keeps the newer copy (P5 review — sign-out edits survived)
+
+    func testAdoptLocalSessionsKeepsNewerCopyOnCollision() async throws {
+        let uidStore = FileSessionStore(root: root, uid: "uA")
+        let localStore = FileSessionStore(root: root, uid: "local")
+        var session = Session(title: "synced copy",
+                              photos: [PhotoRecord(origin: .linked(path: "/a.jpg"))])
+        session.updatedAt = Date(timeIntervalSinceNow: -3600)
+        try await uidStore.save(session)
+
+        var newer = session
+        newer.title = "edited while signed out"
+        newer.updatedAt = Date()
+        try await localStore.save(newer)
+
+        await uidStore.adoptLocalSessions()
+        let adopted = await uidStore.load(id: session.id)
+        XCTAssertEqual(adopted?.title, "edited while signed out",
+                       "the strictly newer local copy must win the collision")
+
+        // Reverse: an OLDER local copy must not clobber newer synced state.
+        var stale = session
+        stale.title = "stale pre-auth copy"
+        stale.updatedAt = Date(timeIntervalSinceNow: -7200)
+        try await localStore.save(stale)
+        await uidStore.adoptLocalSessions()
+        let kept = await uidStore.load(id: session.id)
+        XCTAssertEqual(kept?.title, "edited while signed out")
+    }
+
+    // MARK: attach reset (P5 review — old account's session must not stay live)
+
+    func testAttachWithResetSwapsToTheNewStoresContent() async throws {
+        let storeA = FileSessionStore(root: root, uid: "uA")
+        let a = jpg("mine")
+        let model = await MergeModel(session: Session(), store: storeA)
+        await model.addFiles([a])
+        await model.flushSession()
+        let oldID = await model.session.id
+
+        let storeB = FileSessionStore(root: root, uid: "uB")
+        await model.attachStoreAndRestore(storeB, reset: true)
+        let newID = await model.session.id
+        let items = await model.items
+        XCTAssertNotEqual(newID, oldID,
+                          "reset must drop the old namespace's session")
+        XCTAssertTrue(items.isEmpty,
+                      "no content may leak across a uid switch")
+    }
 }
 
 private extension JSONDecoder {

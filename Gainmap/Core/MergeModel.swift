@@ -205,8 +205,24 @@ public final class MergeModel: ObservableObject {
     /// the legacy UserDefaults blob for one release) and resuming the most
     /// recently updated session. No-ops if photos were already imported
     /// (e.g. the -gm-seed dev hook ran first).
-    public func attachStoreAndRestore(_ store: FileSessionStore) async {
+    ///
+    /// `reset: true` = the store IDENTITY changed (sign-in/out switched the
+    /// uid namespace). The in-memory session belongs to the old namespace and
+    /// MUST NOT stay live over the new store — keeping it wrote account A's
+    /// session into `users/local` after sign-out, where the next sign-in
+    /// adopted it into account B (P5 review, critical).
+    public func attachStoreAndRestore(_ store: FileSessionStore, reset: Bool = false) async {
         self.store = store
+        if reset {
+            persistTask?.cancel()
+            persistTask = nil
+            items = []
+            photoMeta = [:]
+            lastPersistedContent = nil
+            session = Session(sameLookForAll: UserDefaults.standard.bool(forKey: Self.sameLookKey))
+            sameLookForAll = session.sameLookForAll
+            selectedID = nil
+        }
         if let sig = await store.loadSignature() {
             signature = sig
             hasCustomDefault = true
@@ -226,7 +242,7 @@ public final class MergeModel: ObservableObject {
     /// and launch-restore). Missing source files surface as item errors —
     /// visible, never silently dropped. `done` survives only while the export
     /// file still exists.
-    private func restoreItemsFromSession() {
+    private func restoreItemsFromSession(preferredSelection: UUID? = nil) {
         // Heal titles minted before the store-plumbing blocklist landed
         // ("imports"/"blobs"/"files" leaked in as session names).
         if ["imports", "blobs", "files"].contains(session.title.lowercased()) {
@@ -272,12 +288,35 @@ public final class MergeModel: ObservableObject {
                 item.readout = p.readout
             }
             if !fm.fileExists(atPath: src.path) {
-                item.status = .error
-                item.error = "The source file has moved or was deleted: \(src.lastPathComponent)"
+                // A managed blob-cache origin that isn't on disk yet is a
+                // photo AWAITING DOWNLOAD (Mac-originated, hydrated on
+                // demand) — not a broken link. Flagging it as an error made
+                // every cross-device photo read as damaged (P5 review).
+                if case .managed(let rel) = p.origin, rel.hasPrefix("blobs/") {
+                    // leave status .pending; the editor hydrates on select
+                } else {
+                    item.status = .error
+                    item.error = "The source file has moved or was deleted: \(src.lastPathComponent)"
+                }
             }
             return item
         }
-        if let first = items.first { select(first.id) }
+        // Loading persisted state is not a user navigation. Reusing select()
+        // here committed the OLD live look onto the freshly restored item and
+        // armed a needless debounce, which could both overwrite an inbound
+        // peer edit and block the next inbound reload for 500 ms.
+        let restoredSelection = preferredSelection
+            .flatMap { id in items.first(where: { $0.id == id }) }
+            ?? items.first
+        if let restoredSelection {
+            loadSelectionState(restoredSelection)
+        } else {
+            selectedID = nil
+            sdrURL = nil
+            outputURL = nil
+            readout = nil
+            errorMessage = nil
+        }
         // The just-loaded state IS the persisted state — restoring must not
         // trigger a save (or bump updatedAt) by itself.
         syncToSession()
@@ -356,32 +395,42 @@ public final class MergeModel: ObservableObject {
         if let last = lastPersistedContent, Self.contentEquals(last, remote) { return }
         let selected = selectedID
         session = remote
-        restoreItemsFromSession()
-        if let selected, items.contains(where: { $0.id == selected }) {
-            select(selected)
-        }
+        restoreItemsFromSession(preferredSelection: selected)
         lastPersistedContent = remote   // inbound is persisted state, not a local edit
     }
 
     /// The sync bridge (P5): fired with the just-saved Session after every
     /// real save — the app hands it to SyncEngine.noteLocalSession so local
     /// edits get journaled and drained. Nil (the default) = no sync.
-    public var onSessionPersisted: (@Sendable (Session) -> Void)?
+    ///
+    /// The second argument is the PREVIOUS persisted content — the state this
+    /// model last knew (from restore, its own last flush, or an inbound
+    /// reload). The engine diffs new-vs-previous to find what the USER
+    /// actually changed; without it, a flush from a model that hadn't yet
+    /// consumed an inbound change read as "the user deleted the peer's new
+    /// photo" and tombstoned it remotely (P5 review, critical).
+    public var onSessionPersisted: (@Sendable (Session, Session?) -> Void)?
 
     /// Commit the live look and write the session now (drains the debounce).
     /// No-ops when nothing real changed since the last save — an idle app
     /// writes nothing and never advances `updatedAt`.
     public func flushSession() async {
         guard let store else { return }
+        // Reset (not just cancel) the debounce handle: `reloadFromRemote`
+        // reads `persistTask == nil` as "no unsaved local edits" — leaving a
+        // spent task behind made that guard permanently false, which killed
+        // ALL inbound sync for the life of the process (P5 review, critical).
         persistTask?.cancel()
+        persistTask = nil
         commitLiveLook()
         syncToSession()
         guard !session.photos.isEmpty || !session.title.isEmpty else { return }
         if let last = lastPersistedContent, Self.contentEquals(last, session) { return }
+        let previous = lastPersistedContent
         session.updatedAt = Date()
         try? await store.save(session)
         lastPersistedContent = session
-        onSessionPersisted?(session)
+        onSessionPersisted?(session, previous)
     }
 
     /// Synchronous last-chance flush for app termination — willTerminate gives
@@ -390,10 +439,12 @@ public final class MergeModel: ObservableObject {
     public func flushNowForTermination() {
         guard let store else { return }
         persistTask?.cancel()
+        persistTask = nil
         commitLiveLook()
         syncToSession()
         guard !session.photos.isEmpty || !session.title.isEmpty else { return }
         if let last = lastPersistedContent, Self.contentEquals(last, session) { return }
+        let previous = lastPersistedContent
         session.updatedAt = Date()
         let dir = store.root.appendingPathComponent("users/\(store.uid)/sessions",
                                                     isDirectory: true)
@@ -407,7 +458,7 @@ public final class MergeModel: ObservableObject {
         guard (try? data.write(to: tmp, options: .atomic)) != nil else { return }
         _ = try? FileManager.default.replaceItemAt(final, withItemAt: tmp)
         lastPersistedContent = session
-        onSessionPersisted?(session)
+        onSessionPersisted?(session, previous)
     }
 
     /// Off-main metadata for freshly imported photos: SHA-256 content hash +
@@ -595,7 +646,15 @@ public final class MergeModel: ObservableObject {
     public func select(_ id: UUID) {
         guard let item = items.first(where: { $0.id == id }) else { return }
         commitLiveLook()   // the photo we're leaving keeps what was dialed on it
-        selectedID = id
+        loadSelectionState(item)
+        schedulePersist()
+    }
+
+    /// Mirror a selected item onto the live controls without treating the
+    /// change as a user edit. Restore/inbound paths use this directly so they
+    /// neither commit stale controls nor arm the persistence debounce.
+    private func loadSelectionState(_ item: BatchItem) {
+        selectedID = item.id
         if !sameLookForAll {
             // The selected photo's own look becomes the live bench + 100% anchor.
             loadAsAnchor(item.look ?? runningLook)
@@ -605,7 +664,6 @@ public final class MergeModel: ObservableObject {
         readout = item.readout
         errorMessage = item.error
         if phase != .merging { phase = .idle }
-        schedulePersist()
     }
 
     public func selectNext() { stepSelection(+1) }

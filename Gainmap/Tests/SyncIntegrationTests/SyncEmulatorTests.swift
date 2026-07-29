@@ -244,6 +244,64 @@ final class SyncEmulatorTests: XCTestCase {
         await engineB.stop()
     }
 
+    // MARK: stale flush must not tombstone peer-added photos (P5 review)
+
+    func testStaleFlushDoesNotDeletePeerAddedPhotoAndHealsLocalFile() async throws {
+        let (engineA, storeA) = makeEngine("mac-A")
+        let (engineB, storeB) = makeEngine("ios-B")
+
+        let p1 = try makeSourceJPEG("p1")
+        let original = makeSession(title: "Stale", photos: [p1])
+        try await storeA.save(original)
+        await engineA.start()
+        await engineA.noteLocalSession(original)
+        await engineA.drainOnce()
+
+        await engineB.start()
+        try await waitUntil("B materializes the session") {
+            await storeB.load(id: original.id) != nil
+        }
+
+        // B adds a second photo and it syncs.
+        let p2 = try makeSourceJPEG("p2")
+        var atB = try await loadOrFail(storeB, original.id)
+        atB.photos.append(PhotoRecord(origin: .linked(path: p2.url.path),
+                                      contentHash: p2.hash, byteSize: p2.size))
+        try await storeB.save(atB)
+        await engineB.noteLocalSession(atB)
+        await engineB.drainOnce()
+        try await waitUntil("A's file gains B's photo") {
+            guard let s = await storeA.load(id: original.id) else { return false }
+            return s.photos.count == 2
+        }
+
+        // A's MODEL never consumed that inbound change: it flushes a
+        // 1-photo snapshot carrying only a runningLook edit. The `before`
+        // baseline tells the engine the user never held p2 — so no
+        // tombstone may be journaled, and the clobbered file must heal.
+        var stale = original
+        stale.runningLook = look(0.9)
+        stale.updatedAt = Date()
+        try await storeA.save(stale)                      // the clobbering flush
+        await engineA.noteLocalSession(stale, before: original)
+        await engineA.drainOnce()
+
+        try await waitUntil("A's file heals back to 2 photos") {
+            guard let s = await storeA.load(id: original.id) else { return false }
+            return s.photos.count == 2
+        }
+        try await waitUntil("B keeps p2 and gets A's look edit") {
+            guard let s = await storeB.load(id: original.id) else { return false }
+            return s.photos.count == 2 && s.runningLook == self.look(0.9)
+        }
+        let finalB = try await loadOrFail(storeB, original.id)
+        XCTAssertEqual(finalB.photos.map(\.contentHash).compactMap { $0 }.sorted(),
+                       [p1.hash, p2.hash].sorted(),
+                       "the peer-added photo must survive a stale flush")
+        await engineA.stop()
+        await engineB.stop()
+    }
+
     // MARK: rev guard — conflict preservation + restore
 
     func testConcurrentLookEditPreservesLoserAndRestores() async throws {

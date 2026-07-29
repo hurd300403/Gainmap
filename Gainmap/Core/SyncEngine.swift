@@ -263,7 +263,20 @@ public actor SyncEngine {
     /// MergeModel's persist path calls this with every saved Session. Diffs
     /// against the shadow and journals exactly the changed field groups.
     /// Sessions with no shadow are handled at drain time (create push).
-    public func noteLocalSession(_ session: Session) {
+    ///
+    /// `before` is the state the MODEL last knew (its previous persisted
+    /// content) — the intent baseline. A group is journaled only when the
+    /// flush differs from the shadow AND from `before`: a value that merely
+    /// differs from the shadow but matches `before` means the model hasn't
+    /// consumed an inbound change yet — journaling it would push the STALE
+    /// value back out and revert the peer's edit. Same rule for deletions:
+    /// a photo missing from the flush is a user delete only if the model
+    /// ever HELD it (`before` contains it); a peer-added photo the model
+    /// never saw must not be tombstoned (P5 review, critical — this is the
+    /// epoch guard the P4 comment deferred to the UI wiring).
+    /// `before: nil` keeps the raw shadow-diff semantics (tests; callers
+    /// that have no baseline).
+    public func noteLocalSession(_ session: Session, before: Session? = nil) async {
         // Rehydration index: remember where hashed originals live locally —
         // linked files AND store-managed imports (resolved to this launch's
         // container; start() prunes stale entries).
@@ -282,17 +295,40 @@ public actor SyncEngine {
             return   // create is pushed by drainOnce (never-acked local)
         }
 
+        // A `before` from a DIFFERENT session is no baseline at all.
+        let baseline = (before?.id == session.id) ? before : nil
+        let baselinePhotos: [UUID: PhotoRecord] = Dictionary(
+            (baseline?.photos ?? []).map { ($0.id, $0) },
+            uniquingKeysWith: { first, _ in first })
+        /// True when this flush is allowed to journal the group: no baseline
+        /// (raw semantics), or the user actually changed it since the model's
+        /// last known persisted state.
+        func userChanged(_ changed: Bool) -> Bool { baseline == nil || changed }
+        // Tracks "the flushed file is stale vs the shadow" — groups or photos
+        // the model hadn't consumed. The flush overwrote the session file
+        // with that stale state, so re-materialize + notify at the end.
+        var staleVsShadow = false
+
         if session.title != shadow.title {
-            state.journal.record(target: target, value: .title(session.title),
-                                 baseRev: shadow.titleMeta.rev, deviceID: deviceID)
+            if userChanged(session.title != baseline?.title) {
+                state.journal.record(target: target, value: .title(session.title),
+                                     baseRev: shadow.titleMeta.rev, deviceID: deviceID)
+            } else {
+                staleVsShadow = true
+            }
         }
         if session.runningLook != shadow.runningLook
             || session.sameLookForAll != shadow.sameLookForAll {
-            state.journal.record(
-                target: target,
-                value: .runningLook(session.runningLook,
-                                    sameLookForAll: session.sameLookForAll),
-                baseRev: shadow.rlMeta.rev, deviceID: deviceID)
+            if userChanged(session.runningLook != baseline?.runningLook
+                           || session.sameLookForAll != baseline?.sameLookForAll) {
+                state.journal.record(
+                    target: target,
+                    value: .runningLook(session.runningLook,
+                                        sameLookForAll: session.sameLookForAll),
+                    baseRev: shadow.rlMeta.rev, deviceID: deviceID)
+            } else {
+                staleVsShadow = true
+            }
         }
 
         let shadowPhotoMaps = state.shadowPhotos[session.id.uuidString] ?? [:]
@@ -309,8 +345,13 @@ public actor SyncEngine {
             guard remote.deletedAt == nil else { continue }
             let pTarget = SyncTarget.photo(session: session.id, photo: photo.id)
             if photo.look != remote.look {
-                state.journal.record(target: pTarget, value: .look(photo.look),
-                                     baseRev: remote.lookMeta.rev, deviceID: deviceID)
+                let base = baselinePhotos[photo.id]
+                if userChanged(base == nil || photo.look != base?.look) {
+                    state.journal.record(target: pTarget, value: .look(photo.look),
+                                         baseRev: remote.lookMeta.rev, deviceID: deviceID)
+                } else {
+                    staleVsShadow = true
+                }
             }
             // NOTE: orderKey is deliberately NOT diffed here. Keys are sparse
             // and assigned once at create; reorder becomes an explicit
@@ -318,20 +359,30 @@ public actor SyncEngine {
             // array indices made every deletion renumber the whole queue on
             // every device and manufactured conflicts (review P4-11/12).
         }
-        // Photos in the shadow that vanished locally were removed here.
-        // (P5 wiring note: this relies on MergeModel flushes never being
-        // older than the last materialize — the debounced flush pipeline
-        // guarantees that today; an epoch guard lands with the UI wiring.)
+        // Photos in the shadow that vanished locally were removed here —
+        // but ONLY if the model ever held them (see doc comment above).
         for (photoIdString, map) in shadowPhotoMaps where !seen.contains(photoIdString) {
             guard let photoId = UUID(uuidString: photoIdString),
                   let remote = RemotePhotoDoc(id: photoId, fsMap: map),
                   remote.deletedAt == nil else { continue }
+            if baseline != nil, baselinePhotos[photoId] == nil {
+                staleVsShadow = true   // peer-added photo the model never saw
+                continue
+            }
             state.journal.record(
                 target: .photo(session: session.id, photo: photoId),
                 value: .tombstone(Date()),
                 baseRev: remote.delMeta.rev, deviceID: deviceID)
         }
         persistState()
+
+        if staleVsShadow {
+            // The flush clobbered the session file with pre-inbound state:
+            // rebuild it from shadow + dirty overlay (which now includes any
+            // groups journaled just above) and tell the UI to reload.
+            await materializeLocal(session: session.id)
+            noteRemoteChange(session.id)
+        }
     }
 
     /// Session-level delete (P7 grid; emulator tests now). Removes the local

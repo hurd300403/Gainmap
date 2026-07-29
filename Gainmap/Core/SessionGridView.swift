@@ -136,17 +136,49 @@ struct CoverMosaic: View {
 
     @ViewBuilder
     private func tile(_ url: URL?, _ size: CGSize) -> some View {
-        if let url, let cg = Self.decode(url, maxPixel: 400) {
-            Image(decorative: cg, scale: 1)
-                .resizable()
-                .aspectRatio(contentMode: .fill)
-                .frame(width: size.width, height: size.height)
-                .clipped()
-        } else {
-            Theme.inset
-                .frame(width: size.width, height: size.height)
-                .overlay(Image(systemName: "photo")
-                    .font(.system(size: 14)).foregroundStyle(Theme.stoneFaint))
+        CoverTile(url: url)
+            .frame(width: size.width, height: size.height)
+            .clipped()
+    }
+}
+
+/// One mosaic cell: decodes OFF the main thread with a small shared cache.
+/// Decoding synchronously inside `body` blocked the main thread for up to
+/// four JPEG decodes per card per layout pass (P5 review).
+struct CoverTile: View {
+    let url: URL?
+
+    @State private var image: CGImage?
+
+    /// Decoded-tile cache shared across the grid; NSCache evicts under
+    /// memory pressure on its own.
+    private static let cache = NSCache<NSURL, CGImage>()
+
+    var body: some View {
+        ZStack {
+            if let image {
+                Image(decorative: image, scale: 1)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+            } else {
+                Theme.inset
+                Image(systemName: "photo")
+                    .font(.system(size: 14)).foregroundStyle(Theme.stoneFaint)
+            }
+        }
+        .task(id: url) {
+            guard let url else { image = nil; return }
+            if let hit = Self.cache.object(forKey: url as NSURL) {
+                image = hit
+                return
+            }
+            let decoded = await Task.detached(priority: .utility) {
+                Self.decode(url, maxPixel: 400)
+            }.value
+            if let decoded {
+                Self.cache.setObject(decoded, forKey: url as NSURL)
+                image = decoded
+            }
         }
     }
 

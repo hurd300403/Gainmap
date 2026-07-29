@@ -52,6 +52,18 @@ struct GainmapApp: App {
                 .onChange(of: auth.state) { _, state in
                     Task { await sync.apply(authState: state, model: model) }
                 }
+                // Foreground revival: parked transfers retry, pending drains
+                // run, and a network-failure "waitlist" re-checks admission.
+                // (Never wired before — parked uploads stayed parked until
+                // relaunch; P5 review.)
+                .onReceive(NotificationCenter.default.publisher(
+                    for: NSApplication.didBecomeActiveNotification)) { _ in
+                    guard !SyncCoordinator.isEphemeralLaunch else { return }
+                    Task { await sync.appBecameActive() }
+                    if case .waitlisted = auth.state, auth.admissionError != nil {
+                        auth.retryAdmission()
+                    }
+                }
         }
         .windowResizability(.contentSize)
         .windowStyle(.hiddenTitleBar)
@@ -123,8 +135,12 @@ struct SettingsView: View {
                     VStack(alignment: .leading, spacing: 3) {
                         Text(auth.email ?? "Signed in")
                             .fontWeight(.medium)
-                        Text("Sync is full right now — you're on the waitlist. "
-                             + "Everything keeps working on this Mac.")
+                        // A network failure is not a waitlist — say which it is.
+                        Text(auth.admissionError.map {
+                                 "\($0) Everything keeps working on this Mac."
+                             }
+                             ?? ("Sync is full right now — you're on the waitlist. "
+                                 + "Everything keeps working on this Mac."))
                             .font(.caption).foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }

@@ -126,7 +126,16 @@ public actor FileSessionStore {
         for file in files where file.pathExtension == "json" {
             let dest = sessionsDir.appendingPathComponent(file.lastPathComponent)
             if fm.fileExists(atPath: dest.path) {
-                try? fm.removeItem(at: file)      // already adopted previously
+                // Collision: the same session exists in both namespaces.
+                // Keep the NEWER content — blindly deleting the local copy
+                // silently discarded edits made while signed out (P5 review).
+                let localCopy = (try? Data(contentsOf: file)).flatMap(Self.decode)
+                let destCopy = (try? Data(contentsOf: dest)).flatMap(Self.decode)
+                if let localCopy, let destCopy, localCopy.updatedAt > destCopy.updatedAt {
+                    _ = try? fm.replaceItemAt(dest, withItemAt: file)
+                } else {
+                    try? fm.removeItem(at: file)
+                }
             } else {
                 try? fm.moveItem(at: file, to: dest)
             }

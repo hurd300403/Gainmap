@@ -56,6 +56,14 @@ final class SyncCoordinator: ObservableObject {
 
     private func activate(uid: String, withEngine: Bool, model: MergeModel) async {
         if currentUID == uid, (engine != nil) == withEngine { return }
+        let switchingUID = currentUID != uid
+
+        // Order matters (P5 review, critical):
+        // 1. FLUSH FIRST — into the OLD namespace, while the outgoing
+        //    engine's persist hook is still armed (so the edit journals).
+        //    Flushing after adoption re-created the just-swept users/local
+        //    file and stranded the newest edits in a dead namespace.
+        await model.flushSession()
         if let engine {
             await engine.setOnRemoteChange(nil)
             await engine.stop()
@@ -65,12 +73,15 @@ final class SyncCoordinator: ObservableObject {
         syncing = false
         currentUID = uid
 
+        // 2. ADOPT — users/local moves under the real uid (newest copy wins).
         let store = FileSessionStore(uid: uid)
         if uid != "local" {
             await store.adoptLocalSessions()
         }
-        await model.flushSession()              // don't lose edits made pre-switch
-        await model.attachStoreAndRestore(store)
+        // 3. ATTACH — resetting the model whenever the namespace changed:
+        //    keeping the old account's session live over the new store wrote
+        //    A's photos into whatever namespace came next (sign-out leak).
+        await model.attachStoreAndRestore(store, reset: switchingUID)
 
         guard withEngine else { return }
         let root = await store.root.appendingPathComponent("users/\(uid)", isDirectory: true)
@@ -81,8 +92,8 @@ final class SyncCoordinator: ObservableObject {
         await engine.setOnRemoteChange { [weak self] sessionID in
             Task { @MainActor in await self?.remoteChanged(sessionID) }
         }
-        model.onSessionPersisted = { [weak self] session in
-            Task { @MainActor in await self?.localPersisted(session) }
+        model.onSessionPersisted = { [weak self] session, before in
+            Task { @MainActor in await self?.localPersisted(session, before: before) }
         }
         await engine.start()
         syncing = true
@@ -92,9 +103,9 @@ final class SyncCoordinator: ObservableObject {
         }
     }
 
-    private func localPersisted(_ session: Session) async {
+    private func localPersisted(_ session: Session, before: Session?) async {
         guard let engine else { return }
-        await engine.noteLocalSession(session)
+        await engine.noteLocalSession(session, before: before)
         await engine.drainOnce()
         await engine.pumpTransfers()
     }

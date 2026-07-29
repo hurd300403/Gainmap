@@ -70,6 +70,10 @@ public final class AuthController: ObservableObject {
     /// Cross-provider collision: "sign in with your other provider, then we
     /// link this one" (S3 catch-and-link).
     @Published public private(set) var linkHint: String?
+    /// Non-nil when the last admission attempt FAILED (offline, cold start,
+    /// callable error) rather than genuinely waitlisting — the UI must not
+    /// claim "sync is full" over a network blip (P5 review).
+    @Published public private(set) var admissionError: String?
 
     private var pendingCredential: AuthCredential?
     private var currentNonce: String?
@@ -206,6 +210,12 @@ public final class AuthController: ObservableObject {
     /// admitSyncUser is idempotent: it provisions users/{uid} within the cap
     /// or reports the waitlist. The app is FULLY usable either way — only
     /// sync is gated.
+    /// Once admitSyncUser has said yes for a uid, admission is durable
+    /// server-side — remember it so a transient failure on a later launch
+    /// can't downgrade a synced user to "waitlisted" (which nils the engine
+    /// and silently stops journaling edits; P5 review, critical).
+    private static func admittedKey(_ uid: String) -> String { "gm-admitted-\(uid)" }
+
     private func requestAdmission(uid: String) async {
         do {
             let result = try await Functions.functions(region: "us-central1")
@@ -214,10 +224,21 @@ public final class AuthController: ObservableObject {
             let admitted = (data?["admitted"] as? Bool)
                 ?? (data?["syncAdmitted"] as? Bool)
                 ?? ((data?["status"] as? String) == "admitted")
+            admissionError = nil
+            if admitted { UserDefaults.standard.set(true, forKey: Self.admittedKey(uid)) }
             state = admitted ? .ready(uid: uid) : .waitlisted(uid: uid)
         } catch {
-            // Offline or transient: stay usable, retry on next launch/retry().
-            state = .waitlisted(uid: uid)
+            if UserDefaults.standard.bool(forKey: Self.admittedKey(uid)) {
+                // Already admitted on a previous launch: run sync anyway.
+                // Firestore is offline-tolerant; the check was a formality.
+                admissionError = nil
+                state = .ready(uid: uid)
+            } else {
+                // Never admitted + unreachable: stay usable locally, tell the
+                // truth about why, retry on foreground/Re-check.
+                admissionError = "Couldn't reach sync — check your connection."
+                state = .waitlisted(uid: uid)
+            }
         }
     }
 
@@ -414,6 +435,7 @@ public final class AuthController: ObservableObject {
         email = nil
         providers = []
         linkHint = nil
+        admissionError = nil
         state = .signedOut
     }
 

@@ -32,7 +32,16 @@ struct SessionGridScreen: View {
                         waitlistBanner
                     }
                     if model.cards.isEmpty {
-                        emptyState
+                        if model.initialLoadDone {
+                            emptyState
+                        } else {
+                            // Don't claim "No sessions yet" before we've looked.
+                            VStack {
+                                Spacer()
+                                ProgressView().tint(Theme.stoneDim)
+                                Spacer()
+                            }.frame(maxWidth: .infinity)
+                        }
                     } else {
                         SessionGridView(cards: model.cards) { id in
                             Task {
@@ -88,11 +97,16 @@ struct SessionGridScreen: View {
 
     private var waitlistBanner: some View {
         HStack(spacing: 10) {
-            Image(systemName: "hourglass").font(.system(size: 12))
+            Image(systemName: auth.admissionError == nil ? "hourglass" : "wifi.exclamationmark")
+                .font(.system(size: 12))
             VStack(alignment: .leading, spacing: 2) {
-                Text("Sync is full right now — you're on the waitlist.")
+                // Tell the truth: a network failure is NOT a waitlist.
+                Text(auth.admissionError
+                     ?? "Sync is full right now — you're on the waitlist.")
                     .font(Theme.ui(12, .medium)).foregroundStyle(Theme.stone)
-                Text("Everything works offline; sessions sync once a spot opens.")
+                Text(auth.admissionError == nil
+                     ? "Everything works offline; sessions sync once a spot opens."
+                     : "Everything works offline; sync connects automatically.")
                     .font(Theme.mono(9)).foregroundStyle(Theme.stoneDim)
             }
             Spacer()

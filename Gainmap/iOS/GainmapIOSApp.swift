@@ -33,7 +33,13 @@ struct GainmapIOSApp: App {
                     Task { await model.authStateChanged(state) }
                 }
                 .onChange(of: scenePhase) { _, phase in
-                    if phase == .active { Task { await model.appBecameActive() } }
+                    guard phase == .active else { return }
+                    Task { await model.appBecameActive() }
+                    // A "waitlist" caused by an unreachable network retries
+                    // automatically on foreground — a real waitlist doesn't.
+                    if case .waitlisted = auth.state, auth.admissionError != nil {
+                        auth.retryAdmission()
+                    }
                 }
         }
     }

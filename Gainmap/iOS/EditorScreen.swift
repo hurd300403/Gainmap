@@ -43,8 +43,16 @@ struct EditorScreen: View {
     /// Photos picked for a brand-new session — imported in prepare().
     private let importItems: [PhotosPickerItem]
     @State private var importing = false
-    /// Filmstrip "+": add more photos to THIS session.
+    /// Filmstrip "+": add more photos to THIS session. The picker PRESENTS
+    /// from the controls sheet — the sheet is always up, and UIKit silently
+    /// drops a second presentation from the base view (P5 review; same
+    /// reason the share sheet lives on the sheet).
+    @State private var addPickerPresented = false
     @State private var addPickerItems: [PhotosPickerItem] = []
+    /// User-visible failure notice (export/hydration) — alert on the sheet.
+    @State private var notice: EditorNotice?
+    /// Selected photo whose original couldn't be downloaded (retry UI).
+    @State private var hydrateFailedID: UUID?
 
     init(session: Session, store: FileSessionStore?, importItems: [PhotosPickerItem] = []) {
         sessionTitle = session.title
@@ -98,6 +106,7 @@ struct EditorScreen: View {
         .task { await prepare() }
         .onDisappear {
             controlsPresented = false
+            if appModel.activeEditorModel === model { appModel.activeEditorModel = nil }
             Task { await model.flushSession() }
         }
     }
@@ -141,6 +150,21 @@ struct EditorScreen: View {
                         ProgressView().tint(Theme.stoneDim)
                         Text(importing ? "Importing…" : "Downloading original…")
                             .font(Theme.mono(9)).foregroundStyle(Theme.stoneDim)
+                    }
+                } else if let failed = hydrateFailedID, failed == model.selectedID {
+                    // Download failed: say so and offer a retry — a silent
+                    // grey frame read as "the app is broken" (P5 review).
+                    VStack(spacing: 10) {
+                        Image(systemName: "wifi.exclamationmark")
+                            .font(.system(size: 22)).foregroundStyle(Theme.stoneDim)
+                        Text("Couldn't download this photo")
+                            .font(Theme.mono(10)).foregroundStyle(Theme.stoneDim)
+                        Button("Retry") {
+                            hydrateFailedID = nil
+                            Task { await loadSelectedBase() }
+                        }
+                        .font(Theme.mono(11, .semibold)).foregroundStyle(Theme.gold)
+                        .buttonStyle(.plain)
                     }
                 }
             }
@@ -215,7 +239,8 @@ struct EditorScreen: View {
 
     private var filmstrip: some View {
         ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
+            // Lazy: a big synced session must not decode every thumb on open.
+            LazyHStack(spacing: 8) {
                 ForEach(model.items) { item in
                     FilmstripThumb(url: item.sdrURL,
                                    selected: item.id == model.selectedID,
@@ -224,8 +249,11 @@ struct EditorScreen: View {
                         .onTapGesture { select(item.id) }
                 }
                 // Add more photos to this session — a thumb-sized "+" tile.
-                PhotosPicker(selection: $addPickerItems, matching: .images,
-                             photoLibrary: .shared()) {
+                // A Button, not an inline PhotosPicker: the actual picker is
+                // presented from the controls sheet (see controlsSheet).
+                Button {
+                    addPickerPresented = true
+                } label: {
                     ZStack {
                         RoundedRectangle(cornerRadius: 8, style: .continuous)
                             .fill(Theme.inset)
@@ -237,6 +265,7 @@ struct EditorScreen: View {
                     .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous)
                         .stroke(Theme.line, lineWidth: 1))
                 }
+                .buttonStyle(.plain)
             }
             .padding(.vertical, 1)
         }
@@ -273,6 +302,13 @@ struct EditorScreen: View {
         .sheet(item: $shareURL) { url in
             ShareSheet(items: [url])
         }
+        .photosPicker(isPresented: $addPickerPresented,
+                      selection: $addPickerItems,
+                      matching: .images, photoLibrary: .shared())
+        .alert(item: $notice) { n in
+            Alert(title: Text(n.title), message: Text(n.message),
+                  dismissButton: .default(Text("OK")))
+        }
         .alert("Glow in SDR", isPresented: $showGlowInSDRModal) {
             Button("Turn on") { model.bloom.bakeGlowIntoSDR = true }
             Button("Cancel", role: .cancel) {}
@@ -283,7 +319,23 @@ struct EditorScreen: View {
 
     // ------------------------------------------------------------- preview data
 
+    /// Small LRU of decoded preview bases: each entry is a materialized
+    /// ~1600px bitmap (~8 MB), so an unbounded dictionary jetsammed the app
+    /// on big sessions (P5 review). Six covers back-and-forth comparison
+    /// without holding a whole filmstrip walk.
     @State private var decodedBase: [UUID: CIImage] = [:]
+    @State private var decodedOrder: [UUID] = []
+    private static let decodedCap = 6
+
+    private func cacheDecoded(_ image: CIImage, for id: UUID) {
+        decodedBase[id] = image
+        decodedOrder.removeAll { $0 == id }
+        decodedOrder.append(id)
+        while decodedOrder.count > Self.decodedCap {
+            let evict = decodedOrder.removeFirst()
+            decodedBase.removeValue(forKey: evict)
+        }
+    }
 
     private var liveTitle: String {
         model.session.title.isEmpty ? sessionTitle : model.session.title
@@ -308,9 +360,11 @@ struct EditorScreen: View {
     }
 
     private func prepare() async {
-        model.onSessionPersisted = { [weak appModel] session in
-            Task { @MainActor in appModel?.sessionPersisted(session) }
+        model.onSessionPersisted = { [weak appModel] session, before in
+            Task { @MainActor in appModel?.sessionPersisted(session, before: before) }
         }
+        // Inbound sync folds into THIS model while the editor is open.
+        appModel.activeEditorModel = model
         // Raise the controls once the cover's own transition has settled.
         Task {
             try? await Task.sleep(nanoseconds: 600_000_000)
@@ -368,28 +422,40 @@ struct EditorScreen: View {
         guard let item = model.selectedItem else { return }
         if let cached = decodedBase[item.id] {
             baseImage = cached
+            hydrateFailedID = nil
             return
         }
         baseImage = nil
-        var url = item.sdrURL
-        if !FileManager.default.fileExists(atPath: url.path) {
-            hydrating = true
-            defer { hydrating = false }
-            guard let session = await appModel.session(id: model.session.id),
-                  let hash = session.photos.first(where: { $0.id == item.id })?.contentHash,
-                  let hydrated = await appModel.engine?.hydrateOriginal(hash: hash) else {
-                return
-            }
-            url = hydrated
+        guard let url = await ensureLocalOriginal(item) else {
+            hydrateFailedID = item.id
+            return
         }
-        let decoded = Self.decodeBase(url)
+        hydrateFailedID = nil
+        let decoded = await Task.detached(priority: .userInitiated) {
+            Self.decodeBase(url)
+        }.value
         if let decoded {
-            decodedBase[item.id] = decoded
+            cacheDecoded(decoded, for: item.id)
             if model.selectedItem?.id == item.id { baseImage = decoded }
         }
     }
 
-    private static func decodeBase(_ url: URL) -> CIImage? {
+    /// The photo's original bytes on THIS device — hydrating from the cloud
+    /// when needed. Returns nil when the bytes can't be produced (offline,
+    /// not yet uploaded by the peer).
+    private func ensureLocalOriginal(_ item: MergeModel.BatchItem) async -> URL? {
+        if FileManager.default.fileExists(atPath: item.sdrURL.path) { return item.sdrURL }
+        hydrating = true
+        defer { hydrating = false }
+        guard let session = await appModel.session(id: model.session.id),
+              let hash = session.photos.first(where: { $0.id == item.id })?.contentHash,
+              let hydrated = await appModel.engine?.hydrateOriginal(hash: hash) else {
+            return nil
+        }
+        return hydrated
+    }
+
+    nonisolated private static func decodeBase(_ url: URL) -> CIImage? {
         let srcOpts: [CFString: Any] = [kCGImageSourceShouldCache: false]
         guard let src = CGImageSourceCreateWithURL(url as CFURL, srcOpts as CFDictionary) else {
             return nil
@@ -408,18 +474,41 @@ struct EditorScreen: View {
     // ------------------------------------------------------------- export
 
     private func exportSelected() {
-        guard let id = model.selectedID else { return }
+        guard let id = model.selectedID, let item = model.selectedItem else { return }
         exporting = true
         Task {
+            defer { exporting = false }
+            // The encoder needs the original bytes locally — hydrate first
+            // (a Mac-originated photo may not be downloaded yet).
+            guard await ensureLocalOriginal(item) != nil else {
+                notice = EditorNotice(
+                    title: "Can't export yet",
+                    message: "This photo hasn't finished downloading. "
+                        + "Check your connection and try again.")
+                return
+            }
             try? FileManager.default.createDirectory(at: Self.exportsDir,
                                                      withIntermediateDirectories: true)
             await model.mergeItem(id)
-            exporting = false
             if let out = model.items.first(where: { $0.id == id })?.outputURL {
                 shareURL = out
+            } else {
+                // A failed merge previously looked like a dead button.
+                let detail = model.items.first(where: { $0.id == id })?.error
+                    ?? model.errorMessage
+                notice = EditorNotice(
+                    title: "Export failed",
+                    message: detail ?? "The HDR merge didn't complete. Please try again.")
             }
         }
     }
+}
+
+/// Alert payload for editor failures (alert(item:) needs Identifiable).
+private struct EditorNotice: Identifiable {
+    let id = UUID()
+    let title: String
+    let message: String
 }
 
 // MARK: - bits
