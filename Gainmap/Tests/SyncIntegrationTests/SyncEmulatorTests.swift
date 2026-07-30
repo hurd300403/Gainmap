@@ -244,6 +244,75 @@ final class SyncEmulatorTests: XCTestCase {
         await engineB.stop()
     }
 
+    func testTwoPeersConvergeInsertedAndExplicitlyReorderedPhotos() async throws {
+        let (engineA, storeA) = makeEngine("mac-order-A")
+        let (engineB, storeB) = makeEngine("ios-order-B")
+
+        let p1 = try makeSourceJPEG("order-p1")
+        let p2 = try makeSourceJPEG("order-p2")
+        let p3 = try makeSourceJPEG("order-p3")
+        let original = makeSession(
+            title: "Ordering",
+            photos: [p1, p2, p3])
+        let p1ID = original.photos[0].id
+        let p2ID = original.photos[1].id
+        let p3ID = original.photos[2].id
+        try await storeA.save(original)
+
+        await engineA.start()
+        await engineA.noteLocalSession(original)
+        await engineA.drainOnce()
+        await engineB.start()
+        try await waitUntil("B receives the original order") {
+            (await storeB.load(id: original.id))?.photos.map(\.id)
+                == [p1ID, p2ID, p3ID]
+        }
+
+        // B creates a photo offline/local-first and places it BETWEEN two
+        // acknowledged peers before its first drain. Its create orderKey must
+        // come from those neighbours rather than append to the tail.
+        let insertedSource = try makeSourceJPEG("order-inserted")
+        var atB = try await loadOrFail(storeB, original.id)
+        let beforeInsert = atB
+        let inserted = PhotoRecord(
+            origin: .linked(path: insertedSource.url.path),
+            contentHash: insertedSource.hash,
+            byteSize: insertedSource.size)
+        atB.photos.insert(inserted, at: 1)
+        try await storeB.save(atB)
+        await engineB.noteLocalSession(atB, before: beforeInsert)
+        await engineB.drainOnce()
+
+        let insertedOrder = [p1ID, inserted.id, p2ID, p3ID]
+        try await waitUntil("A receives the inserted middle photo") {
+            (await storeA.load(id: original.id))?.photos.map(\.id)
+                == insertedOrder
+        }
+
+        // A then performs an explicit user reorder. B must materialize the
+        // orderKey sequence, not retain its prior local array arrangement.
+        var atA = try await loadOrFail(storeA, original.id)
+        let beforeReorder = atA
+        let byID = Dictionary(
+            uniqueKeysWithValues: atA.photos.map { ($0.id, $0) })
+        let reorderedIDs = [p3ID, p1ID, inserted.id, p2ID]
+        atA.photos = reorderedIDs.compactMap { byID[$0] }
+        try await storeA.save(atA)
+        await engineA.noteLocalSession(atA, before: beforeReorder)
+        await engineA.drainOnce()
+
+        try await waitUntil("B materializes A's explicit order") {
+            (await storeB.load(id: original.id))?.photos.map(\.id)
+                == reorderedIDs
+        }
+        let finalA = try await loadOrFail(storeA, original.id)
+        let finalB = try await loadOrFail(storeB, original.id)
+        XCTAssertEqual(finalA.photos.map(\.id), reorderedIDs)
+        XCTAssertEqual(finalB.photos.map(\.id), reorderedIDs)
+        await engineA.stop()
+        await engineB.stop()
+    }
+
     // MARK: stale flush must not tombstone peer-added photos (P5 review)
 
     func testStaleFlushDoesNotDeletePeerAddedPhotoAndHealsLocalFile() async throws {

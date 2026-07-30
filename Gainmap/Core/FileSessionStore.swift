@@ -81,6 +81,48 @@ public actor FileSessionStore {
         root.appendingPathComponent("users/\(uid)/files", isDirectory: true)
     }
 
+    /// The lightweight 1024px cache shared by the session grid and editors.
+    /// Keep this path calculation in the store so every surface agrees with
+    /// SyncEngine's `<user>/thumbs/<content-hash>.jpg` layout.
+    nonisolated public var thumbnailsDir: URL {
+        root.appendingPathComponent("users/\(uid)/thumbs", isDirectory: true)
+    }
+
+    nonisolated public func thumbnailURL(forContentHash hash: String) -> URL {
+        thumbnailsDir.appendingPathComponent("\(hash).jpg")
+    }
+
+    /// Resolve every filmstrip cell without downloading full originals.
+    /// Locally readable originals win; otherwise an existing synced thumbnail
+    /// is used, and only genuinely missing thumbnail hashes are returned for
+    /// bounded hydration by the platform coordinator.
+    nonisolated public func thumbnailPlan(for session: Session) -> SessionThumbnailPlan {
+        let fm = FileManager.default
+        var localURLs: [UUID: URL] = [:]
+        var missing: [SessionThumbnailRequest] = []
+
+        for photo in session.photos {
+            let source = photo.sourceURL(managedRoot: managedFilesDir)
+            if fm.fileExists(atPath: source.path) {
+                localURLs[photo.id] = source
+                continue
+            }
+            guard let hash = photo.contentHash else { continue }
+            let thumbnail = thumbnailURL(forContentHash: hash)
+            if fm.fileExists(atPath: thumbnail.path) {
+                localURLs[photo.id] = thumbnail
+            } else {
+                missing.append(SessionThumbnailRequest(
+                    photoID: photo.id,
+                    contentHash: hash))
+            }
+        }
+
+        return SessionThumbnailPlan(
+            localURLsByPhotoID: localURLs,
+            missing: missing)
+    }
+
     private func ensureDirs() throws {
         try FileManager.default.createDirectory(at: sessionsDir,
                                                 withIntermediateDirectories: true)
@@ -280,5 +322,28 @@ public actor FileSessionStore {
 
     public func clearSignature() {
         try? FileManager.default.removeItem(at: signatureURL)
+    }
+}
+
+public struct SessionThumbnailRequest: Equatable, Sendable {
+    public let photoID: UUID
+    public let contentHash: String
+
+    public init(photoID: UUID, contentHash: String) {
+        self.photoID = photoID
+        self.contentHash = contentHash
+    }
+}
+
+public struct SessionThumbnailPlan: Equatable, Sendable {
+    public let localURLsByPhotoID: [UUID: URL]
+    public let missing: [SessionThumbnailRequest]
+
+    public init(
+        localURLsByPhotoID: [UUID: URL],
+        missing: [SessionThumbnailRequest]
+    ) {
+        self.localURLsByPhotoID = localURLsByPhotoID
+        self.missing = missing
     }
 }

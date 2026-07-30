@@ -26,7 +26,7 @@ final class MetadataPipelineTests: XCTestCase {
 
     /// Write a small tagged JPEG: chosen ICC profile, EXIF orientation 6
     /// (rotate 90 CW), IPTC copyright, TIFF artist.
-    private func makeFixture(colorSpaceName: CFString) throws -> URL {
+    private func makeFixture(colorSpaceName: CFString, orientation: Int = 6) throws -> URL {
         let w = 96, h = 64
         let cs = CGColorSpace(name: colorSpaceName)!
         let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8,
@@ -41,7 +41,7 @@ final class MetadataPipelineTests: XCTestCase {
         let dest = CGImageDestinationCreateWithURL(url as CFURL,
                                                    UTType.jpeg.identifier as CFString, 1, nil)!
         let props: [CFString: Any] = [
-            kCGImagePropertyOrientation: 6,
+            kCGImagePropertyOrientation: orientation,
             kCGImagePropertyIPTCDictionary: [
                 kCGImagePropertyIPTCCopyrightNotice: "© Test Client Shoot",
             ],
@@ -81,6 +81,35 @@ final class MetadataPipelineTests: XCTestCase {
 
     func testDetectGamutMissingFileDefaultsToRec709() {
         XCTAssertEqual(Gamut.detect(of: URL(fileURLWithPath: "/nonexistent/x.jpg")), .rec709)
+    }
+
+    // MARK: Header-only dimensions
+
+    func testDisplayPixelSizeAppliesEXIFAxisSwapWithoutChangingPixelSize() throws {
+        for orientation in 1...8 {
+            let fixture = try makeFixture(
+                colorSpaceName: CGColorSpace.sRGB,
+                orientation: orientation)
+
+            XCTAssertEqual(
+                ImageInfo.pixelSize(of: fixture),
+                CGSize(width: 96, height: 64),
+                "encoded dimensions must ignore orientation \(orientation)")
+
+            let expected = (5...8).contains(orientation)
+                ? CGSize(width: 64, height: 96)
+                : CGSize(width: 96, height: 64)
+            XCTAssertEqual(
+                ImageInfo.displayPixelSize(of: fixture),
+                expected,
+                "display dimensions were wrong for orientation \(orientation)")
+        }
+    }
+
+    func testDisplayPixelSizeMissingFileReturnsNil() {
+        XCTAssertNil(
+            ImageInfo.displayPixelSize(
+                of: URL(fileURLWithPath: "/nonexistent/oriented.jpg")))
     }
 
     // MARK: Bake-on SDR primary keeps identity metadata + profile

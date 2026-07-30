@@ -130,6 +130,27 @@ final class MergeStateMachineTests: XCTestCase {
         XCTAssertEqual(m.pendingCount, 0)
     }
 
+    func testExportAllOutputsResolveInSnapshottedItemOrder() async throws {
+        let m = stubbedModel { job in .success(output: job.out, readout: nil) }
+        m.addFiles([url("a"), url("b"), url("c")])
+        await m.mergeItem(m.items[1].id) // a prior successful export stays in position B
+        let orderedIDs = m.items.map(\.id)
+
+        await m.exportAll()
+
+        var orderedOutputs: [URL] = []
+        for id in orderedIDs {
+            let item = try XCTUnwrap(m.items.first(where: { $0.id == id }))
+            XCTAssertEqual(item.status, .done)
+            let output = try XCTUnwrap(item.outputURL)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: output.path))
+            orderedOutputs.append(output)
+        }
+        XCTAssertEqual(
+            orderedOutputs.map(\.lastPathComponent),
+            ["a_UltraHDR.jpg", "b_UltraHDR.jpg", "c_UltraHDR.jpg"])
+    }
+
     func testMergeUsesLiveLookForSelectedPhoto() async {
         var seenLook: AutoHDR.BloomParams?
         let m = stubbedModel { job in .success(output: job.out, readout: nil) }

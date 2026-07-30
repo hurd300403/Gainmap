@@ -190,6 +190,62 @@ final class TransferQueueTests: XCTestCase {
         XCTAssertEqual(metrics.progressBySessionID[second.id], 1)
     }
 
+    func testEditorSyncStateUsesOnlyCurrentSessionEvidence() {
+        let id = UUID()
+        let pending = SessionCard(
+            id: id,
+            title: "Pending",
+            photoCount: 2,
+            updatedAt: t0,
+            covers: [],
+            pendingSync: true,
+            syncProgress: 0.42)
+        XCTAssertEqual(
+            SessionEditorSyncState.resolve(
+                card: pending,
+                localOnly: false,
+                unavailable: false,
+                initialSyncComplete: true,
+                hasUnflushedChanges: false),
+            .pending(0.42))
+
+        let synced = SessionCard(
+            id: id,
+            title: "Synced",
+            photoCount: 2,
+            updatedAt: t0,
+            covers: [],
+            pendingSync: false,
+            syncProgress: 1,
+            knownSynced: true)
+        XCTAssertEqual(
+            SessionEditorSyncState.resolve(
+                card: synced,
+                localOnly: false,
+                unavailable: false,
+                initialSyncComplete: false,
+                hasUnflushedChanges: false),
+            .synced,
+            "persisted acknowledgement proof should survive cold launch")
+        XCTAssertEqual(
+            SessionEditorSyncState.resolve(
+                card: synced,
+                localOnly: false,
+                unavailable: false,
+                initialSyncComplete: true,
+                hasUnflushedChanges: true),
+            .pending(0),
+            "an unsaved editor change must not retain a green ring")
+        XCTAssertEqual(
+            SessionEditorSyncState.resolve(
+                card: nil,
+                localOnly: false,
+                unavailable: false,
+                initialSyncComplete: true,
+                hasUnflushedChanges: false),
+            .pending(0))
+    }
+
     func testPersistedStatusRestoresOnlyExactCloudCompleteSession() throws {
         let photo = PhotoRecord(
             origin: .linked(path: "/photo.jpg"),

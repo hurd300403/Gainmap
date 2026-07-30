@@ -148,6 +148,31 @@ final class BatchModelTests: XCTestCase {
         XCTAssertNil(m.sdrURL)
     }
 
+    func testReorderRequiresExactIDsAndPreservesSelectedLiveState() {
+        let m = MergeModel()
+        m.addFiles([url("a"), url("b"), url("c")])
+        m.select(m.items[1].id)
+        m.bloom.glow = 1.37
+
+        let original = m.items.map(\.id)
+        let selected = m.selectedID
+        let selectedURL = m.sdrURL
+        XCTAssertFalse(m.reorderItems(to: [original[2], original[0]]))
+        XCTAssertFalse(m.reorderItems(
+            to: [original[2], original[0], original[0]]))
+        XCTAssertEqual(m.items.map(\.id), original)
+
+        XCTAssertTrue(m.reorderItems(
+            to: [original[2], original[0], original[1]]))
+        XCTAssertEqual(
+            m.items.map(\.sdrURL.lastPathComponent),
+            ["c.jpg", "a.jpg", "b.jpg"])
+        XCTAssertEqual(m.selectedID, selected)
+        XCTAssertEqual(m.sdrURL, selectedURL)
+        XCTAssertEqual(m.selectedIndex, 2)
+        XCTAssertEqual(m.bloom.glow, 1.37, accuracy: 1e-9)
+    }
+
     // MARK: GLOW-IN-SDR is per-photo (travels with the look)
 
     func testBakeIsPerPhotoAndIndependent() {

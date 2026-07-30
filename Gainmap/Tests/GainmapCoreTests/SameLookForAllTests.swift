@@ -201,6 +201,31 @@ final class SameLookForAllTests: XCTestCase {
         XCTAssertEqual(m.batchTotal, 0, "counters reset after the run")
     }
 
+    func testDirectAwaitExportAllOwnsBusyStateAndBlocksInboundReload() async {
+        let m = stubbedModel()
+        m.addFiles([url("a"), url("b")])
+        m.runTool = { job in
+            try? await Task.sleep(nanoseconds: 60_000_000)
+            try? Data("stub".utf8).write(to: job.out)
+            return .success(output: job.out, readout: nil)
+        }
+        let originalTitle = m.session.title
+        var remote = m.session
+        remote.title = "Inbound during export"
+
+        let task = Task { await m.exportAll() }
+        while !m.isExportingAll { await Task.yield() }
+        m.reloadFromRemote(remote)
+        XCTAssertEqual(m.session.title, originalTitle,
+                       "an inbound materialization cannot replace batch state")
+        await task.value
+        XCTAssertFalse(m.isExportingAll)
+
+        m.reloadFromRemote(remote)
+        XCTAssertEqual(m.session.title, "Inbound during export",
+                       "the same inbound state applies once the batch is idle")
+    }
+
     func testEnableWithEmptyQueueIsHarmless() {
         let m = MergeModel()
         m.setSameLookForAll(true)

@@ -51,7 +51,14 @@ struct MacRootView: View {
                                         await sync.hydratePhotoIfNeeded(
                                             sessionID: model.session.id,
                                             photoID: photoID)
-                                    })
+                                    },
+                                    onHydrateThumbnails: {
+                                        await sync.prepareEditorThumbnails(
+                                            sessionID: model.session.id)
+                                    },
+                                    thumbnailURLs: sync.editorThumbnailURLs,
+                                    syncState: editorSyncState(
+                                        for: sessionID))
                                 .navigationBarBackButtonHidden(true)
                                 .onDisappear {
                                     Task {
@@ -94,6 +101,35 @@ struct MacRootView: View {
             await model.flushSession()
             await sync.refresh()
             path.removeAll()
+        }
+    }
+
+    private func editorSyncState(
+        for sessionID: UUID
+    ) -> SessionEditorSyncState {
+        let card = sync.cards.first { $0.id == sessionID }
+        switch auth.state {
+        case .signedOut, .waitlisted:
+            return .resolve(
+                card: card,
+                localOnly: true,
+                unavailable: false,
+                initialSyncComplete: sync.initialSyncComplete,
+                hasUnflushedChanges: model.hasUnflushedSessionChanges)
+        case .failed:
+            return .resolve(
+                card: card,
+                localOnly: false,
+                unavailable: true,
+                initialSyncComplete: sync.initialSyncComplete,
+                hasUnflushedChanges: model.hasUnflushedSessionChanges)
+        case .admitting, .ready:
+            return .resolve(
+                card: card,
+                localOnly: false,
+                unavailable: false,
+                initialSyncComplete: sync.initialSyncComplete,
+                hasUnflushedChanges: model.hasUnflushedSessionChanges)
         }
     }
 }

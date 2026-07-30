@@ -120,6 +120,48 @@ final class SessionPersistenceTests: XCTestCase {
         XCTAssertTrue(leftovers.isEmpty, "atomic save must clean its temp files")
     }
 
+    func testEditorThumbnailPlanUsesLocalOriginalThenSyncedThumb() throws {
+        let store = FileSessionStore(root: root, uid: "thumb-user")
+        let original = jpg("local-original")
+        let localHash = String(repeating: "a", count: 64)
+        let remoteHash = String(repeating: "b", count: 64)
+        let missingHash = String(repeating: "c", count: 64)
+        let localPhoto = PhotoRecord(
+            origin: .linked(path: original.path),
+            contentHash: localHash)
+        let remotePhoto = PhotoRecord(
+            origin: .managed(relativePath: "blobs/\(remoteHash).jpg"),
+            contentHash: remoteHash)
+        let missingPhoto = PhotoRecord(
+            origin: .managed(relativePath: "blobs/\(missingHash).jpg"),
+            contentHash: missingHash)
+
+        let localThumb = store.thumbnailURL(forContentHash: localHash)
+        let remoteThumb = store.thumbnailURL(forContentHash: remoteHash)
+        try FileManager.default.createDirectory(
+            at: remoteThumb.deletingLastPathComponent(),
+            withIntermediateDirectories: true)
+        try Data("local thumb".utf8).write(to: localThumb)
+        try Data("remote thumb".utf8).write(to: remoteThumb)
+
+        let plan = store.thumbnailPlan(for: Session(
+            photos: [localPhoto, remotePhoto, missingPhoto]))
+
+        XCTAssertEqual(plan.localURLsByPhotoID[localPhoto.id], original)
+        XCTAssertEqual(plan.localURLsByPhotoID[remotePhoto.id], remoteThumb)
+        XCTAssertNil(plan.localURLsByPhotoID[missingPhoto.id])
+        XCTAssertEqual(
+            plan.missing,
+            [SessionThumbnailRequest(
+                photoID: missingPhoto.id,
+                contentHash: missingHash)])
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: store.managedFilesDir
+                    .appendingPathComponent("blobs/\(remoteHash).jpg").path),
+            "filmstrip hydration must not download an original")
+    }
+
     // MARK: Naming
 
     func testNamingUsesShootFolderName() {
@@ -421,6 +463,28 @@ final class SessionPersistenceTests: XCTestCase {
         await m2.attachStoreAndRestore(FileSessionStore(root: root))
         XCTAssertEqual(m2.items.map(\.sdrURL.lastPathComponent), ["keep.jpg"],
                        "a removal must survive relaunch")
+    }
+
+    func testReorderedFilmstripIsDurableAndRestoresExactOrder() async throws {
+        let store = FileSessionStore(root: root)
+        let model = MergeModel(store: store)
+        model.addFiles([jpg("a"), jpg("b"), jpg("c")])
+        let ids = model.items.map(\.id)
+
+        XCTAssertTrue(model.reorderItems(to: [ids[2], ids[0], ids[1]]))
+        await model.flushSession()
+
+        let loaded = await store.load(id: model.session.id)
+        let persisted = try XCTUnwrap(loaded)
+        XCTAssertEqual(persisted.photos.map(\.id),
+                       [ids[2], ids[0], ids[1]])
+
+        let reopened = MergeModel(session: persisted, store: store)
+        XCTAssertEqual(reopened.items.map(\.id),
+                       [ids[2], ids[0], ids[1]])
+        XCTAssertEqual(
+            reopened.items.map(\.sdrURL.lastPathComponent),
+            ["c.jpg", "a.jpg", "b.jpg"])
     }
 
     func testFirstImportNamesTheSession() {

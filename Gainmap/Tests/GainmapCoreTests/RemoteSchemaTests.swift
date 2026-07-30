@@ -154,6 +154,43 @@ final class RemoteSchemaTests: XCTestCase {
         XCTAssertEqual(sorted[3].createdAt, late)
     }
 
+    func testDeletionAloneIsNotAnExplicitReorder() {
+        let a = UUID(), b = UUID(), c = UUID()
+        XCTAssertFalse(SyncPhotoOrdering.didExplicitlyReorder(
+            current: [a, c],
+            baseline: [a, b, c],
+            remoteIDs: [a, b, c]))
+        XCTAssertTrue(SyncPhotoOrdering.didExplicitlyReorder(
+            current: [c, a],
+            baseline: [a, b, c],
+            remoteIDs: [a, b, c]))
+    }
+
+    func testSparseInsertionUsesIntendedNeighbours() {
+        let a = UUID(), x = UUID(), y = UUID(), b = UUID()
+        let order = [a, x, y, b]
+        var keys = [a: 1.0, b: 2.0]
+        let xKey = SyncPhotoOrdering.insertionKey(
+            for: x, localOrder: order, knownKeys: keys)
+        XCTAssertEqual(xKey, 1.5)
+        keys[x] = xKey
+        let yKey = SyncPhotoOrdering.insertionKey(
+            for: y, localOrder: order, knownKeys: keys)
+        XCTAssertEqual(yKey, 1.75)
+        XCTAssertLessThan(xKey!, yKey!)
+        XCTAssertLessThan(yKey!, keys[b]!)
+    }
+
+    func testInboundRemoteOrderKeepsLocalOnlyPhotoInItsSlot() {
+        let a = UUID(), localOnly = UUID(), b = UUID(), c = UUID()
+        XCTAssertEqual(
+            SyncPhotoOrdering.materializedIDs(
+                existing: [a, localOnly, b],
+                remotelyKnown: [a, b, c],
+                orderedAliveRemote: [c, a, b]),
+            [c, localOnly, a, b])
+    }
+
     // MARK: session doc
 
     func testSessionDocRoundTrip() {

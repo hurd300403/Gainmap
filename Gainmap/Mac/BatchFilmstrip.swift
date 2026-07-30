@@ -15,20 +15,27 @@ import GainmapCore
 struct BatchFilmstrip: View {
     @ObservedObject var model: MergeModel
     let sourceRevisions: [UUID: Int]
+    let thumbnailURLs: [UUID: URL]
 
-    init(model: MergeModel, sourceRevisions: [UUID: Int] = [:]) {
+    init(
+        model: MergeModel,
+        sourceRevisions: [UUID: Int] = [:],
+        thumbnailURLs: [UUID: URL] = [:]
+    ) {
         self.model = model
         self.sourceRevisions = sourceRevisions
+        self.thumbnailURLs = thumbnailURLs
     }
 
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 10) {
+                LazyHStack(spacing: 10) {
                     ForEach(model.items) { item in
                         FilmstripCell(
                             item: item,
                             selected: item.id == model.selectedID,
+                            thumbnailURL: thumbnailURLs[item.id],
                             sourceRevision: sourceRevisions[item.id, default: 0],
                             onRemove: { model.remove(item.id) })
                             .id(item.id)
@@ -54,6 +61,7 @@ private let cellH: CGFloat = 64
 struct FilmstripCell: View {
     let item: MergeModel.BatchItem
     let selected: Bool
+    let thumbnailURL: URL?
     let sourceRevision: Int
     var onRemove: () -> Void
 
@@ -112,9 +120,9 @@ struct FilmstripCell: View {
         .animation(.spring(response: 0.3, dampingFraction: 0.8), value: hovering)
         .onHover { hovering = $0 }
         .task(id: SourceIdentity(
-            url: item.sdrURL,
+            url: thumbnailURL ?? item.sdrURL,
             revision: sourceRevision)) {
-            let url = item.sdrURL
+            let url = thumbnailURL ?? item.sdrURL
             thumb = nil
             let img = await Task.detached(priority: .userInitiated) {
                 ImageInfo.thumbnail(of: url, maxPixel: 200)

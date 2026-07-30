@@ -19,6 +19,9 @@ struct ContentView: View {
     @ObservedObject var model: MergeModel
     var onShowSessions: (() -> Void)? = nil
     var onHydrateSelected: (() async -> Void)? = nil
+    var onHydrateThumbnails: (() async -> Void)? = nil
+    var thumbnailURLs: [UUID: URL] = [:]
+    var syncState: SessionEditorSyncState = .localOnly
     @Environment(\.scenePhase) private var scenePhase
     // Look-panel disclosure state lives HERE (session lifetime), not in the
     // panel: the panel is torn down when the queue empties, and these must
@@ -73,7 +76,8 @@ struct ContentView: View {
                         VStack(spacing: 0) {
                             BatchFilmstrip(
                                 model: model,
-                                sourceRevisions: model.sourceRevisions)
+                                sourceRevisions: model.sourceRevisions,
+                                thumbnailURLs: thumbnailURLs)
                             // Before any photo exists the look controls are inert —
                             // show how to produce the input file instead.
                             if model.items.isEmpty {
@@ -166,6 +170,9 @@ struct ContentView: View {
             guard model.selectedID != nil else { return }
             await onHydrateSelected?()
         }
+        .task(id: editorThumbnailHydrationIdentity) {
+            await onHydrateThumbnails?()
+        }
         // Live-look flush: debounce covers editing; background/quit flush the
         // rest (willTerminate needs the synchronous path — no async grace).
         .onChange(of: scenePhase) { _, phase in
@@ -193,6 +200,12 @@ struct ContentView: View {
               let size = ImageInfo.pixelSize(of: url),
               size.height > 0 else { return }
         sizeWindowToAspect(size.width / size.height)
+    }
+
+    private var editorThumbnailHydrationIdentity: [String] {
+        model.session.photos.map {
+            "\($0.id.uuidString):\($0.contentHash ?? "local")"
+        }
     }
 
     /// Set the window so the left preview column matches `aspect` (no bars).
@@ -268,9 +281,18 @@ struct ContentView: View {
                     .font(Theme.ui(12.5))
                     .foregroundStyle(Theme.stoneDim)
             }
-            GainmapEmblem()
-                .frame(width: 54, height: 54)
+            ZStack {
+                GainmapEmblem()
+                    .frame(width: 54, height: 54)
+                SessionSyncRing(state: syncState, lineWidth: 2.5)
+                    .frame(width: 62, height: 62)
+            }
+                .frame(width: 64, height: 64)
                 .shadow(color: .black.opacity(0.5), radius: 7, y: 4)
+                .help("\(syncState.label): \(syncState.accessibilityDescription)")
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Sync status: \(syncState.label)")
+                .accessibilityHint(syncState.accessibilityDescription)
         }
     }
 

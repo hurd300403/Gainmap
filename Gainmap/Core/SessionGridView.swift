@@ -45,6 +45,192 @@ public struct SessionCard: Identifiable, Equatable {
     }
 }
 
+/// Truthful, per-session status used by both editors. The platform owns auth
+/// state, while this shared projection keeps Mac and iPhone from disagreeing
+/// about what a card's persisted sync evidence means.
+public enum SessionEditorSyncState: Equatable {
+    case localOnly
+    case connecting
+    case pending(Double)
+    case synced
+    case issue(Double)
+    case unavailable
+
+    public static func resolve(
+        card: SessionCard?,
+        localOnly: Bool,
+        unavailable: Bool,
+        initialSyncComplete: Bool,
+        hasUnflushedChanges: Bool
+    ) -> SessionEditorSyncState {
+        if localOnly { return .localOnly }
+        if unavailable { return .unavailable }
+        if hasUnflushedChanges { return .pending(0) }
+        if let card {
+            if card.syncIssue { return .issue(card.syncProgress) }
+            if card.pendingSync { return .pending(card.syncProgress) }
+            // Persisted acknowledgement proof survives a cold launch, so do
+            // not flash a previously synced session back to "connecting".
+            if card.knownSynced { return .synced }
+        }
+        return initialSyncComplete ? .pending(0) : .connecting
+    }
+
+    public var label: String {
+        switch self {
+        case .localOnly: return "LOCAL ONLY"
+        case .connecting: return "CONNECTING"
+        case .pending(let progress):
+            let percent = Int((Self.clamp(progress) * 100).rounded())
+            return percent > 0 ? "SYNCING \(percent)%" : "NOT SYNCED"
+        case .synced: return "SYNCED"
+        case .issue: return "SYNC ISSUE"
+        case .unavailable: return "SYNC UNAVAILABLE"
+        }
+    }
+
+    public var accessibilityDescription: String {
+        switch self {
+        case .localOnly:
+            return "Saved on this device only."
+        case .connecting:
+            return "Connecting to sync."
+        case .pending(let progress):
+            let percent = Int((Self.clamp(progress) * 100).rounded())
+            return percent > 0
+                ? "Syncing this session, \(percent) percent complete."
+                : "This session has not synced yet."
+        case .synced:
+            return "This session is up to date."
+        case .issue:
+            return "This session needs sync attention."
+        case .unavailable:
+            return "Sync is currently unavailable."
+        }
+    }
+
+    fileprivate var clampedProgress: Double? {
+        switch self {
+        case .pending(let progress), .issue(let progress):
+            return Self.clamp(progress)
+        case .synced:
+            return 1
+        case .localOnly, .connecting, .unavailable:
+            return nil
+        }
+    }
+
+    fileprivate static func clamp(_ progress: Double) -> Double {
+        min(max(progress, 0), 1)
+    }
+}
+
+/// Compact perimeter trace for an editor emblem or toolbar control. Pending
+/// states are determinate and use the same warm-to-green history as session
+/// cards; only a genuine connection handshake is indeterminate.
+public struct SessionSyncRing: View {
+    public let state: SessionEditorSyncState
+    public let lineWidth: CGFloat
+
+    public init(
+        state: SessionEditorSyncState,
+        lineWidth: CGFloat = 2.5
+    ) {
+        self.state = state
+        self.lineWidth = lineWidth
+    }
+
+    private var progressSpectrum: AngularGradient {
+        AngularGradient(
+            stops: [
+                .init(color: Theme.accent, location: 0.00),
+                .init(color: Theme.accentHot, location: 0.10),
+                .init(color: Theme.gold, location: 0.24),
+                .init(color: Theme.gold, location: 0.32),
+                .init(color: Theme.syncGreen, location: 0.42),
+                .init(color: Theme.syncGreen, location: 0.88),
+                .init(color: Theme.accent, location: 1.00),
+            ],
+            center: .center,
+            startAngle: .degrees(-90),
+            endAngle: .degrees(270))
+    }
+
+    public var body: some View {
+        ZStack {
+            Circle()
+                .stroke(Theme.line, lineWidth: max(1, lineWidth - 0.5))
+            trace
+        }
+        .accessibilityHidden(true)
+    }
+
+    @ViewBuilder
+    private var trace: some View {
+        switch state {
+        case .connecting:
+            TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { context in
+                let turn = context.date.timeIntervalSinceReferenceDate
+                    .truncatingRemainder(dividingBy: 1.35) / 1.35
+                Circle()
+                    .trim(from: 0.03, to: 0.36)
+                    .stroke(
+                        Theme.gold,
+                        style: StrokeStyle(
+                            lineWidth: lineWidth,
+                            lineCap: .round))
+                    .rotationEffect(.degrees(turn * 360))
+            }
+        case .pending(let rawProgress):
+            let progress = SessionEditorSyncState.clamp(rawProgress)
+            Circle()
+                .trim(from: 0, to: max(progress, 0.025))
+                .stroke(
+                    progressSpectrum,
+                    style: StrokeStyle(
+                        lineWidth: lineWidth,
+                        lineCap: .round))
+                .rotationEffect(.degrees(90))
+        case .synced:
+            Circle()
+                .stroke(progressSpectrum, lineWidth: lineWidth)
+                .rotationEffect(.degrees(90))
+        case .issue(let rawProgress):
+            Circle()
+                .stroke(
+                    Color.red.opacity(0.68),
+                    style: StrokeStyle(
+                        lineWidth: max(1, lineWidth - 0.5),
+                        dash: [3, 3]))
+            let progress = SessionEditorSyncState.clamp(rawProgress)
+            if progress > 0 {
+                Circle()
+                    .trim(from: 0, to: progress)
+                    .stroke(
+                        Color.red,
+                        style: StrokeStyle(
+                            lineWidth: lineWidth,
+                            lineCap: .round))
+                    .rotationEffect(.degrees(90))
+            }
+        case .localOnly:
+            Circle()
+                .stroke(
+                    Theme.stoneFaint,
+                    style: StrokeStyle(
+                        lineWidth: max(1, lineWidth - 0.5),
+                        dash: [2, 4]))
+        case .unavailable:
+            Circle()
+                .stroke(
+                    Theme.warn,
+                    style: StrokeStyle(
+                        lineWidth: max(1, lineWidth - 0.5),
+                        dash: [4, 3]))
+        }
+    }
+}
+
 public enum SessionCardSyncState: Equatable {
     case neutral
     case synced

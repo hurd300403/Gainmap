@@ -33,6 +33,9 @@ final class SyncCoordinator: ObservableObject {
     @Published private(set) var syncPassInFlight = false
     @Published private(set) var namespaceID = "local"
     @Published private(set) var recentlyDeleted: DeletedSessionNotice?
+    /// Lightweight sources for every cell in the open editor. Originals are
+    /// still hydrated only when selected; the filmstrip uses synced thumbs.
+    @Published private(set) var editorThumbnailURLs: [UUID: URL] = [:]
     /// The open editor was tombstoned by another device and should return to
     /// the library. Nil is restored after the root consumes the event.
     @Published private(set) var externallyClosedSession: UUID?
@@ -47,6 +50,7 @@ final class SyncCoordinator: ObservableObject {
     private var progressRefreshTask: Task<Void, Never>?
     private var refreshGeneration = 0
     private var lastSyncStatusSnapshot: SyncStatusSnapshot?
+    private var editorThumbnailSessionID: UUID?
 
     var hasOutstandingCloudWork: Bool {
         syncing && (pendingWorkCount > 0 || syncPassInFlight)
@@ -126,6 +130,8 @@ final class SyncCoordinator: ObservableObject {
         progressRefreshTask?.cancel()
         progressRefreshTask = nil
         model.onSessionPersisted = nil
+        editorThumbnailSessionID = nil
+        editorThumbnailURLs = [:]
         syncing = false
         initialSyncComplete = false
         syncPassInFlight = false
@@ -205,6 +211,9 @@ final class SyncCoordinator: ObservableObject {
         if model.session.id == sessionID {
             if let fresh = await store.load(id: sessionID) {
                 model.reloadFromRemote(fresh)
+                Task { [weak self] in
+                    await self?.prepareEditorThumbnails(sessionID: sessionID)
+                }
             } else {
                 // Flush a pending local look into the conflict machinery
                 // before adopting delete-wins, then ensure no later navigation
@@ -241,6 +250,9 @@ final class SyncCoordinator: ObservableObject {
         await engine.drainOnce()
         syncPassInFlight = false
         scheduleRefresh()
+        if let sessionID = editorThumbnailSessionID {
+            await prepareEditorThumbnails(sessionID: sessionID)
+        }
     }
 
     // ------------------------------------------------------------- library
@@ -338,10 +350,19 @@ final class SyncCoordinator: ObservableObject {
         }
         guard anyLanded, generation == refreshGeneration, !Task.isCancelled else { return }
         let fresh = await store.loadAll()
+        let refreshedStatus = await engine.statusSnapshot
+        lastSyncStatusSnapshot = refreshedStatus
+        let refreshedKnown =
+            refreshedStatus.knownSyncedSessionIDs(for: fresh)
+        let refreshedMetrics = SessionSyncMetrics.calculate(
+            sessions: fresh,
+            journal: refreshedStatus.journal,
+            transfers: refreshedStatus.transfers,
+            persistedSyncedSessionIDs: refreshedKnown)
         var ignored: [String] = []
         cards = buildCards(
             sessions: fresh,
-            metrics: metrics,
+            metrics: refreshedMetrics,
             collectMissing: &ignored)
     }
 
@@ -351,13 +372,11 @@ final class SyncCoordinator: ObservableObject {
         guard let store else { return [] }
         let fm = FileManager.default
         let managedRoot = store.managedFilesDir
-        let thumbsDir = managedRoot.deletingLastPathComponent()
-            .appendingPathComponent("thumbs", isDirectory: true)
         return sessions.map { session in
             var covers: [URL?] = []
             for photo in session.photos.prefix(4) {
                 if let hash = photo.contentHash {
-                    let thumb = thumbsDir.appendingPathComponent("\(hash).jpg")
+                    let thumb = store.thumbnailURL(forContentHash: hash)
                     if fm.fileExists(atPath: thumb.path) {
                         covers.append(thumb)
                         continue
@@ -383,7 +402,12 @@ final class SyncCoordinator: ObservableObject {
     @discardableResult
     func openSession(id: UUID) async -> Bool {
         if let engine { await engine.listenPhotos(session: id) }
-        return await model?.openSession(id: id) ?? false
+        let opened = await model?.openSession(id: id) ?? false
+        if opened {
+            editorThumbnailSessionID = id
+            editorThumbnailURLs = [:]
+        }
+        return opened
     }
 
     @discardableResult
@@ -459,6 +483,60 @@ final class SyncCoordinator: ObservableObject {
         externallyClosedSession = nil
     }
 
+    // ------------------------------------------------------------- editor thumbs
+
+    func prepareEditorThumbnails(sessionID: UUID) async {
+        guard let store,
+              let session = await store.load(id: sessionID)
+        else { return }
+        if editorThumbnailSessionID != sessionID {
+            editorThumbnailSessionID = sessionID
+            editorThumbnailURLs = [:]
+        }
+
+        let plan = store.thumbnailPlan(for: session)
+        guard editorThumbnailSessionID == sessionID,
+              !Task.isCancelled else { return }
+        editorThumbnailURLs = plan.localURLsByPhotoID
+
+        guard let engine, !plan.missing.isEmpty else { return }
+        let requestsByHash = Dictionary(
+            grouping: plan.missing,
+            by: \.contentHash)
+        let hashes = Array(requestsByHash.keys)
+
+        await withTaskGroup(of: (String, URL?).self) { group in
+            var next = min(4, hashes.count)
+            for hash in hashes.prefix(next) {
+                group.addTask {
+                    (hash, await engine.hydrateThumb(hash: hash))
+                }
+            }
+            while let (hash, url) = await group.next() {
+                guard !Task.isCancelled,
+                      editorThumbnailSessionID == sessionID else {
+                    group.cancelAll()
+                    return
+                }
+                if let url,
+                   FileManager.default.fileExists(atPath: url.path) {
+                    var updated = editorThumbnailURLs
+                    for request in requestsByHash[hash] ?? [] {
+                        updated[request.photoID] = url
+                    }
+                    editorThumbnailURLs = updated
+                }
+                if next < hashes.count {
+                    let nextHash = hashes[next]
+                    next += 1
+                    group.addTask {
+                        (nextHash, await engine.hydrateThumb(hash: nextHash))
+                    }
+                }
+            }
+        }
+    }
+
     /// Download a phone-originated original when its editor item becomes
     /// selected, then rewrite the local-only origin so MergeModel can render it.
     func hydratePhotoIfNeeded(sessionID: UUID, photoID: UUID) async {
@@ -503,6 +581,11 @@ final class SyncCoordinator: ObservableObject {
             // URL. Its metadata therefore compares equal even though the file
             // changed from missing to present; explicitly wake image loaders.
             model.markSourceAvailable(photoID)
+        }
+        if editorThumbnailSessionID == sessionID {
+            var updated = editorThumbnailURLs
+            updated[photoID] = hydrated
+            editorThumbnailURLs = updated
         }
         scheduleRefresh()
     }

@@ -831,6 +831,30 @@ public final class MergeModel: ObservableObject {
         }
     }
 
+    /// Replace the filmstrip order with an exact permutation of its current
+    /// identities. Reordering is an edit, but it is not navigation: the
+    /// selected photo and its live, possibly-uncommitted controls stay exactly
+    /// as they were. Rejecting partial/duplicated/stale ID lists keeps a drag
+    /// gesture from accidentally dropping a photo when the queue changes.
+    @discardableResult
+    public func reorderItems(to orderedIDs: [UUID]) -> Bool {
+        guard phase != .merging, !isExportingAll,
+              orderedIDs.count == items.count,
+              Set(orderedIDs).count == orderedIDs.count
+        else { return false }
+
+        let currentIDs = items.map(\.id)
+        guard Set(orderedIDs) == Set(currentIDs) else { return false }
+        guard orderedIDs != currentIDs else { return true }
+
+        let byID = Dictionary(
+            uniqueKeysWithValues: items.map { ($0.id, $0) })
+        guard orderedIDs.allSatisfy({ byID[$0] != nil }) else { return false }
+        items = orderedIDs.compactMap { byID[$0] }
+        schedulePersist()
+        return true
+    }
+
     public func clearQueue() {
         items.removeAll()
         photoMeta.removeAll()
@@ -870,10 +894,10 @@ public final class MergeModel: ObservableObject {
     /// Kick off Export All as a RETAINED task so the user can stop it — an
     /// unowned fire-and-forget batch could only be ended by force-quitting.
     public func startExportAll() {
-        guard exportTask == nil else { return }
+        guard exportTask == nil, !isExportingAll, phase != .merging else { return }
         isExportingAll = true
         exportTask = Task { [weak self] in
-            await self?.exportAll()
+            await self?.performExportAll()
             self?.isExportingAll = false
             self?.exportTask = nil
         }
@@ -890,6 +914,13 @@ public final class MergeModel: ObservableObject {
     /// snapshotted before the first await so slider edits or queue mutations
     /// mid-batch can't split the export. Checks for cancellation between photos.
     public func exportAll() async {
+        guard !isExportingAll, phase != .merging else { return }
+        isExportingAll = true
+        defer { isExportingAll = false }
+        await performExportAll()
+    }
+
+    private func performExportAll() async {
         commitLiveLook()
         let batchLook: AutoHDR.BloomParams? = sameLookForAll ? bloom : nil
         let targets = sameLookForAll

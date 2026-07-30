@@ -122,7 +122,9 @@ public struct SyncStatusSnapshot: Sendable {
                 return doc
             }
             guard remotePhotos.count == localPhotos.count,
-                  Set(remotePhotos.map(\.id)) == Set(localPhotos.map(\.id))
+                  Set(remotePhotos.map(\.id)) == Set(localPhotos.map(\.id)),
+                  RemotePhotoDoc.ordered(remotePhotos).map(\.id)
+                    == localPhotos.map(\.id)
             else { return nil }
 
             let remoteByID = Dictionary(
@@ -157,6 +159,89 @@ public struct SyncStatusSnapshot: Sendable {
             }
             return session.id
         })
+    }
+}
+
+// MARK: - Photo ordering
+
+/// Pure ordering policy shared by outbound intent detection, sparse inserts,
+/// inbound materialization, and focused tests.
+enum SyncPhotoOrdering {
+
+    /// A removal alone never counts as a reorder: compare only identities that
+    /// existed in both snapshots and are represented by the remote collection.
+    static func didExplicitlyReorder(
+        current: [UUID],
+        baseline: [UUID],
+        remoteIDs: Set<UUID>
+    ) -> Bool {
+        let shared = Set(current)
+            .intersection(baseline)
+            .intersection(remoteIDs)
+        return current.filter(shared.contains) != baseline.filter(shared.contains)
+    }
+
+    /// Choose a sparse key at the requested local position using the nearest
+    /// already-keyed neighbours. Multiple pending creates can call this in
+    /// local order, adding each returned key to `knownKeys` as they go.
+    /// Nil means floating-point space was exhausted/corrupt and the caller
+    /// should deterministically rebalance.
+    static func insertionKey(
+        for id: UUID,
+        localOrder: [UUID],
+        knownKeys: [UUID: Double]
+    ) -> Double? {
+        guard let index = localOrder.firstIndex(of: id) else { return nil }
+        let left = localOrder[..<index].reversed()
+            .compactMap { knownKeys[$0] }.first
+        let right = localOrder[localOrder.index(after: index)...]
+            .compactMap { knownKeys[$0] }.first
+
+        switch (left, right) {
+        case let (l?, r?):
+            guard l.isFinite, r.isFinite, l < r else { return nil }
+            let middle = l + ((r - l) / 2)
+            return (middle > l && middle < r) ? middle : nil
+        case let (l?, nil):
+            guard l.isFinite else { return nil }
+            let next = l + 1
+            return next.isFinite && next > l ? next : nil
+        case let (nil, r?):
+            guard r.isFinite else { return nil }
+            let previous = r - 1
+            return previous.isFinite && previous < r ? previous : nil
+        case (nil, nil):
+            return 1
+        }
+    }
+
+    /// Fill the slots previously occupied by remotely-known records with the
+    /// authoritative remote order. Records the remote has never known stay in
+    /// their exact slots; extra inbound photos append in remote order.
+    static func materializedIDs(
+        existing: [UUID],
+        remotelyKnown: Set<UUID>,
+        orderedAliveRemote: [UUID]
+    ) -> [UUID] {
+        var remoteIndex = 0
+        var result: [UUID] = []
+        result.reserveCapacity(
+            existing.filter { !remotelyKnown.contains($0) }.count
+                + orderedAliveRemote.count)
+
+        for id in existing {
+            if remotelyKnown.contains(id) {
+                guard remoteIndex < orderedAliveRemote.count else { continue }
+                result.append(orderedAliveRemote[remoteIndex])
+                remoteIndex += 1
+            } else {
+                result.append(id)
+            }
+        }
+        if remoteIndex < orderedAliveRemote.count {
+            result.append(contentsOf: orderedAliveRemote[remoteIndex...])
+        }
+        return result
     }
 }
 
@@ -602,12 +687,77 @@ public actor SyncEngine {
                     staleVsShadow = true
                 }
             }
-            // NOTE: orderKey is deliberately NOT diffed here. Keys are sparse
-            // and assigned once at create; reorder becomes an explicit
-            // engine API when a reorder UI exists (P5/P7). Diffing dense
-            // array indices made every deletion renumber the whole queue on
-            // every device and manufactured conflicts (review P4-11/12).
         }
+
+        // Array position becomes order intent only when the relative order of
+        // identities held by BOTH snapshots changed. A deletion by itself
+        // therefore emits only a tombstone; it never densely renumbers every
+        // survivor. Pending creates are excluded here and receive sparse keys
+        // from their intended neighbours in pushCreates.
+        let rawRemoteDocs = shadowPhotoMaps.compactMap {
+            key, map -> RemotePhotoDoc? in
+            guard let id = UUID(uuidString: key),
+                  let doc = RemotePhotoDoc(id: id, fsMap: map),
+                  doc.deletedAt == nil else { return nil }
+            return doc
+        }
+        let rawRemoteByID = Dictionary(
+            rawRemoteDocs.map { ($0.id, $0) },
+            uniquingKeysWith: { first, _ in first })
+        let remoteIDs = Set(rawRemoteByID.keys)
+        let currentIDs = session.photos.map(\.id)
+        let currentRemoteOrder = currentIDs.filter(remoteIDs.contains)
+        let effectiveRemoteDocs = rawRemoteDocs.compactMap { doc -> RemotePhotoDoc? in
+            let overlay = state.journal.overlay(
+                for: .photo(session: session.id, photo: doc.id))
+            let merged = InboundMerge.merged(photo: doc, overlay: overlay)
+            return merged.deletedAt == nil ? merged : nil
+        }
+        let effectiveRemoteOrder = RemotePhotoDoc
+            .ordered(effectiveRemoteDocs)
+            .map(\.id)
+            .filter(Set(currentRemoteOrder).contains)
+
+        let userReordered: Bool
+        if let baseline {
+            userReordered = SyncPhotoOrdering.didExplicitlyReorder(
+                current: currentIDs,
+                baseline: baseline.photos.map(\.id),
+                remoteIDs: remoteIDs)
+        } else {
+            userReordered = currentRemoteOrder != effectiveRemoteOrder
+        }
+
+        if userReordered {
+            let rawRemoteOrder = RemotePhotoDoc
+                .ordered(rawRemoteDocs)
+                .map(\.id)
+                .filter(Set(currentRemoteOrder).contains)
+            let returnedToRemoteOrder = currentRemoteOrder == rawRemoteOrder
+            for (index, photo) in session.photos.enumerated() {
+                guard let remote = rawRemoteByID[photo.id] else { continue }
+                let pTarget = SyncTarget.photo(
+                    session: session.id, photo: photo.id)
+                // A reorder reverted before its first drain must enqueue the
+                // raw key over the existing dirty mutation. Otherwise use
+                // deterministic dense keys; future inserts stay sparse.
+                let desired = returnedToRemoteOrder
+                    ? remote.orderKey
+                    : Double(index + 1)
+                if desired != remote.orderKey
+                    || state.journal.isDirty(
+                        target: pTarget, group: .photoOrder) {
+                    state.journal.record(
+                        target: pTarget, value: .order(desired),
+                        baseRev: remote.orderMeta.rev, deviceID: deviceID)
+                }
+            }
+        } else if currentRemoteOrder != effectiveRemoteOrder {
+            // The model did not rearrange anything since its baseline; this
+            // mismatch is an inbound peer reorder it has not consumed yet.
+            staleVsShadow = true
+        }
+
         // Photos in the shadow that vanished locally were removed here —
         // but ONLY if the model ever held them (see doc comment above).
         for (photoIdString, map) in shadowPhotoMaps where !seen.contains(photoIdString) {
@@ -747,23 +897,72 @@ public actor SyncEngine {
                     setShadow(doc)
                 }
             }
-            // Photo creates (hashed, syncable, not yet acked). Order keys are
-            // SPARSE — appended after the highest key the shadow knows, so a
-            // deletion never renumbers anything (review P4-12).
-            var nextOrderKey = ((state.shadowPhotos[session.id.uuidString] ?? [:])
-                .compactMap { (pid, map) -> Double? in
-                    UUID(uuidString: pid).flatMap { RemotePhotoDoc(id: $0, fsMap: map) }?.orderKey
-                }.max() ?? 0)
-            for photo in session.photos {
+            // Photo creates (hashed, syncable, not yet acked). Place each new
+            // photo between its nearest current neighbours instead of always
+            // appending it. This preserves an offline import that the user
+            // already moved before its first acknowledgement.
+            let syncable = syncablePhotos(session)
+            let localOrder = syncable.map(\.id)
+            var orderingDocs: [UUID: RemotePhotoDoc] = [:]
+            for (pid, map) in state.shadowPhotos[session.id.uuidString] ?? [:] {
+                guard let id = UUID(uuidString: pid),
+                      let raw = RemotePhotoDoc(id: id, fsMap: map) else { continue }
+                let merged = InboundMerge.merged(
+                    photo: raw,
+                    overlay: state.journal.overlay(
+                        for: .photo(session: session.id, photo: id)))
+                if merged.deletedAt == nil { orderingDocs[id] = merged }
+            }
+
+            for photo in syncable {
                 guard let hash = photo.contentHash, !photo.tooLargeToSync,
                       SyncSchema.isValidContentHash(hash) else { continue }
                 let pTarget = SyncTarget.photo(session: session.id, photo: photo.id)
                 guard !state.acks.everAcked(pTarget) else { continue }
                 await ensureBlobShell(hash: hash, byteSize: photo.byteSize, now: now)
-                nextOrderKey += 1
+                var knownKeys = orderingDocs.mapValues(\.orderKey)
+                var orderKey = SyncPhotoOrdering.insertionKey(
+                    for: photo.id,
+                    localOrder: localOrder,
+                    knownKeys: knownKeys)
+
+                if orderKey == nil {
+                    // Pathological equal/non-finite/exhausted neighbour keys:
+                    // rebalance acknowledged peers to deterministic dense
+                    // positions, then create this photo at its dense position.
+                    let positions = Dictionary(
+                        uniqueKeysWithValues: localOrder.enumerated().map {
+                            ($0.element, Double($0.offset + 1))
+                        })
+                    for (knownID, var doc) in orderingDocs {
+                        guard let desired = positions[knownID],
+                              desired != doc.orderKey,
+                              let raw = shadowPhoto(
+                                session: session.id, photo: knownID)
+                        else { continue }
+                        state.journal.record(
+                            target: .photo(
+                                session: session.id, photo: knownID),
+                            value: .order(desired),
+                            baseRev: raw.orderMeta.rev,
+                            deviceID: deviceID)
+                        doc.orderKey = desired
+                        orderingDocs[knownID] = doc
+                    }
+                    knownKeys = orderingDocs.mapValues(\.orderKey)
+                    orderKey = SyncPhotoOrdering.insertionKey(
+                        for: photo.id,
+                        localOrder: localOrder,
+                        knownKeys: knownKeys)
+                        ?? positions[photo.id]
+                        ?? Double(localOrder.count + 1)
+                }
+                let resolvedOrderKey = orderKey
+                    ?? Double(localOrder.firstIndex(of: photo.id).map { $0 + 1 }
+                        ?? (localOrder.count + 1))
                 let doc = RemotePhotoDoc(
                     id: photo.id, contentHash: hash, look: photo.look,
-                    orderKey: nextOrderKey,
+                    orderKey: resolvedOrderKey,
                     gamut: nil,
                     pixelWidth: photo.pixelWidth, pixelHeight: photo.pixelHeight,
                     looksMerged: photo.looksMerged,
@@ -773,6 +972,9 @@ public actor SyncEngine {
                     target: pTarget) else { continue }
                 if let adopted = RemotePhotoDoc(id: photo.id, fsMap: landed) {
                     setShadow(adopted, session: session.id)
+                    if adopted.deletedAt == nil {
+                        orderingDocs[photo.id] = adopted
+                    }
                 }
                 enqueueUploads(photo: photo, hash: hash)
             }
@@ -1303,39 +1505,46 @@ public actor SyncEngine {
         local.runningLook = merged.runningLook
         local.updatedAt = merged.updatedAt
 
-        // Ordering: the EXISTING local arrangement is the base — local-only
-        // photos (tooLargeToSync, unhashed, pending create) keep their exact
-        // positions instead of being shoved to the tail on every snapshot
-        // (review P4-11). Remote photos we already hold are updated in place;
-        // genuinely new remote photos append in remote order.
-        var records: [PhotoRecord] = []
-        var placed = Set<UUID>()
-        for var prior in existing?.photos ?? [] {
-            if let doc = aliveByID[prior.id] {
+        // Remote order is authoritative for every remotely-known photo.
+        // Local-only records (tooLargeToSync, unhashed, pending create) keep
+        // occupying their existing slots while the remote records flow
+        // through the remaining slots in order.
+        let priorRecords = existing?.photos ?? []
+        let priorByID = Dictionary(
+            priorRecords.map { ($0.id, $0) },
+            uniquingKeysWith: { first, _ in first })
+        let remotelyKnown = Set(photoMaps.keys.compactMap {
+            UUID(uuidString: $0)
+        })
+        let orderedAlive = RemotePhotoDoc.ordered(Array(aliveByID.values))
+        let orderedIDs = SyncPhotoOrdering.materializedIDs(
+            existing: priorRecords.map(\.id),
+            remotelyKnown: remotelyKnown,
+            orderedAliveRemote: orderedAlive.map(\.id))
+
+        let records = orderedIDs.compactMap { photoID -> PhotoRecord? in
+            guard let doc = aliveByID[photoID] else {
+                // Only identities the remote has never known can reach here.
+                return priorByID[photoID]
+            }
+            if var prior = priorByID[photoID] {
                 prior.look = doc.look
                 prior.looksMerged = doc.looksMerged
-                records.append(prior)
-                placed.insert(prior.id)
-            } else if photoMaps[prior.id.uuidString] != nil {
-                continue   // known remotely but tombstoned: drop locally
-            } else {
-                records.append(prior)   // local-only: keep, in place
-                placed.insert(prior.id)
+                return prior
             }
-        }
-        for doc in RemotePhotoDoc.ordered(Array(aliveByID.values))
-        where !placed.contains(doc.id) {
             let origin: PhotoRecord.Origin
             if let path = state.hashIndex[doc.contentHash] {
                 origin = .linked(path: path)
             } else {
-                origin = .managed(relativePath: "blobs/\(doc.contentHash).jpg")
+                origin = .managed(
+                    relativePath: "blobs/\(doc.contentHash).jpg")
             }
-            records.append(PhotoRecord(
+            return PhotoRecord(
                 id: doc.id, origin: origin, contentHash: doc.contentHash,
-                byteSize: 0, pixelWidth: doc.pixelWidth, pixelHeight: doc.pixelHeight,
+                byteSize: 0, pixelWidth: doc.pixelWidth,
+                pixelHeight: doc.pixelHeight,
                 tooLargeToSync: false, looksMerged: doc.looksMerged,
-                look: doc.look))
+                look: doc.look)
         }
         local.photos = records
         try? await store.save(local)

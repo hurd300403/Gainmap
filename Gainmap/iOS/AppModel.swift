@@ -46,6 +46,10 @@ final class AppModel: ObservableObject {
     @Published private(set) var exportingSessionID: UUID?
     @Published private(set) var exportCompletedCount = 0
     @Published private(set) var exportTotalCount = 0
+    /// Resolved sources for every cell in the currently open editor. Remote
+    /// sessions use the small synced thumbnail tier; full originals remain
+    /// on-demand for the selected preview and export.
+    @Published private(set) var editorThumbnailURLs: [UUID: URL] = [:]
     /// False until the first card build lands — the grid shows a spinner,
     /// not "No sessions yet", while the truth is still unknown.
     @Published private(set) var initialLoadDone = false
@@ -58,6 +62,7 @@ final class AppModel: ObservableObject {
     /// folds into it via reloadFromRemote, exactly like the Mac coordinator.
     /// Without this the open editor kept a stale snapshot forever.
     weak var activeEditorModel: MergeModel?
+    private var editorThumbnailSessionID: UUID?
 
     /// Thumb hashes whose download failed this session — skipped until the
     /// user explicitly refreshes or the app foregrounds (no infinite retry).
@@ -152,6 +157,9 @@ final class AppModel: ObservableObject {
         hasSyncIssue = false
         lastSyncStatusSnapshot = nil
         failedThumbs = []
+        editorThumbnailSessionID = nil
+        editorThumbnailURLs = [:]
+        activeEditorModel = nil
         if clearCards {
             cards = []
             initialLoadDone = false
@@ -166,10 +174,22 @@ final class AppModel: ObservableObject {
         await engine.drainOnce()
         syncPassInFlight = false
         scheduleRefresh()
+        if let sessionID = editorThumbnailSessionID {
+            await prepareEditorThumbnails(sessionID: sessionID)
+        }
     }
 
     /// The editor's persist hook: journal + drain local edits.
     func sessionPersisted(_ session: Session, before: Session?) {
+        // Publish the local mutation immediately. Waiting for a full upload
+        // made the editor ring and covers look stale; without an engine
+        // (local/waitlisted use), they otherwise never refreshed at all.
+        scheduleRefresh()
+        if editorThumbnailSessionID == session.id {
+            Task { [weak self] in
+                await self?.prepareEditorThumbnails(sessionID: session.id)
+            }
+        }
         guard let engine else { return }
         let expectedUID = activeUID
         syncPassInFlight = true
@@ -190,6 +210,9 @@ final class AppModel: ObservableObject {
         if let editorModel = activeEditorModel, editorModel.session.id == sessionID,
            let fresh = await store?.load(id: sessionID) {
             editorModel.reloadFromRemote(fresh)
+            Task { [weak self] in
+                await self?.prepareEditorThumbnails(sessionID: sessionID)
+            }
         }
         scheduleRefresh()
     }
@@ -299,10 +322,19 @@ final class AppModel: ObservableObject {
         }
         guard anyLanded, !Task.isCancelled else { return }
         let fresh = await store.loadAll()
+        let refreshedStatus = await engine.statusSnapshot
+        lastSyncStatusSnapshot = refreshedStatus
+        let refreshedKnown =
+            refreshedStatus.knownSyncedSessionIDs(for: fresh)
+        let refreshedMetrics = SessionSyncMetrics.calculate(
+            sessions: fresh,
+            journal: refreshedStatus.journal,
+            transfers: refreshedStatus.transfers,
+            persistedSyncedSessionIDs: refreshedKnown)
         var ignored: [String] = []
         cards = buildCards(
             sessions: fresh,
-            metrics: metrics,
+            metrics: refreshedMetrics,
             collectMissing: &ignored)
     }
 
@@ -314,15 +346,11 @@ final class AppModel: ObservableObject {
         let fm = FileManager.default
         guard let store else { return [] }
         let managedRoot = store.managedFilesDir
-        // Same layout hydrateThumb writes: <root>/users/<uid>/thumbs/<hash>.jpg
-        // (managedFilesDir is <root>/users/<uid>/files — sibling directory).
-        let thumbsDir = managedRoot.deletingLastPathComponent()
-            .appendingPathComponent("thumbs", isDirectory: true)
         return sessions.map { session in
             var covers: [URL?] = []
             for photo in session.photos.prefix(4) {
                 if let hash = photo.contentHash {
-                    let thumb = thumbsDir.appendingPathComponent("\(hash).jpg")
+                    let thumb = store.thumbnailURL(forContentHash: hash)
                     if fm.fileExists(atPath: thumb.path) {
                         covers.append(thumb)
                         continue
@@ -343,6 +371,89 @@ final class AppModel: ObservableObject {
                 syncProgress: metrics.progressBySessionID[session.id],
                 knownSynced: metrics.knownSyncedSessionIDs.contains(session.id))
         }
+    }
+
+    // ------------------------------------------------------------- editor thumbs
+
+    func beginEditing(_ model: MergeModel) {
+        if activeEditorModel === model,
+           editorThumbnailSessionID == model.session.id {
+            return
+        }
+        activeEditorModel = model
+        editorThumbnailSessionID = model.session.id
+        editorThumbnailURLs = [:]
+    }
+
+    func endEditing(_ model: MergeModel) {
+        guard activeEditorModel === model else { return }
+        activeEditorModel = nil
+        editorThumbnailSessionID = nil
+        editorThumbnailURLs = [:]
+    }
+
+    /// Resolve local sources immediately, then download missing 1024px thumbs
+    /// four at a time. A 20–30 photo session therefore fills its filmstrip
+    /// without bulk-downloading 20–30 originals.
+    func prepareEditorThumbnails(sessionID: UUID) async {
+        guard editorThumbnailSessionID == sessionID,
+              let store,
+              let session = await store.load(id: sessionID)
+        else { return }
+
+        let plan = store.thumbnailPlan(for: session)
+        guard editorThumbnailSessionID == sessionID,
+              !Task.isCancelled else { return }
+        editorThumbnailURLs = plan.localURLsByPhotoID
+
+        guard let engine, !plan.missing.isEmpty else { return }
+        let requestsByHash = Dictionary(
+            grouping: plan.missing,
+            by: \.contentHash)
+        let hashes = Array(requestsByHash.keys)
+
+        await withTaskGroup(of: (String, URL?).self) { group in
+            var next = min(4, hashes.count)
+            for hash in hashes.prefix(next) {
+                group.addTask {
+                    (hash, await engine.hydrateThumb(hash: hash))
+                }
+            }
+            while let (hash, url) = await group.next() {
+                guard !Task.isCancelled,
+                      editorThumbnailSessionID == sessionID else {
+                    group.cancelAll()
+                    return
+                }
+                if let url,
+                   FileManager.default.fileExists(atPath: url.path) {
+                    var updated = editorThumbnailURLs
+                    for request in requestsByHash[hash] ?? [] {
+                        updated[request.photoID] = url
+                    }
+                    editorThumbnailURLs = updated
+                }
+                if next < hashes.count {
+                    let nextHash = hashes[next]
+                    next += 1
+                    group.addTask {
+                        (nextHash, await engine.hydrateThumb(hash: nextHash))
+                    }
+                }
+            }
+        }
+    }
+
+    func editorOriginalBecameAvailable(
+        sessionID: UUID,
+        photoID: UUID,
+        url: URL
+    ) {
+        guard editorThumbnailSessionID == sessionID,
+              FileManager.default.fileExists(atPath: url.path) else { return }
+        var updated = editorThumbnailURLs
+        updated[photoID] = url
+        editorThumbnailURLs = updated
     }
 
     // ------------------------------------------------------------- actions
