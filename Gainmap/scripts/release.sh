@@ -85,19 +85,30 @@ spctl -a -vvv --type install "$DMG" || true
 
 # ---------------------------------------------------------------------------
 # Sentry: upload dSYMs (so crash stacks symbolicate) + create/finalize the
-# release. org/project/token come from ~/.sentryclirc. The release id MUST match
-# what the SDK reports at runtime: bundleId@CFBundleShortVersionString+CFBundleVersion.
+# release. The token comes from ~/.sentryclirc; org/project are explicit so a
+# different CLI default can never route Gainmap symbols into another project.
+# The release id MUST match what the SDK reports at runtime:
+# bundleId@CFBundleShortVersionString+CFBundleVersion.
 # Non-fatal — never block a release on telemetry plumbing.
 # ---------------------------------------------------------------------------
 if command -v sentry-cli >/dev/null 2>&1; then
   echo "▸ uploading dSYMs to Sentry…"
+  SENTRY_ORG_SLUG="sam-hurd-photo"
+  SENTRY_PROJECT_SLUG="gainmap"
   SHORT="$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$APP/Contents/Info.plist")"
   BUILD="$(/usr/libexec/PlistBuddy -c 'Print CFBundleVersion' "$APP/Contents/Info.plist")"
   REL="com.legacylab.gainmap@${SHORT}+${BUILD}"
-  sentry-cli debug-files upload --include-sources "$ARCHIVE/dSYMs" || echo "  (dSYM upload failed — continuing)"
-  sentry-cli releases new "$REL" || true
-  ( cd "$ROOT" && sentry-cli releases set-commits "$REL" --auto ) || true
-  sentry-cli releases finalize "$REL" || true
+  sentry-cli debug-files upload \
+    --org "$SENTRY_ORG_SLUG" --project "$SENTRY_PROJECT_SLUG" \
+    --include-sources --wait "$ARCHIVE/dSYMs" \
+    || echo "  (dSYM upload failed — continuing)"
+  sentry-cli releases new \
+    --org "$SENTRY_ORG_SLUG" --project "$SENTRY_PROJECT_SLUG" "$REL" || true
+  ( cd "$ROOT" && sentry-cli releases set-commits \
+      --org "$SENTRY_ORG_SLUG" --project "$SENTRY_PROJECT_SLUG" \
+      "$REL" --auto ) || true
+  sentry-cli releases finalize \
+    --org "$SENTRY_ORG_SLUG" --project "$SENTRY_PROJECT_SLUG" "$REL" || true
 else
   echo "▸ sentry-cli not found — skipping dSYM upload"
 fi

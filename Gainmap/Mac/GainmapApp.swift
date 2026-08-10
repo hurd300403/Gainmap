@@ -62,6 +62,9 @@ final class GainmapApplicationDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        // Termination is now irrevocable. Ignore the bounded gRPC/OpenSSL
+        // exit wait without weakening hang detection while the app is usable.
+        CrashReporting.prepareForTermination()
         model?.flushNowForTermination()
     }
 }

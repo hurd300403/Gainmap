@@ -12,6 +12,16 @@ import XCTest
 
 final class CrashReportingTests: XCTestCase {
 
+    func testPrepareForTerminationPausesAppHangTracking() {
+        var didPause = false
+
+        CrashReporting.prepareForTermination {
+            didPause = true
+        }
+
+        XCTAssertTrue(didPause)
+    }
+
     // uhdrtool quotes paths in its error lines — the common Sentry payload.
     func testQuotedToolErrorRedactsWholePath() {
         let msg = #"error: cannot open SDR JPEG '/Users/sam/Pictures/SmithWedding/shot 01.jpg'"#

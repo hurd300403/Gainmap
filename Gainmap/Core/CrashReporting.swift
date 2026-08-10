@@ -82,6 +82,21 @@ public enum CrashReporting {
         }
     }
 
+    /// Stop classifying orderly process teardown as a UI hang. gRPC installs
+    /// an exit handler that may wait for two seconds before OpenSSL cleanup;
+    /// that intentionally matches Sentry's default app-hang threshold. Call
+    /// only after termination is irrevocable so real in-app hangs remain
+    /// observable for the entire interactive lifetime of the app.
+    public static func prepareForTermination() {
+        prepareForTermination(pauseAppHangTracking: SentrySDK.pauseAppHangTracking)
+    }
+
+    // Small seam for proving the termination hook without mutating Sentry's
+    // process-global tracker in the test runner.
+    static func prepareForTermination(pauseAppHangTracking: () -> Void) {
+        pauseAppHangTracking()
+    }
+
     /// Strip usernames / file paths so events carry no client or project names.
     /// Redaction consumes the WHOLE path tail, terminating at a quote or newline —
     /// not whitespace — because shoot folders contain spaces ("Client Names/…").
