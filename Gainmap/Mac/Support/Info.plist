@@ -16,6 +16,17 @@
     <string>$(MARKETING_VERSION)</string>
     <key>CFBundleVersion</key>
     <string>$(CURRENT_PROJECT_VERSION)</string>
+    <!-- Sign in with Apple and Patreon OAuth return through an active
+         ASWebAuthenticationSession. The callback carries no tokens or PII. -->
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>gainmapauth</string>
+            </array>
+        </dict>
+    </array>
     <key>LSMinimumSystemVersion</key>
     <string>$(MACOSX_DEPLOYMENT_TARGET)</string>
     <key>NSHighResolutionCapable</key>

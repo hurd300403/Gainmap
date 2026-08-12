@@ -7,19 +7,22 @@ const {
   TOMBSTONE_RETENTION_MS,
   GC_CANDIDATE_AGE_MS,
   RESERVATION_RELEASE_GRACE_MS,
+  PATREON_RETENTION_MS,
   reservationId,
   objectName,
   num,
 } = require('./constants');
+const { isEffectiveAt } = require('./patreon/entitlement');
 
 /**
- * Scheduled maintenance (every 24 h). Four independent passes; each is written so
+ * Scheduled maintenance (every 24 h). Five independent passes; each is written so
  * a failure in one does not prevent the others from running.
  *
  *  1. releaseExpiredReservations — capacity leases past `expiresAt` + grace
  *  2. purgeTombstones            — sessions/photos deleted > 30 days ago
  *  3. blobGC                     — three-state, two-pass: active -> gcCandidate -> deleting
  *  4. recomputeUsage             — heal bytesUsed/objectCount drift from bucket reality
+ *  5. purgeExpiredPatreonData    — remove cloud libraries after 90 inactive days
  */
 
 // ---------------------------------------------------------------------------
@@ -250,6 +253,144 @@ async function recomputeUsage({ db, bucket, uid, now }) {
 }
 
 // ---------------------------------------------------------------------------
+// 5. Patreon retention purge
+// ---------------------------------------------------------------------------
+/**
+ * Inactive users keep their private cloud library for 90 days. At the deadline
+ * the library is removed, but the Firebase identity and Patreon link remain so
+ * reactivation can cleanly create a new cloud library. The entitlement doc is
+ * outside users/{uid}, making cloudDataPurgedAt an idempotency guard across a
+ * recursive-delete retry.
+ */
+async function purgeExpiredPatreonData({
+  db,
+  bucket,
+  now,
+  retentionMs = PATREON_RETENTION_MS,
+  beforeComplete,
+}) {
+  const snap = await db
+    .collection('patreonEntitlements')
+    .where('retentionExpiresAt', '<=', now)
+    .get();
+  let purged = 0;
+
+  for (const entitlementDoc of snap.docs) {
+    const uid = entitlementDoc.id;
+    const userRef = db.doc(`users/${uid}`);
+    const countersRef = db.doc('config/counters');
+    // eslint-disable-next-line no-await-in-loop
+    const leaseId = `${now.toMillis()}-${uid}`;
+    const shouldPurge = await db.runTransaction(async (tx) => {
+      const [freshEntitlement, userSnap] = await Promise.all([
+        tx.get(entitlementDoc.ref),
+        tx.get(userRef),
+      ]);
+      if (!freshEntitlement.exists || freshEntitlement.get('cloudDataPurgedAt')) return false;
+      const data = freshEntitlement.data() || {};
+      const leaseUntil = data.purgeLeaseUntil;
+      if (data.purgeLeaseId && data.purgeLeaseId !== leaseId && leaseUntil &&
+          leaseUntil.toMillis() > now.toMillis()) return false;
+      const deadline = data.retentionExpiresAt;
+      if (!deadline || typeof deadline.toMillis !== 'function' || deadline.toMillis() > now.toMillis()) {
+        return false;
+      }
+      if (isEffectiveAt(data, now.toMillis())) return false;
+
+      tx.set(entitlementDoc.ref, {
+        state: 'inactive',
+        effective: false,
+        purgeLeaseId: leaseId,
+        purgeLeaseUntil: Timestamp.fromMillis(now.toMillis() + 60 * 60 * 1000),
+        // Preserve the captured seat across retries: the first physical pass
+        // may already have removed users/{uid} before Storage/completion fails.
+        purgeOccupiedSeat: data.purgeOccupiedSeat === true ||
+          (userSnap.exists && userSnap.get('syncAdmitted') === true),
+        updatedAt: now,
+      }, { merge: true });
+      return true;
+    });
+    if (!shouldPurge) continue;
+
+    // eslint-disable-next-line no-await-in-loop
+    try {
+      if (bucket) {
+        // eslint-disable-next-line no-await-in-loop
+        await bucket.deleteFiles({ prefix: `users/${uid}/`, force: true });
+      }
+      // Delete Firestore last. A failed Storage purge therefore leaves the
+      // admitted user document intact for a clean retry and avoids a
+      // half-deleted rules-facing library.
+      // eslint-disable-next-line no-await-in-loop
+      await db.recursiveDelete(userRef);
+    } catch (error) {
+      // Leave an expired/expiring lease and no completion marker. A later run
+      // retries all physical deletion work.
+      // eslint-disable-next-line no-await-in-loop
+      await entitlementDoc.ref.set({
+        purgeLeaseUntil: now,
+        lastPurgeErrorAt: now,
+      }, { merge: true });
+      continue;
+    }
+
+    // Mark complete and release the admission seat only after both Firestore
+    // and Storage deletion succeed. If Patreon reactivation changed the
+    // entitlement during I/O, do not stamp completion; it will be re-admitted
+    // and its newly-created library is protected by the purge lease below.
+    // eslint-disable-next-line no-await-in-loop
+    let completed = false;
+    try {
+      if (beforeComplete) {
+        // Test hook for the narrow physical-delete/completion failure window.
+        // Production never supplies it.
+        // eslint-disable-next-line no-await-in-loop
+        await beforeComplete(uid);
+      }
+      // eslint-disable-next-line no-await-in-loop
+      completed = await db.runTransaction(async (tx) => {
+        const [fresh, countersSnap] = await Promise.all([
+          tx.get(entitlementDoc.ref), tx.get(countersRef),
+        ]);
+        if (!fresh.exists || fresh.get('purgeLeaseId') !== leaseId ||
+            isEffectiveAt(fresh.data() || {}, now.toMillis())) {
+          return false;
+        }
+        const count = countersSnap.exists ? num(countersSnap.get('admittedUsers')) : 0;
+        const occupiedSeat = fresh.get('purgeOccupiedSeat') === true;
+        if (occupiedSeat && !countersSnap.exists) {
+          throw new Error('Cloud Sync admission counter is missing.');
+        }
+        tx.set(entitlementDoc.ref, {
+          cloudDataPurgedAt: now,
+          purgeLeaseId: null,
+          purgeLeaseUntil: null,
+          purgeOccupiedSeat: null,
+          updatedAt: now,
+        }, { merge: true });
+        if (occupiedSeat) {
+          tx.set(countersRef, { admittedUsers: Math.max(0, count - 1) }, { merge: true });
+        }
+        return true;
+      });
+    } catch {
+      // The physical deletion is idempotent. Expire this lease so the next
+      // maintenance invocation can retry completion without waiting an hour;
+      // preserve purgeOccupiedSeat for exactly-once counter release.
+      // eslint-disable-next-line no-await-in-loop
+      await entitlementDoc.ref.set({
+        purgeLeaseUntil: now,
+        lastPurgeErrorAt: now,
+      }, { merge: true }).catch(() => {});
+      continue;
+    }
+    if (!completed) continue;
+    purged += 1;
+  }
+  return { purged, retentionMs };
+}
+
+// ---------------------------------------------------------------------------
 // orchestrator
 // ---------------------------------------------------------------------------
 async function runMaintenance({
@@ -272,6 +413,7 @@ async function runMaintenance({
 
   await step('reservations', () => releaseExpiredReservations({ db, now }));
   await step('tombstones', () => purgeTombstones({ db, now, retentionMs }));
+  await step('patreonRetention', () => purgeExpiredPatreonData({ db, bucket, now }));
 
   const users = await db.collection('users').get();
   const gc = { marked: 0, unmarked: 0, deleted: 0 };
@@ -314,4 +456,5 @@ module.exports = {
   gcPassOne,
   gcPassTwo,
   recomputeUsage,
+  purgeExpiredPatreonData,
 };

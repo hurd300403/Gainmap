@@ -29,7 +29,7 @@ settings:
     DEVELOPMENT_TEAM: S8HQ5TEYDE
     SWIFT_VERSION: "5.0"
     MARKETING_VERSION: "1.6"
-    CURRENT_PROJECT_VERSION: "8"
+    CURRENT_PROJECT_VERSION: "11"
     CODE_SIGN_STYLE: Automatic
 
 packages:
@@ -160,6 +160,11 @@ targets:
       - path: iOS
         excludes: ["Resources/**", "Support/**"]
       - path: iOS/Resources/GoogleService-Info.plist
+        buildPhase: resources
+      # App privacy declarations: synced photos retain metadata (including GPS),
+      # account identifiers are linked for private sync, and Core uses local
+      # preferences/file metadata for app functionality only.
+      - path: iOS/Resources/PrivacyInfo.xcprivacy
         buildPhase: resources
       # App icon (opaque 1024 composite of the Mac artwork).
       - path: iOS/Resources/Assets.xcassets

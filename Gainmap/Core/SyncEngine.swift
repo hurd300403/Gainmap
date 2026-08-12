@@ -286,7 +286,11 @@ public actor SyncEngine {
 
     private var stateURL: URL { root.appendingPathComponent("sync-state.json") }
 
-    public func start() async {
+    /// Loads the durable journal in both modes. `connectToBackend: false` is
+    /// used while a previously synced account is not entitled: local edits
+    /// still need to be journaled for a future reactivation, but no listener,
+    /// upload, download, or other cloud operation may start.
+    public func start(connectToBackend: Bool = true) async {
         guard !isRunning else { return }
         lifecycleGeneration &+= 1
         let generation = lifecycleGeneration
@@ -322,7 +326,9 @@ public actor SyncEngine {
             confirmedIDs: ledgerConfirmedTransferIDs)
         persistState()
         isRunning = true
-        startListeners()
+        if connectToBackend {
+            startListeners()
+        }
     }
 
     /// Repairs persisted absolute paths after an app-container move. Session

@@ -427,21 +427,14 @@ struct EditorScreen: View {
     private var editorSyncState: SessionEditorSyncState {
         let card = appModel.cards.first { $0.id == model.session.id }
         switch auth.state {
-        case .signedOut, .waitlisted:
+        case .signedOut, .failed, .checking, .localOnly:
             return .resolve(
                 card: card,
                 localOnly: true,
                 unavailable: false,
                 initialSyncComplete: appModel.initialSyncComplete,
                 hasUnflushedChanges: model.hasUnflushedSessionChanges)
-        case .failed:
-            return .resolve(
-                card: card,
-                localOnly: false,
-                unavailable: true,
-                initialSyncComplete: appModel.initialSyncComplete,
-                hasUnflushedChanges: model.hasUnflushedSessionChanges)
-        case .admitting, .ready:
+        case .ready:
             return .resolve(
                 card: card,
                 localOnly: false,
@@ -654,18 +647,21 @@ struct EditorScreen: View {
                 .presentationBackground(Theme.bgDeep)
         }
         .sheet(item: $shareURL) { url in
-            ShareSheet(items: [url])
+            PhotoExportShareSheet(
+                urls: [url],
+                onPhotoLibraryFailure: showPhotoLibrarySaveFailure)
         }
         .sheet(item: $sessionSharePayload) { payload in
-            ShareSheet(
-                items: payload.urls.map { $0 as Any },
+            PhotoExportShareSheet(
+                urls: payload.urls,
                 onCompletion: { activityType, completed, error in
                     recordSessionShareResult(
                         payload: payload,
                         activityType: activityType,
                         completed: completed,
                         error: error)
-                })
+                },
+                onPhotoLibraryFailure: showPhotoLibrarySaveFailure)
         }
         .sheet(item: $reorderRequest) { request in
             PhotoReorderSheet(request: request) { orderedIDs in
@@ -991,8 +987,14 @@ struct EditorScreen: View {
     }
 
     private func prepare() async {
-        model.onSessionPersisted = { [weak appModel] session, before in
-            Task { @MainActor in appModel?.sessionPersisted(session, before: before) }
+        model.onSessionPersisted = { [weak appModel, weak model] session, before in
+            Task { @MainActor in
+                guard let model else { return }
+                appModel?.sessionPersisted(
+                    session,
+                    before: before,
+                    sourceModel: model)
+            }
         }
         // Inbound sync folds into THIS model while the editor is open.
         appModel.beginEditing(model)
@@ -1427,6 +1429,12 @@ struct EditorScreen: View {
                 title: "Sharing failed",
                 message: error.localizedDescription)
         }
+    }
+
+    private func showPhotoLibrarySaveFailure(_ error: Error) {
+        notice = EditorNotice(
+            title: "Couldn't save to Photos",
+            message: error.localizedDescription)
     }
 
     private func exportSelected() {
@@ -2222,36 +2230,6 @@ private struct InstagramGuideStep: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Step \(number). \(title). \(detail)")
     }
-}
-
-private struct ShareSheet: UIViewControllerRepresentable {
-    let items: [Any]
-
-    typealias Completion = (
-        UIActivity.ActivityType?,
-        Bool,
-        Error?
-    ) -> Void
-
-    let onCompletion: Completion?
-
-    init(items: [Any], onCompletion: Completion? = nil) {
-        self.items = items
-        self.onCompletion = onCompletion
-    }
-
-    func makeUIViewController(context: Context) -> UIActivityViewController {
-        let controller = UIActivityViewController(
-            activityItems: items,
-            applicationActivities: nil)
-        controller.completionWithItemsHandler = {
-            activityType, completed, _, error in
-            onCompletion?(activityType, completed, error)
-        }
-        return controller
-    }
-
-    func updateUIViewController(_ vc: UIActivityViewController, context: Context) {}
 }
 
 extension URL: @retroactive Identifiable {

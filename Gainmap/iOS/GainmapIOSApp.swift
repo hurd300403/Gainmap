@@ -2,7 +2,7 @@
 //  GainmapIOSApp.swift
 //  Gainmap for iPhone (P5)
 //
-//  The app shell: Firebase bootstrap, auth gate, session grid, editor.
+//  The app shell: Firebase bootstrap, optional cloud auth, session grid, editor.
 //  Everything substantive lives in GainmapCore — this target is UI glue.
 //
 
@@ -92,35 +92,36 @@ struct GainmapIOSApp: App {
                 .preferredColorScheme(.dark)
                 .tint(Theme.accent)
                 .onOpenURL { FirebaseBootstrap.handleOpenURL($0) }
-                .task { auth.start() }
-                .onChange(of: auth.state) { _, state in
-                    Task { await model.authStateChanged(state) }
+                .task {
+                    // Local mode must be attached even when Firebase has no
+                    // current user (the pre-Patreon app used auth as its root
+                    // gate and otherwise left iOS without a store).
+                    auth.start()
+                    await model.retryPendingLocalAccountCleanup()
+                }
+                .task(id: auth.state) {
+                    // A task keyed by auth state is cancelled automatically
+                    // when a newer state arrives, including during launch.
+                    let state = auth.state
+                    await model.authStateChanged(state)
                 }
                 .onChange(of: scenePhase) { _, phase in
                     guard phase == .active else { return }
                     Task { await model.appBecameActive() }
-                    // A "waitlist" caused by an unreachable network retries
-                    // automatically on foreground — a real waitlist doesn't.
-                    if case .waitlisted = auth.state, auth.admissionError != nil {
-                        auth.retryAdmission()
-                    }
+                    Task { await model.retryPendingLocalAccountCleanup() }
+                    // Membership/webhook state may have changed while the app
+                    // was away. A transport error preserves prior access.
+                    auth.refreshCloudAccess()
                 }
         }
     }
 }
 
 struct RootView: View {
-    @EnvironmentObject private var auth: AuthController
-
     var body: some View {
         ZStack {
             Theme.bg.ignoresSafeArea()
-            switch auth.state {
-            case .signedOut, .failed:
-                SignInScreen()
-            case .admitting, .ready, .waitlisted:
-                SessionGridScreen()
-            }
+            SessionGridScreen()
         }
     }
 }

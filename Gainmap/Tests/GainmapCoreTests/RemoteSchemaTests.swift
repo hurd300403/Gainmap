@@ -358,4 +358,84 @@ final class RemoteSchemaTests: XCTestCase {
         XCTAssertEqual(SyncTarget.photo(session: s, photo: p).path(uid: "u1"),
                        "users/u1/sessions/\(s.uuidString)/photos/\(p.uuidString)")
     }
+
+    // MARK: Patreon entitlement callable contract
+
+    func testPatreonEntitlementParsesBackendMilliseconds() throws {
+        let payload: [String: Any] = [
+            "state": "grace",
+            "effective": NSNumber(value: true),
+            "linkRequired": NSNumber(value: true),
+            "graceExpiresAt": NSNumber(value: 1_800_000_123_000 as Int64),
+            "lastVerifiedAt": NSNumber(value: 1_799_000_000_000 as Int64),
+            "message": "Patreon is temporarily unavailable.",
+        ]
+        let value = try XCTUnwrap(PatreonEntitlement(payload: payload))
+        XCTAssertEqual(value.status, .grace)
+        XCTAssertTrue(value.effective)
+        XCTAssertTrue(value.linkRequired)
+        XCTAssertEqual(try XCTUnwrap(value.graceExpiresAt).timeIntervalSince1970,
+                       1_800_000_123, accuracy: 0.001)
+        XCTAssertEqual(try XCTUnwrap(value.lastVerifiedAt).timeIntervalSince1970,
+                       1_799_000_000, accuracy: 0.001)
+    }
+
+    func testPatreonEntitlementRejectsUnknownOrIncompleteResponses() {
+        XCTAssertNil(PatreonEntitlement(payload: [
+            "state": "future-state", "effective": true, "message": "x",
+        ]))
+        XCTAssertNil(PatreonEntitlement(payload: [
+            "state": "active", "message": "missing effective",
+        ]))
+    }
+
+    func testPatreonLinkRequirementDistinguishesProvisionalFromLinkedGrace() throws {
+        let provisional = try XCTUnwrap(PatreonEntitlement(payload: [
+            "state": "grace",
+            "effective": true,
+            "linkRequired": true,
+            "message": "Connect Patreon before temporary access expires.",
+        ]))
+        XCTAssertTrue(provisional.linkRequired)
+
+        let linked = try XCTUnwrap(PatreonEntitlement(payload: [
+            "state": "grace",
+            "effective": true,
+            "linkRequired": false,
+            "message": "Membership verification is temporarily unavailable.",
+        ]))
+        XCTAssertFalse(linked.linkRequired)
+
+        // Safe rollout compatibility: legacy responses offer linking only for
+        // an explicitly unlinked account, without mislabeling linked grace.
+        let legacyUnlinked = try XCTUnwrap(PatreonEntitlement(payload: [
+            "state": "unlinked", "effective": false, "message": "Connect Patreon.",
+        ]))
+        XCTAssertTrue(legacyUnlinked.linkRequired)
+        let legacyGrace = try XCTUnwrap(PatreonEntitlement(payload: [
+            "state": "grace", "effective": true, "message": "Grace access.",
+        ]))
+        XCTAssertFalse(legacyGrace.linkRequired)
+    }
+
+    func testCloudSyncRequiresBothEffectiveEntitlementAndAdmission() {
+        let entitled = PatreonEntitlement(
+            status: .active, effective: true, message: "Active")
+        XCTAssertTrue(CloudSyncAccess(entitlement: entitled, admitted: true).canSync)
+        XCTAssertFalse(CloudSyncAccess(entitlement: entitled, admitted: false).canSync)
+        let waitlisted = CloudSyncAccess(
+            entitlement: entitled,
+            admitted: false,
+            admissionReason: "waitlist")
+        XCTAssertTrue(waitlisted.isWaitlisted)
+        XCTAssertFalse(waitlisted.canSync)
+        XCTAssertNotNil(waitlisted.admissionBlockMessage)
+        XCTAssertNotNil(CloudSyncAccess(
+            entitlement: entitled,
+            admitted: false).admissionBlockMessage)
+        XCTAssertFalse(CloudSyncAccess(
+            entitlement: PatreonEntitlement(
+                status: .inactive, effective: false, message: "Inactive"),
+            admitted: true).canSync)
+    }
 }

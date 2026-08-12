@@ -147,6 +147,9 @@ public final class MergeModel: ObservableObject {
     private var store: FileSessionStore?
     public var outputPolicy: OutputPolicy
     private var persistTask: Task<Void, Never>?
+    /// Invalidates any save/load continuation that began against a store
+    /// before an authentication namespace attachment replaced it.
+    private var storeAttachmentGeneration: UInt = 0
 
     /// True while a debounced edit has not reached the session file yet.
     /// The Mac quit guard uses this to save locally and warn when that edit
@@ -217,6 +220,20 @@ public final class MergeModel: ObservableObject {
     /// session into `users/local` after sign-out, where the next sign-in
     /// adopted it into account B (P5 review, critical).
     public func attachStoreAndRestore(_ store: FileSessionStore, reset: Bool = false) async {
+        // Resolve actor-backed data first, then publish the attachment in one
+        // MainActor stretch. Auth lifecycle tasks cancel superseded attaches;
+        // an old namespace must not resume mid-await and overwrite the model.
+        let storedSignature = await store.loadSignature()
+        guard !Task.isCancelled else { return }
+        let legacySignature = storedSignature == nil ? SignatureStore.load() : nil
+        if let legacySignature {
+            await store.saveSignature(legacySignature)
+            guard !Task.isCancelled else { return }
+        }
+        let recent = await store.mostRecent()
+        guard !Task.isCancelled else { return }
+
+        storeAttachmentGeneration &+= 1
         self.store = store
         if reset {
             persistTask?.cancel()
@@ -229,16 +246,12 @@ public final class MergeModel: ObservableObject {
             sameLookForAll = session.sameLookForAll
             selectedID = nil
         }
-        if let sig = await store.loadSignature() {
+        if let sig = storedSignature {
             signature = sig
             hasCustomDefault = true
             if items.isEmpty { resetToDefault() }
-        } else if let legacy = SignatureStore.load() {
-            // One-time migration: the UserDefaults-era saved default becomes
-            // signature.json (P4 syncs the file, not the defaults blob).
-            await store.saveSignature(legacy)
         }
-        if items.isEmpty, let recent = await store.mostRecent(), !recent.photos.isEmpty {
+        if items.isEmpty, let recent, !recent.photos.isEmpty {
             session = recent
             restoreItemsFromSession()
         }
@@ -251,8 +264,15 @@ public final class MergeModel: ObservableObject {
     @discardableResult
     public func openSession(id: UUID) async -> Bool {
         guard phase != .merging, !isExportingAll, let store else { return false }
+        let generation = storeAttachmentGeneration
         await flushSession()
+        guard generation == storeAttachmentGeneration,
+              self.store === store,
+              !Task.isCancelled else { return false }
         guard let next = await store.load(id: id) else { return false }
+        guard generation == storeAttachmentGeneration,
+              self.store === store,
+              !Task.isCancelled else { return false }
         adoptSession(next)
         return true
     }
@@ -263,7 +283,10 @@ public final class MergeModel: ObservableObject {
     @discardableResult
     public func startNewSession() async -> Bool {
         guard phase != .merging, !isExportingAll else { return false }
+        let generation = storeAttachmentGeneration
         await flushSession()
+        guard generation == storeAttachmentGeneration,
+              !Task.isCancelled else { return false }
         adoptSession(Session(
             sameLookForAll: UserDefaults.standard.bool(forKey: Self.sameLookKey),
             runningLook: signature))
@@ -483,6 +506,7 @@ public final class MergeModel: ObservableObject {
     /// writes nothing and never advances `updatedAt`.
     public func flushSession() async {
         guard let store else { return }
+        let generation = storeAttachmentGeneration
         // Reset (not just cancel) the debounce handle: `reloadFromRemote`
         // reads `persistTask == nil` as "no unsaved local edits" — leaving a
         // spent task behind made that guard permanently false, which killed
@@ -495,9 +519,13 @@ public final class MergeModel: ObservableObject {
         if let last = lastPersistedContent, Self.contentEquals(last, session) { return }
         let previous = lastPersistedContent
         session.updatedAt = Date()
-        try? await store.save(session)
-        lastPersistedContent = session
-        onSessionPersisted?(session, previous)
+        let saved = session
+        try? await store.save(saved)
+        guard generation == storeAttachmentGeneration,
+              self.store === store,
+              !Task.isCancelled else { return }
+        lastPersistedContent = saved
+        onSessionPersisted?(saved, previous)
     }
 
     /// Synchronous last-chance flush for app termination — willTerminate gives

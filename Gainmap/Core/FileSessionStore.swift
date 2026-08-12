@@ -12,6 +12,7 @@
 //
 
 import Foundation
+import CryptoKit
 
 /// Session files originally used JSONEncoder's whole-second ISO-8601 dates.
 /// Preserve that read compatibility, but write full-precision epoch seconds
@@ -63,6 +64,59 @@ public actor FileSessionStore {
                                             in: .userDomainMask).first
             ?? FileManager.default.temporaryDirectory
         return base.appendingPathComponent("Gainmap", isDirectory: true)
+    }
+
+    /// Resolves a user namespace only when the uid is one safe path
+    /// component. Firebase uids are server-controlled, but treating them as
+    /// untrusted here prevents a malformed value from escaping `users/`.
+    public static func namespaceRoot(
+        for uid: String,
+        root: URL = FileSessionStore.defaultRoot()
+    ) -> URL? {
+        guard !uid.isEmpty,
+              uid.utf8.count <= 128,
+              uid != ".",
+              uid != "..",
+              !uid.contains("/"),
+              !uid.contains("\\"),
+              !uid.contains("\0") else { return nil }
+        let usersRoot = root
+            .appendingPathComponent("users", isDirectory: true)
+            .standardizedFileURL
+        let candidate = usersRoot
+            .appendingPathComponent(uid, isDirectory: true)
+            .standardizedFileURL
+        guard candidate.path.hasPrefix(usersRoot.path + "/") else { return nil }
+        return candidate
+    }
+
+    /// Compatibility for builds that wrote `users/<uid>` before the
+    /// `gm-admitted-*` marker existed (including old waitlisted accounts).
+    /// Empty directory scaffolding is ignored so it cannot hide the user's
+    /// real signed-out library. This intentionally checks only the small
+    /// metadata locations, never recursively walks `files/` or `thumbs/` on
+    /// the main actor (those trees can contain thousands of images).
+    public static func hasStoredNamespaceData(
+        for uid: String,
+        root: URL = FileSessionStore.defaultRoot()
+    ) -> Bool {
+        guard let namespace = namespaceRoot(for: uid, root: root) else { return false }
+        let fm = FileManager.default
+        if fm.fileExists(atPath: namespace.appendingPathComponent("signature.json").path)
+            || fm.fileExists(atPath: namespace.appendingPathComponent("sync-state.json").path) {
+            return true
+        }
+        let sessions = namespace.appendingPathComponent("sessions", isDirectory: true)
+        guard let records = try? fm.contentsOfDirectory(
+            at: sessions,
+            includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey],
+            options: [.skipsHiddenFiles]) else { return false }
+        return records.contains { item in
+            guard item.pathExtension == "json",
+                  let values = try? item.resourceValues(
+                    forKeys: [.isRegularFileKey, .isSymbolicLinkKey]) else { return false }
+            return values.isRegularFile == true || values.isSymbolicLink == true
+        }
     }
 
     public init(root: URL = FileSessionStore.defaultRoot(), uid: String = "local") {
@@ -264,31 +318,88 @@ public actor FileSessionStore {
     }
 
     /// One-time adoption at first sign-in (P4 spec): sessions created before
-    /// the account existed (uid "local") move under the real uid, so the
-    /// signed-in store — and the sync engine — see them. Existing files at
-    /// the destination win (never clobber synced state with pre-auth copies).
+    /// the account existed (uid "local") move under the real uid. Collision
+    /// handling is deliberately lossless: raw losing/corrupt bytes go to a
+    /// deterministic recovery folder, and equal-time divergent valid edits
+    /// become one stable recovered session rather than being guessed away.
     public func adoptLocalSessions() {
         guard uid != "local" else { return }
         let fm = FileManager.default
         let localDir = root.appendingPathComponent("users/local/sessions", isDirectory: true)
         guard let files = try? fm.contentsOfDirectory(at: localDir,
                                                       includingPropertiesForKeys: nil) else { return }
+        let localFiles = root.appendingPathComponent(
+            "users/local/files", isDirectory: true)
+
+        // iOS imports live beside the JSON as store-managed relative paths.
+        // Copy those bytes before moving any session record: if storage is
+        // full or a same-name/different-content collision is found, leave the
+        // entire local library intact and retry on a later activation. Once
+        // all records move successfully, the redundant source copy is safely
+        // removed below.
+        guard copyDirectoryContents(from: localFiles, to: managedFilesDir) else {
+            return
+        }
         try? ensureDirs()
         for file in files where file.pathExtension == "json" {
             let dest = sessionsDir.appendingPathComponent(file.lastPathComponent)
-            if fm.fileExists(atPath: dest.path) {
-                // Collision: the same session exists in both namespaces.
-                // Keep the NEWER content — blindly deleting the local copy
-                // silently discarded edits made while signed out (P5 review).
-                let localCopy = (try? Data(contentsOf: file)).flatMap(Self.decode)
-                let destCopy = (try? Data(contentsOf: dest)).flatMap(Self.decode)
-                if let localCopy, let destCopy, localCopy.updatedAt > destCopy.updatedAt {
-                    _ = try? fm.replaceItemAt(dest, withItemAt: file)
+            guard let localData = try? Data(contentsOf: file) else { continue }
+            guard fm.fileExists(atPath: dest.path) else {
+                guard installSessionBytes(localData, at: dest) else { continue }
+                try? fm.removeItem(at: file)
+                continue
+            }
+
+            guard let destData = try? Data(contentsOf: dest) else { continue }
+            let localCopy = Self.decode(localData)
+            let destCopy = Self.decode(destData)
+
+            if let localCopy, let destCopy {
+                if localCopy == destCopy {
+                    try? fm.removeItem(at: file)
+                } else if localCopy.updatedAt > destCopy.updatedAt {
+                    guard preserveRecoveryBytes(
+                        destData,
+                        originalName: dest.lastPathComponent,
+                        role: "replaced-destination") else { continue }
+                    guard installSessionBytes(localData, at: dest) else { continue }
+                    try? fm.removeItem(at: file)
+                } else if localCopy.updatedAt < destCopy.updatedAt {
+                    guard preserveRecoveryBytes(
+                        localData,
+                        originalName: file.lastPathComponent,
+                        role: "older-local") else { continue }
+                    try? fm.removeItem(at: file)
                 } else {
+                    // Equal timestamps cannot establish a winner. Keep the
+                    // destination at its original identity and surface the
+                    // local edit as a deterministic recovered copy.
+                    guard preserveRecoveryBytes(
+                        localData,
+                        originalName: file.lastPathComponent,
+                        role: "equal-time-local"),
+                          preserveDivergentLocalSession(
+                            localCopy, sourceData: localData) else { continue }
                     try? fm.removeItem(at: file)
                 }
+            } else if localCopy != nil {
+                // Never let a corrupt destination cause a valid local session
+                // to be deleted. Archive the unreadable bytes, then install
+                // the valid copy while the source still exists as rollback.
+                guard preserveRecoveryBytes(
+                    destData,
+                    originalName: dest.lastPathComponent,
+                    role: "corrupt-destination") else { continue }
+                guard installSessionBytes(localData, at: dest) else { continue }
+                try? fm.removeItem(at: file)
             } else {
-                try? fm.moveItem(at: file, to: dest)
+                // A corrupt local record is not loadable, but its bytes may be
+                // repairable later. Archive once; never silently throw it out.
+                guard preserveRecoveryBytes(
+                    localData,
+                    originalName: file.lastPathComponent,
+                    role: "unreadable-local") else { continue }
+                try? fm.removeItem(at: file)
             }
         }
         // The signature travels too (if the signed-in namespace has none yet).
@@ -296,6 +407,167 @@ public actor FileSessionStore {
         let destSig = root.appendingPathComponent("users/\(uid)/signature.json")
         if fm.fileExists(atPath: localSig.path), !fm.fileExists(atPath: destSig.path) {
             try? fm.copyItem(at: localSig, to: destSig)
+        }
+
+        // Remove the source bytes only when every local session JSON was
+        // adopted. A failed move leaves its photos exactly where the remaining
+        // local record expects to find them.
+        let remainingSessions = (try? fm.contentsOfDirectory(
+            at: localDir, includingPropertiesForKeys: nil))?
+            .contains(where: { $0.pathExtension == "json" }) ?? false
+        if !remainingSessions {
+            try? fm.removeItem(at: localFiles)
+        }
+    }
+
+    private var sessionRecoveryDir: URL {
+        root.appendingPathComponent(
+            "users/\(uid)/recovery/session-collisions",
+            isDirectory: true)
+    }
+
+    /// A stable digest makes retries idempotent even if a crash occurs after
+    /// preserving the bytes but before removing the source record.
+    private func preserveRecoveryBytes(
+        _ data: Data,
+        originalName: String,
+        role: String
+    ) -> Bool {
+        let fm = FileManager.default
+        let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        let base = URL(fileURLWithPath: originalName)
+            .deletingPathExtension().lastPathComponent
+        let target = sessionRecoveryDir.appendingPathComponent(
+            "\(base)-\(role)-\(digest).json")
+        if fm.fileExists(atPath: target.path) {
+            return (try? Data(contentsOf: target)) == data
+        }
+        do {
+            try fm.createDirectory(
+                at: sessionRecoveryDir,
+                withIntermediateDirectories: true)
+            let temporary = sessionRecoveryDir.appendingPathComponent(
+                ".adopt-\(UUID().uuidString).json")
+            defer { try? fm.removeItem(at: temporary) }
+            try data.write(to: temporary, options: .atomic)
+            try fm.moveItem(at: temporary, to: target)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    private func installSessionBytes(_ data: Data, at destination: URL) -> Bool {
+        let fm = FileManager.default
+        do {
+            try fm.createDirectory(
+                at: destination.deletingLastPathComponent(),
+                withIntermediateDirectories: true)
+            let temporary = destination.deletingLastPathComponent()
+                .appendingPathComponent(".adopt-\(UUID().uuidString).json")
+            defer { try? fm.removeItem(at: temporary) }
+            try data.write(to: temporary, options: .atomic)
+            if fm.fileExists(atPath: destination.path) {
+                _ = try fm.replaceItemAt(destination, withItemAt: temporary)
+            } else {
+                try fm.moveItem(at: temporary, to: destination)
+            }
+            return (try? Data(contentsOf: destination)) == data
+        } catch {
+            return false
+        }
+    }
+
+    private func preserveDivergentLocalSession(
+        _ local: Session,
+        sourceData: Data
+    ) -> Bool {
+        let digest = SHA256.hash(data: sourceData)
+        for attempt in 0..<16 {
+            var bytes = Array(digest.prefix(16))
+            bytes[15] ^= UInt8(attempt)
+            // Mark this as a deterministic RFC-4122-style UUID.
+            bytes[6] = (bytes[6] & 0x0f) | 0x50
+            bytes[8] = (bytes[8] & 0x3f) | 0x80
+            let recoveredID = UUID(uuid: (
+                bytes[0], bytes[1], bytes[2], bytes[3],
+                bytes[4], bytes[5], bytes[6], bytes[7],
+                bytes[8], bytes[9], bytes[10], bytes[11],
+                bytes[12], bytes[13], bytes[14], bytes[15]))
+            var recovered = Session(
+                id: recoveredID,
+                title: local.title.isEmpty
+                    ? "Recovered local session"
+                    : "\(local.title) (Recovered local copy)",
+                createdAt: local.createdAt,
+                updatedAt: local.updatedAt,
+                sameLookForAll: local.sameLookForAll,
+                runningLook: local.runningLook,
+                photos: local.photos)
+            recovered.schemaVersion = local.schemaVersion
+            if let existing = load(id: recoveredID) {
+                if existing == recovered { return true }
+                continue
+            }
+            do {
+                try save(recovered)
+                return load(id: recoveredID) == recovered
+            } catch {
+                return false
+            }
+        }
+        return false
+    }
+
+    /// Copies a directory tree without overwriting an existing byte. Managed
+    /// import names are content-derived, so an identical destination is a
+    /// completed prior attempt; different bytes are treated as a hard stop.
+    /// Each new file lands through a sibling temporary path, preventing a
+    /// failed copy from creating a truncated destination that looks valid on
+    /// the next launch.
+    private func copyDirectoryContents(from source: URL, to destination: URL) -> Bool {
+        let fm = FileManager.default
+        var sourceIsDirectory: ObjCBool = false
+        guard fm.fileExists(atPath: source.path, isDirectory: &sourceIsDirectory) else {
+            return true
+        }
+        guard sourceIsDirectory.boolValue else { return false }
+
+        do {
+            try fm.createDirectory(at: destination, withIntermediateDirectories: true)
+            let children = try fm.contentsOfDirectory(
+                at: source,
+                includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey],
+                options: [])
+            for child in children {
+                let values = try child.resourceValues(
+                    forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+                let target = destination.appendingPathComponent(
+                    child.lastPathComponent,
+                    isDirectory: values.isDirectory == true)
+                if values.isDirectory == true, values.isSymbolicLink != true {
+                    guard copyDirectoryContents(from: child, to: target) else {
+                        return false
+                    }
+                    continue
+                }
+
+                if fm.fileExists(atPath: target.path) {
+                    guard fm.contentsEqual(atPath: child.path, andPath: target.path) else {
+                        return false
+                    }
+                    continue
+                }
+
+                let temporary = destination.appendingPathComponent(
+                    ".adopt-\(UUID().uuidString)-\(child.lastPathComponent)")
+                defer { try? fm.removeItem(at: temporary) }
+                try fm.copyItem(at: child, to: temporary)
+                try fm.moveItem(at: temporary, to: target)
+            }
+            return true
+        } catch {
+            return false
         }
     }
 

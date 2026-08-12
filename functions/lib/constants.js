@@ -49,6 +49,38 @@ const GC_CANDIDATE_AGE_MS = 24 * 60 * 60 * 1000;
 /** deleteAccount requires a token minted within this window. */
 const RECENT_AUTH_SEC = 5 * 60;
 
+/**
+ * Account-deletion race marker lifetime. This outlives resumable uploads and
+ * delayed Storage events without retaining a deleted account identifier
+ * forever. Firestore TTL is configured on deletedAccounts.expiresAt.
+ */
+const DELETED_ACCOUNT_MARKER_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+
+/** Patreon access survives a conclusive lapse or upstream outage for 7 days. */
+const PATREON_GRACE_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * A verified Firebase email may bootstrap sync for seven days when it matches
+ * the current campaign snapshot. Patreon OAuth must be linked before this
+ * window ends; an email is an account-recovery hint, not a durable identity.
+ */
+const PATREON_EMAIL_PROVISIONAL_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** Cloud data is retained after entitlement expiry for recovery/reactivation. */
+const PATREON_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
+
+/** Superseded keyed campaign snapshots live long enough for rollback/debugging. */
+const PATREON_INDEX_TTL_MS = 14 * 24 * 60 * 60 * 1000;
+
+/** OAuth state is opaque, single-use, and deliberately short lived. */
+const PATREON_OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
+
+/** Per-Firebase-account OAuth state creation throttle. */
+const PATREON_OAUTH_START_COOLDOWN_MS = 60 * 1000;
+
+/** Avoid turning a client refresh loop into Patreon API traffic. */
+const PATREON_REFRESH_COOLDOWN_MS = 5 * 60 * 1000;
+
 const HASH_RE = /^[0-9a-f]{64}$/;
 
 /** users/{uid}/{tier}/{contentHash}.jpg */
@@ -108,6 +140,14 @@ module.exports = {
   TOMBSTONE_RETENTION_MS,
   GC_CANDIDATE_AGE_MS,
   RECENT_AUTH_SEC,
+  DELETED_ACCOUNT_MARKER_TTL_MS,
+  PATREON_GRACE_MS,
+  PATREON_EMAIL_PROVISIONAL_MS,
+  PATREON_RETENTION_MS,
+  PATREON_INDEX_TTL_MS,
+  PATREON_OAUTH_STATE_TTL_MS,
+  PATREON_OAUTH_START_COOLDOWN_MS,
+  PATREON_REFRESH_COOLDOWN_MS,
   HASH_RE,
   OBJECT_NAME_RE,
   reservationId,

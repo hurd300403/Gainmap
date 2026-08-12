@@ -111,22 +111,22 @@ struct GainmapApp: App {
                     await sync.bind(model: model)
                     guard !SyncCoordinator.isEphemeralLaunch else { return }
                     auth.start()
-                    await sync.apply(authState: auth.state, model: model)
+                    await sync.retryPendingLocalAccountCleanup()
                 }
-                .onChange(of: auth.state) { _, state in
-                    Task { await sync.apply(authState: state, model: model) }
+                .task(id: auth.state) {
+                    guard !SyncCoordinator.isEphemeralLaunch else { return }
+                    let state = auth.state
+                    await sync.apply(authState: state, model: model)
                 }
-                // Foreground revival: parked transfers retry, pending drains
-                // run, and a network-failure "waitlist" re-checks admission.
-                // (Never wired before — parked uploads stayed parked until
-                // relaunch; P5 review.)
+                // Foreground revival: retry parked transfers and refresh the
+                // server-owned Patreon entitlement. Transport failure retains
+                // the last approved state for this running session.
                 .onReceive(NotificationCenter.default.publisher(
                     for: NSApplication.didBecomeActiveNotification)) { _ in
                     guard !SyncCoordinator.isEphemeralLaunch else { return }
                     Task { await sync.appBecameActive() }
-                    if case .waitlisted = auth.state, auth.admissionError != nil {
-                        auth.retryAdmission()
-                    }
+                    Task { await sync.retryPendingLocalAccountCleanup() }
+                    auth.refreshCloudAccess()
                 }
         }
         .windowResizability(.contentSize)
@@ -167,6 +167,9 @@ struct SettingsView: View {
     @AppStorage(CrashReporting.defaultsKey) private var crashReporting = true
     @EnvironmentObject private var auth: AuthController
     @EnvironmentObject private var sync: SyncCoordinator
+    @State private var deleteAccountConfirmationPresented = false
+    @State private var deletingAccount = false
+    @State private var deletionError: String?
 
     var body: some View {
         Form {
@@ -177,46 +180,65 @@ struct SettingsView: View {
                         Button("Sign in with Apple…") { auth.appleWebSignIn() }
                         Button("Sign in with Google…") { auth.googleWebSignIn() }
                     }
-                    Text("Sessions and looks sync to your other devices. "
-                         + "Photos upload to your private library only.")
+                    Text("Gainmap works without an account. An arbitrary email address cannot unlock "
+                         + "Cloud Sync. A verified email matching an active patron may receive "
+                         + "temporary access; connecting Patreon confirms membership.")
                         .font(.caption).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                     if case .failed(let message) = auth.state {
                         Text(message).font(.caption).foregroundStyle(.red)
                             .fixedSize(horizontal: false, vertical: true)
                     }
-                case .admitting:
+                case .checking:
                     HStack(spacing: 8) {
                         ProgressView().controlSize(.small)
-                        Text("Setting up sync…").foregroundStyle(.secondary)
+                        Text("Checking Cloud Sync access…").foregroundStyle(.secondary)
                     }
-                case .ready:
+                case .ready, .localOnly:
                     VStack(alignment: .leading, spacing: 3) {
                         Text(auth.email ?? "Signed in")
                             .fontWeight(.medium)
-                        Text(sync.syncing
-                             ? "Sync is on — sessions follow you to your iPhone."
-                             : "Sync is starting…")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                    Button("Sign out", role: .destructive) { auth.signOut() }
-                case .waitlisted:
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(auth.email ?? "Signed in")
-                            .fontWeight(.medium)
-                        // A network failure is not a waitlist — say which it is.
-                        Text(auth.admissionError.map {
-                                 "\($0) Everything keeps working on this Mac."
-                             }
-                             ?? ("Sync is full right now — you're on the waitlist. "
-                                 + "Everything keeps working on this Mac."))
+                        Text(cloudAccessMessage)
                             .font(.caption).foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
+                        if let expiry = auth.cloudAccess?.entitlement.graceExpiresAt {
+                            Text("Grace access ends \(expiry.formatted(date: .abbreviated, time: .shortened)).")
+                                .font(.caption2).foregroundStyle(.orange)
+                        }
+                    }
+                    if shouldOfferPatreonConnection {
+                        Button("Connect Patreon…") {
+                            auth.connectPatreon()
+                        }
+                        .disabled(auth.isConnectingPatreon)
                     }
                     HStack(spacing: 10) {
-                        Button("Re-check") { auth.retryAdmission() }
-                        Button("Sign out", role: .destructive) { auth.signOut() }
+                        Button("Check Access Again") { auth.refreshCloudAccess() }
+                            .disabled(auth.isRefreshingCloudAccess || auth.isConnectingPatreon)
+                        Button("Sign out of Cloud Sync", role: .destructive) { auth.signOut() }
                     }
+                    Button("Delete Account…", role: .destructive) {
+                        deleteAccountConfirmationPresented = true
+                    }
+                    .disabled(deletingAccount || auth.isConnectingPatreon)
+                    if deletingAccount {
+                        HStack(spacing: 8) {
+                            ProgressView().controlSize(.small)
+                            Text("Deleting account and cloud library…")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                    if let error = auth.cloudActionError {
+                        Text(error).font(.caption).foregroundStyle(.red)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                // Cloud deletion changes auth state to signed out, so this
+                // warning must live outside the signed-in switch to remain
+                // visible when best-effort local cleanup needs a retry.
+                if let deletionError {
+                    Text(deletionError).font(.caption).foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             } header: {
                 Text("Sync")
@@ -240,6 +262,66 @@ struct SettingsView: View {
         // height left a scrollbar in one state and dead space in another.
         .frame(width: 460)
         .fixedSize(horizontal: false, vertical: true)
+        .confirmationDialog(
+            "Delete your Gainmap account?",
+            isPresented: $deleteAccountConfirmationPresented,
+            titleVisibility: .visible
+        ) {
+            Button("Delete Account", role: .destructive) {
+                Task { await deleteAccount() }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This permanently deletes your account, synced sessions, private cloud photos, and this Mac's local copies for that account. Your signed-out local library and exported images remain.")
+        }
+    }
+
+    private var cloudAccessMessage: String {
+        guard let access = auth.cloudAccess else {
+            return "Cloud Sync access has not been checked yet."
+        }
+        if let message = access.admissionBlockMessage {
+            return message + " The local app remains fully available."
+        }
+        if access.canSync {
+            return access.entitlement.status == .grace
+                ? access.entitlement.message
+                : (sync.syncing
+                   ? "Patreon active — sessions follow you to your iPhone."
+                   : "Patreon active — Cloud Sync is starting…")
+        }
+        return access.entitlement.message
+    }
+
+    private var shouldOfferPatreonConnection: Bool {
+        guard let entitlement = auth.cloudAccess?.entitlement else { return true }
+        return entitlement.linkRequired
+    }
+
+    @MainActor
+    private func deleteAccount() async {
+        deletionError = nil
+        deletingAccount = true
+        defer { deletingAccount = false }
+        do {
+            let uid = try await auth.deleteAccountOnMac()
+            var cleanupError: Error?
+            do {
+                try await sync.purgeLocalAccountData(uid: uid)
+                AuthController.completePendingLocalCleanup(uid: uid)
+            } catch {
+                cleanupError = error
+                AuthController.recordPendingLocalCleanup(uid: uid)
+            }
+            auth.finishAccountDeletion(uid: uid)
+            if cleanupError != nil {
+                deletionError = "Your cloud account was deleted, but Gainmap couldn't remove every local copy from this Mac. It will retry automatically next launch. You can also remove Gainmap's data in Library/Application Support/Gainmap."
+            }
+        } catch AccountDeletionError.cancelled {
+            return
+        } catch {
+            deletionError = error.localizedDescription
+        }
     }
 }
 

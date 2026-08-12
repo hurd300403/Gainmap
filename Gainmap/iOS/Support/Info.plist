@@ -20,6 +20,8 @@
     <string>$(MARKETING_VERSION)</string>
     <key>CFBundleVersion</key>
     <string>$(CURRENT_PROJECT_VERSION)</string>
+    <key>NSPhotoLibraryAddUsageDescription</key>
+    <string>Gainmap saves your finished UltraHDR images to your Photos library.</string>
     <!-- Always useful, even before first launch. "Continue Latest" is
          registered dynamically once this account has a session to resume. -->
     <key>UIApplicationShortcutItems</key>
@@ -44,6 +46,7 @@
             <array>
                 <string>app-1-937169591841-ios-d35bf5a2a84831b37d0d60</string>
                 <string>com.googleusercontent.apps.937169591841-4orvoj00fj3b8qha03g5ls2jq51a3sj7</string>
+                <string>gainmapauth</string>
             </array>
         </dict>
     </array>

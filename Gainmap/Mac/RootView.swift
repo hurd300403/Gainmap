@@ -109,21 +109,14 @@ struct MacRootView: View {
     ) -> SessionEditorSyncState {
         let card = sync.cards.first { $0.id == sessionID }
         switch auth.state {
-        case .signedOut, .waitlisted:
+        case .signedOut, .failed, .checking, .localOnly:
             return .resolve(
                 card: card,
                 localOnly: true,
                 unavailable: false,
                 initialSyncComplete: sync.initialSyncComplete,
                 hasUnflushedChanges: model.hasUnflushedSessionChanges)
-        case .failed:
-            return .resolve(
-                card: card,
-                localOnly: false,
-                unavailable: true,
-                initialSyncComplete: sync.initialSyncComplete,
-                hasUnflushedChanges: model.hasUnflushedSessionChanges)
-        case .admitting, .ready:
+        case .ready:
             return .resolve(
                 card: card,
                 localOnly: false,
@@ -237,7 +230,9 @@ private struct MacSessionLibrary: View {
             }
             .disabled(renameText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         } message: {
-            Text("This name syncs to your other devices.")
+            Text(auth.canSync
+                 ? "This name syncs to your other devices."
+                 : "This name is saved on this Mac.")
         }
         .animation(.easeOut(duration: 0.18), value: sync.recentlyDeleted)
         .animation(.easeOut(duration: 0.18), value: notice)
@@ -344,15 +339,22 @@ private struct MacSessionLibrary: View {
     private var statusText: String {
         switch auth.state {
         case .signedOut:
-            return "On this Mac · sign in in Settings to sync"
+            return "Saved on this Mac · Cloud Sync optional"
         case .failed:
-            return "On this Mac · sign-in needs attention"
-        case .admitting:
-            return "Setting up sync…"
-        case .waitlisted:
-            return auth.admissionError == nil
-                ? "Saved on this Mac · sync waitlisted"
-                : "Saved on this Mac · sync offline"
+            return "Saved on this Mac · sign-in needs attention"
+        case .checking:
+            return "Checking Cloud Sync access…"
+        case .localOnly:
+            if auth.cloudAccess?.isWaitlisted == true {
+                return "Saved on this Mac · Cloud Sync waitlist"
+            }
+            if auth.cloudAccess?.entitlement.status == .inactive {
+                return "Saved on this Mac · Patreon inactive"
+            }
+            if auth.cloudAccess?.entitlement.status == .unlinked {
+                return "Saved on this Mac · connect Patreon to sync"
+            }
+            return "Saved on this Mac · Cloud Sync off"
         case .ready:
             if sync.hasSyncIssue { return "Sync needs attention" }
             if sync.pendingWorkCount > 0 {
@@ -367,20 +369,18 @@ private struct MacSessionLibrary: View {
         case .ready:
             return sync.hasSyncIssue ? Theme.warn
                 : (sync.pendingWorkCount > 0 ? Theme.gold : Theme.syncGreen)
-        case .admitting:
+        case .checking:
             return Theme.gold
-        case .signedOut, .failed, .waitlisted:
+        case .signedOut, .failed, .localOnly:
             return Theme.stoneFaint
         }
     }
 
     private var headerSyncState: HeaderSyncState {
         switch auth.state {
-        case .signedOut, .waitlisted:
+        case .signedOut, .failed, .localOnly:
             return .localOnly
-        case .failed:
-            return .issue
-        case .admitting:
+        case .checking:
             return .connecting
         case .ready:
             if sync.hasSyncIssue { return .issue }
@@ -394,11 +394,9 @@ private struct MacSessionLibrary: View {
 
     private func cardSyncState(_ card: SessionCard) -> SessionCardSyncState {
         switch auth.state {
-        case .signedOut, .waitlisted:
+        case .signedOut, .failed, .checking, .localOnly:
             return .neutral
-        case .failed:
-            return card.pendingSync ? .issue(card.syncProgress) : .neutral
-        case .admitting, .ready:
+        case .ready:
             if card.syncIssue {
                 return .issue(card.syncProgress)
             }

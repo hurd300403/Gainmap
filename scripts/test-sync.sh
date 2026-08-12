@@ -59,9 +59,9 @@ fi
 MODE="${1:-all}"
 case "$MODE" in
   rules)     SUITES="functions/test/rules.test.mjs" ;;
-  functions) SUITES="functions/test/functions.test.mjs" ;;
+  functions) SUITES="functions/test/functions.test.mjs functions/test/patreon.test.mjs" ;;
   swift)     SUITES="" ;;
-  all)       SUITES="functions/test/rules.test.mjs functions/test/functions.test.mjs" ;;
+  all)       SUITES="functions/test/rules.test.mjs functions/test/functions.test.mjs functions/test/patreon.test.mjs" ;;
   *) echo "usage: $0 [all|rules|functions|swift]" >&2; exit 2 ;;
 esac
 

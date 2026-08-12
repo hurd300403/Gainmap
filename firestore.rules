@@ -76,12 +76,22 @@ service cloud.firestore {
       return get(/databases/$(database)/documents/config/flags).data.syncEnabled == true;
     }
 
-    // DORMANT patron-entitlement hook (spec: "Patron gating", task #316).
-    // Ships returning true so no behaviour depends on it today; activation is a
-    // one-line change here plus a custom-claim setter Cloud Function.
-    function entitled() {
-      return true;
-      // return request.auth.token.patron == true;  // <- dormant patron claim
+    // Cloud Sync is the paid surface; authentication and every local feature
+    // remain free. The Admin SDK is the sole writer of this entitlement map.
+    // Grace is checked against request.time so an old `effective: true` record
+    // cannot grant indefinitely if a scheduler is delayed.
+    function entitled(uid) {
+      // Staged-rollout switch: operators deploy functions and populate the
+      // Patreon census before enforcing it on existing clients. Only an
+      // explicit false disables enforcement; missing/malformed config fails
+      // closed. New admission remains Patreon-gated in the callable either way.
+      return get(/databases/$(database)/documents/config/flags)
+               .data.get('patreonEnforcementEnabled', true) == false
+             || (get(userPath(uid)).data.entitlement.effective == true
+                 && ((get(userPath(uid)).data.entitlement.state == 'active'
+                      && request.time < get(userPath(uid)).data.entitlement.verificationExpiresAt)
+                     || (get(userPath(uid)).data.entitlement.state == 'grace'
+                         && request.time < get(userPath(uid)).data.entitlement.graceExpiresAt)));
     }
 
     // ---------------------------------------------------------------- shape
@@ -168,7 +178,7 @@ service cloud.firestore {
 
       allow update: if isOwner(uid)
                     && admitted(uid)
-                    && entitled()
+                    && entitled(uid)
                     && versionOK()
                     && syncEnabled()
                     && untouched(SERVER_USER_FIELDS())
@@ -178,13 +188,13 @@ service cloud.firestore {
 
       // -------------------------------------------------- usage (CF-owned ledger)
       match /usage/{docId} {
-        allow read: if isOwner(uid);
+        allow read: if isOwner(uid) && entitled(uid);
         allow write: if false;  // usageReconciler / reserveUpload / maintenance only
       }
 
       // -------------------------------------------------- reservations (CF-owned)
       match /reservations/{reservationId} {
-        allow read: if isOwner(uid);
+        allow read: if isOwner(uid) && entitled(uid);
         allow write: if false;  // reserveUpload / usageReconciler / maintenance only
       }
 
@@ -192,11 +202,11 @@ service cloud.firestore {
       // Client creates a shell {schemaVersion, contentHash, byteSize, createdAt}.
       // renditions.* / state / gcCandidateAt are written ONLY by the server.
       match /blobs/{contentHash} {
-        allow read: if isOwner(uid);
+        allow read: if isOwner(uid) && entitled(uid);
 
         allow create: if isOwner(uid)
                       && admitted(uid)
-                      && entitled()
+                      && entitled(uid)
                       && versionOK()
                       && syncEnabled()
                       && hashOK(contentHash)
@@ -205,7 +215,7 @@ service cloud.firestore {
 
         allow update: if isOwner(uid)
                       && admitted(uid)
-                      && entitled()
+                      && entitled(uid)
                       && versionOK()
                       && syncEnabled()
                       && untouched(SERVER_BLOB_FIELDS())
@@ -217,19 +227,18 @@ service cloud.firestore {
 
       // -------------------------------------------------- sessions
       match /sessions/{sessionId} {
-        allow read: if isOwner(uid);
+        allow read: if isOwner(uid) && entitled(uid);
 
         allow create: if isOwner(uid)
                       && admitted(uid)
-                      && entitled()
+                      && entitled(uid)
                       && versionOK()
                       && syncEnabled();
 
         allow update: if isOwner(uid)
                       && admitted(uid)
-                      && entitled()
                       && versionOK()
-                      && (tombstoneOnly() || syncEnabled())
+                      && (tombstoneOnly() || (entitled(uid) && syncEnabled()))
                       && immutableOnceSet('createdAt')
                       && revOK(SESSION_TITLE_FIELDS(), 'titleRev')
                       && revOK(SESSION_RL_FIELDS(), 'rlRev')
@@ -239,11 +248,11 @@ service cloud.firestore {
 
         // ------------------------------------------------ photos
         match /photos/{photoId} {
-          allow read: if isOwner(uid);
+          allow read: if isOwner(uid) && entitled(uid);
 
           allow create: if isOwner(uid)
                         && admitted(uid)
-                        && entitled()
+                        && entitled(uid)
                         && versionOK()
                         && syncEnabled()
                         && lookOK(request.resource.data)
@@ -252,9 +261,8 @@ service cloud.firestore {
 
           allow update: if isOwner(uid)
                         && admitted(uid)
-                        && entitled()
                         && versionOK()
-                        && (tombstoneOnly() || syncEnabled())
+                        && (tombstoneOnly() || (entitled(uid) && syncEnabled()))
                         && lookOK(request.resource.data)
                         && immutableOnceSet('createdAt')
                         && immutableOnceSet('contentHash')

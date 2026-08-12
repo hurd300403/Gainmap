@@ -84,6 +84,7 @@ async function reserveUploadCore({ db, uid, data, now, projectId }) {
   const userRef = db.doc(`users/${uid}`);
   const usageRef = db.doc(`users/${uid}/usage/storage`);
   const resRef = db.doc(`users/${uid}/reservations/${resId}`);
+  const entitlementRef = db.doc(`patreonEntitlements/${uid}`);
 
   return db.runTransaction(async (tx) => {
     // ---- reads
@@ -91,6 +92,7 @@ async function reserveUploadCore({ db, uid, data, now, projectId }) {
     const userSnap = await tx.get(userRef);
     const usageSnap = await tx.get(usageRef);
     const resSnap = await tx.get(resRef);
+    const outerEntitlementSnap = await tx.get(entitlementRef);
     const testingSnap =
       projectId === PRODUCTION_PROJECT ? null : await tx.get(testingRef);
 
@@ -101,13 +103,40 @@ async function reserveUploadCore({ db, uid, data, now, projectId }) {
     if (!userSnap.exists || userSnap.get('syncAdmitted') !== true) {
       throw new HttpsError('permission-denied', 'This account is not admitted to sync.');
     }
+    if (outerEntitlementSnap.exists && outerEntitlementSnap.get('purgeLeaseId')) {
+      throw new HttpsError('failed-precondition', 'Cloud library maintenance is in progress.');
+    }
+    const entitlement = userSnap.get('entitlement') || {};
+    const graceExpiresAt = entitlement.graceExpiresAt;
+    const patronEffective = entitlement.effective === true &&
+      ((entitlement.state === 'active' && entitlement.verificationExpiresAt &&
+        entitlement.verificationExpiresAt.toMillis() > now.toMillis()) ||
+        (entitlement.state === 'grace' && graceExpiresAt && graceExpiresAt.toMillis() > now.toMillis()));
+    const migrationBypass = flagsSnap.get('patreonEnforcementEnabled') === false;
+    if (!migrationBypass && !patronEffective) {
+      throw new HttpsError(
+        'permission-denied',
+        'An active Patreon membership is required for Cloud Sync.'
+      );
+    }
 
     const leaseSec = resolveLeaseSec(
       testingSnap && testingSnap.exists ? testingSnap.data() : null,
       projectId
     );
 
-    const expiresAtMs = now.toMillis() + leaseSec * 1000;
+    const entitlementDeadline = patronEffective
+      ? (entitlement.state === 'active'
+        ? entitlement.verificationExpiresAt.toMillis()
+        : entitlement.graceExpiresAt.toMillis())
+      : now.toMillis() + leaseSec * 1000;
+    const expiresAtMs = Math.min(now.toMillis() + leaseSec * 1000, entitlementDeadline);
+    if (expiresAtMs <= now.toMillis()) {
+      throw new HttpsError(
+        'permission-denied',
+        'Patreon access must be refreshed before uploading.'
+      );
+    }
 
     const quotaBytes = num(userSnap.get('quotaBytes')) || DEFAULT_QUOTA_BYTES;
     const bytesUsed = usageSnap.exists ? num(usageSnap.get('bytesUsed')) : 0;

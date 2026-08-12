@@ -36,6 +36,7 @@ const {
   gcPassOne,
   gcPassTwo,
   recomputeUsage,
+  purgeExpiredPatreonData,
 } = maintenanceMod.default || maintenanceMod;
 const { deleteAccountCore, assertRecentAuth } = deleteMod.default || deleteMod;
 const { DEFAULT_QUOTA_BYTES, compareGenerations, objectName } =
@@ -83,18 +84,29 @@ const NOW0 = 1_800_000_000_000; // fixed epoch for deterministic deadline math
 
 /** Minimal Admin-Storage bucket double. */
 function fakeBucket(seedFiles = []) {
-  const files = new Map(seedFiles.map((f) => [f.name, { size: f.size }]));
+  const files = new Map(seedFiles.map((f) => [f.name, {
+    size: f.size,
+    ...(f.generation == null ? {} : { generation: String(f.generation) }),
+  }]));
   const deleted = [];
   return {
     files,
     deleted,
-    file(name) {
+    file(name, fileOptions = {}) {
       return {
         name,
         async delete() {
           if (!files.has(name)) {
             const err = new Error('No such object');
             err.code = 404;
+            throw err;
+          }
+          const expected = fileOptions.preconditionOpts?.ifGenerationMatch;
+          const current = files.get(name);
+          if (expected != null && current.generation != null &&
+              String(expected) !== String(current.generation)) {
+            const err = new Error('Precondition failed');
+            err.code = 412;
             throw err;
           }
           files.delete(name);
@@ -120,8 +132,21 @@ function fakeBucket(seedFiles = []) {
   };
 }
 
-async function seedFlags({ syncEnabled = true, signupsOpen = true, maxUsers = 200 } = {}) {
-  await db.doc('config/flags').set({ syncEnabled, signupsOpen, maxUsers });
+async function seedFlags({
+  syncEnabled = true,
+  signupsOpen = true,
+  maxUsers = 200,
+  patreonEnforcementEnabled = true,
+} = {}) {
+  await db.doc('config/flags').set({
+    syncEnabled,
+    signupsOpen,
+    maxUsers,
+    patreonEnforcementEnabled,
+  });
+  if (!(await db.doc('config/counters').get()).exists) {
+    await db.doc('config/counters').set({ admittedUsers: 0 });
+  }
 }
 async function seedTesting(data) {
   await db.doc('config/testing').set(data);
@@ -131,6 +156,12 @@ async function seedUser(uid = UID, { quotaBytes = DEFAULT_QUOTA_BYTES, bytesUsed
     schemaVersion: 1,
     quotaBytes,
     syncAdmitted: true,
+    entitlement: {
+      state: 'active',
+      effective: true,
+      lastVerifiedAt: now(NOW0),
+      verificationExpiresAt: now(NOW0 + 30 * 24 * 3600 * 1000),
+    },
     createdAt: now(NOW0),
   });
   await db.doc(`users/${uid}/usage/storage`).set({
@@ -152,12 +183,28 @@ async function expectCode(promise, code) {
   }
 }
 
+const admittedPatron = (uid, atMs = NOW0) => admitSyncUserCore({
+  db,
+  uid,
+  now: now(atMs),
+});
+
+async function seedPatreonEntitlement(uid, data) {
+  await db.doc(`patreonEntitlements/${uid}`).set(data || {
+    state: 'active',
+    effective: true,
+    lastVerifiedAt: now(NOW0),
+    verificationExpiresAt: now(NOW0 + 30 * 24 * 3600 * 1000),
+  });
+}
+
 // ===========================================================================
 // admitSyncUser
 // ===========================================================================
 test('admitSyncUser provisions the user doc, zeroed usage, and bumps the counter', async () => {
   await seedFlags({ maxUsers: 2 });
-  const res = await admitSyncUserCore({ db, uid: UID, now: now(NOW0) });
+  await seedPatreonEntitlement(UID);
+  const res = await admittedPatron(UID);
   assert.deepEqual({ admitted: res.admitted }, { admitted: true });
 
   const user = (await db.doc(`users/${UID}`).get()).data();
@@ -177,8 +224,9 @@ test('admitSyncUser provisions the user doc, zeroed usage, and bumps the counter
 
 test('admitSyncUser is idempotent — a second call does not double-count the seat', async () => {
   await seedFlags({ maxUsers: 2 });
-  await admitSyncUserCore({ db, uid: UID, now: now(NOW0) });
-  const again = await admitSyncUserCore({ db, uid: UID, now: now(NOW0 + 1000) });
+  await seedPatreonEntitlement(UID);
+  await admittedPatron(UID);
+  const again = await admittedPatron(UID, NOW0 + 1000);
   assert.equal(again.admitted, true);
   assert.equal(again.alreadyAdmitted, true);
   assert.equal((await db.doc('config/counters').get()).get('admittedUsers'), 1);
@@ -186,22 +234,87 @@ test('admitSyncUser is idempotent — a second call does not double-count the se
 
 test('admitSyncUser waitlists once the cap is reached, and while signups are closed', async () => {
   await seedFlags({ maxUsers: 2 });
-  assert.equal((await admitSyncUserCore({ db, uid: 'u1', now: now(NOW0) })).admitted, true);
-  assert.equal((await admitSyncUserCore({ db, uid: 'u2', now: now(NOW0) })).admitted, true);
+  await Promise.all(['u1', 'u2', 'u3'].map((uid) => seedPatreonEntitlement(uid)));
+  assert.equal((await admittedPatron('u1')).admitted, true);
+  assert.equal((await admittedPatron('u2')).admitted, true);
 
-  const third = await admitSyncUserCore({ db, uid: 'u3', now: now(NOW0) });
+  const third = await admittedPatron('u3');
   assert.deepEqual(third, { admitted: false, reason: 'waitlist' });
   assert.equal((await db.doc('users/u3').get()).exists, false);
   assert.equal((await db.doc('config/counters').get()).get('admittedUsers'), 2);
 
   await seedFlags({ signupsOpen: false, maxUsers: 200 });
-  const closed = await admitSyncUserCore({ db, uid: 'u4', now: now(NOW0) });
+  await seedPatreonEntitlement('u4');
+  const closed = await admittedPatron('u4');
   assert.deepEqual(closed, { admitted: false, reason: 'waitlist' });
 });
 
 test('admitSyncUser rejects an empty uid (unauthenticated caller)', async () => {
   await seedFlags();
-  await expectCode(admitSyncUserCore({ db, uid: '', now: now(NOW0) }), 'unauthenticated');
+  await expectCode(admittedPatron(''), 'unauthenticated');
+});
+
+test('admitSyncUser gates only Cloud Sync on effective Patreon entitlement', async () => {
+  await seedFlags();
+  await seedPatreonEntitlement(UID, { state: 'inactive', effective: false });
+  const inactive = await admitSyncUserCore({
+    db,
+    uid: UID,
+    now: now(NOW0),
+  });
+  assert.deepEqual(inactive, { admitted: false, reason: 'patreon_required' });
+  assert.equal((await db.doc(`users/${UID}`).get()).exists, false);
+
+  await seedPatreonEntitlement(UID, {
+    state: 'grace',
+    effective: true,
+    graceExpiresAt: now(NOW0 + 60_000),
+  });
+  const grace = await admitSyncUserCore({
+    db,
+    uid: UID,
+    now: now(NOW0),
+  });
+  assert.equal(grace.admitted, true);
+});
+
+test('admission counts an existing non-admitted user as a newly acquired seat', async () => {
+  await seedFlags({ maxUsers: 2 });
+  await seedPatreonEntitlement(UID);
+  await db.doc(`users/${UID}`).set({ schemaVersion: 1, syncAdmitted: false });
+  await db.doc('config/counters').set({ admittedUsers: 1 });
+  assert.equal((await admittedPatron(UID)).admitted, true);
+  assert.equal((await db.doc('config/counters').get()).get('admittedUsers'), 2);
+
+  const uid = 'partial-full';
+  await seedPatreonEntitlement(uid);
+  await db.doc(`users/${uid}`).set({ schemaVersion: 1, syncAdmitted: false });
+  assert.deepEqual(await admittedPatron(uid), { admitted: false, reason: 'waitlist' });
+});
+
+test('migration bypass preserves an existing admitted legacy user but never admits a new one', async () => {
+  await seedFlags({ patreonEnforcementEnabled: false });
+  await db.doc(`users/${UID}`).set({
+    schemaVersion: 1,
+    syncAdmitted: true,
+    quotaBytes: DEFAULT_QUOTA_BYTES,
+    createdAt: now(NOW0 - 1000),
+  });
+  const legacy = await admittedPatron(UID);
+  assert.equal(legacy.admitted, true);
+  assert.equal(legacy.alreadyAdmitted, true);
+
+  const newcomer = await admittedPatron('new-without-patreon');
+  assert.deepEqual(newcomer, { admitted: false, reason: 'patreon_required' });
+  assert.equal((await db.doc('users/new-without-patreon').get()).exists, false);
+});
+
+test('new admission fails closed when the authoritative seat counter is missing', async () => {
+  await seedFlags();
+  await db.doc('config/counters').delete();
+  await seedPatreonEntitlement(UID);
+  assert.deepEqual(await admittedPatron(UID), { admitted: false, reason: 'waitlist' });
+  assert.equal((await db.doc(`users/${UID}`).get()).exists, false);
 });
 
 // ===========================================================================
@@ -220,6 +333,36 @@ test('reserveUpload writes the completion deadline and charges reservedBytes onc
   assert.equal(r.refreshed, false);
   assert.equal(r.expiresAt, NOW0 + 8 * 24 * 3600 * 1000);
   assert.equal((await usage()).reservedBytes, 1000);
+});
+
+test('reserveUpload lease never outlives current Patreon entitlement', async () => {
+  await seedFlags();
+  await seedUser();
+  const deadline = NOW0 + 60_000;
+  await db.doc(`users/${UID}`).set({
+    entitlement: {
+      state: 'active',
+      effective: true,
+      verificationExpiresAt: now(deadline),
+    },
+  }, { merge: true });
+  const result = await reserve({ contentHash: HASH, tier: 'originals', byteSize: 10 });
+  assert.equal(result.expiresAt, deadline);
+});
+
+test('migration bypass lets an already-admitted legacy client reserve a bounded upload', async () => {
+  await seedFlags({ patreonEnforcementEnabled: false });
+  await db.doc(`users/${UID}`).set({
+    schemaVersion: 1,
+    quotaBytes: DEFAULT_QUOTA_BYTES,
+    syncAdmitted: true,
+    createdAt: now(NOW0 - 1000),
+  });
+  await db.doc(`users/${UID}/usage/storage`).set({
+    schemaVersion: 1, bytesUsed: 0, reservedBytes: 0, objectCount: 0,
+  });
+  const result = await reserve({ contentHash: HASH, tier: 'originals', byteSize: 1000 });
+  assert.equal(result.expiresAt, NOW0 + 8 * 24 * 60 * 60 * 1000);
 });
 
 test('reserveUpload refresh extends expiresAt and never double-counts', async () => {
@@ -445,12 +588,12 @@ test('bytesUsed can never go negative', async () => {
   assert.equal((await usage()).bytesUsed, 0);
 });
 
-test('post-deletion finalize DELETES the object and writes no state', async () => {
+test('post-deletion finalize DELETES the matching generation and writes no state', async () => {
   await seedFlags();
   await seedUser();
   await db.doc(`deletedAccounts/${UID}`).set({ schemaVersion: 1, deletedAt: now(NOW0) });
 
-  const bucket = fakeBucket([{ name: NAME, size: 500 }]);
+  const bucket = fakeBucket([{ name: NAME, size: 500, generation: GEN_BIG }]);
   const r = await handleFinalize({
     db,
     bucket,
@@ -467,9 +610,54 @@ test('post-deletion finalize DELETES the object and writes no state', async () =
   assert.equal((await usage()).bytesUsed, 0);
 });
 
+test('orphan cleanup cannot delete a replacement uploaded after its transaction', async () => {
+  await seedFlags();
+  await seedUser();
+  await db.doc(`deletedAccounts/${UID}`).set({ schemaVersion: 1, deletedAt: now(NOW0) });
+
+  // Simulate generation N+1 replacing N after Firestore classified N as an
+  // orphan but before the asynchronous Storage delete executes. The fake uses
+  // the same ifGenerationMatch behavior as GCS and returns 412.
+  const replacementGeneration = GEN_BIG_NEXT;
+  const files = new Map([[NAME, { size: 500, generation: GEN_BIG }]]);
+  let deleteAttempt;
+  const bucket = {
+    files,
+    file(name, fileOptions = {}) {
+      return {
+        async delete() {
+          files.set(name, { size: 900, generation: replacementGeneration });
+          deleteAttempt = fileOptions.preconditionOpts?.ifGenerationMatch;
+          const err = new Error('Precondition failed');
+          err.code = 412;
+          throw err;
+        },
+      };
+    },
+  };
+
+  const result = await handleFinalize({
+    db,
+    bucket,
+    name: NAME,
+    generation: GEN_BIG,
+    byteSize: 500,
+    now: now(NOW0 + 1000),
+  });
+
+  assert.equal(deleteAttempt, GEN_BIG, 'cleanup must be pinned to the event generation');
+  assert.deepEqual(result, {
+    orphanDeleted: false,
+    skipped: 'already-gone-or-replaced',
+    reason: 'account-deleted',
+  });
+  assert.equal(bucket.files.get(NAME).generation, replacementGeneration);
+  assert.equal(bucket.files.get(NAME).size, 900, 'the replacement object must survive');
+});
+
 test('finalize for a user whose doc is gone also deletes the object', async () => {
   await seedFlags();
-  const bucket = fakeBucket([{ name: NAME, size: 500 }]);
+  const bucket = fakeBucket([{ name: NAME, size: 500, generation: GEN_BIG }]);
   const r = await handleFinalize({
     db,
     bucket,
@@ -616,6 +804,94 @@ test('nightly recompute heals bytesUsed / objectCount drift from bucket reality'
   assert.equal(u.reservedBytes, 0, 'recompute must not touch reservedBytes');
 });
 
+test('maintenance purges cloud data after 90 inactive days exactly once', async () => {
+  await seedFlags();
+  await seedUser();
+  await db.doc('config/counters').set({ admittedUsers: 3 });
+  await db.doc(`users/${UID}/sessions/s1`).set({ schemaVersion: 1, title: 'retained' });
+  await db.doc(`patreonEntitlements/${UID}`).set({
+    state: 'inactive',
+    effective: false,
+    retentionExpiresAt: now(NOW0 - 1),
+  });
+  const bucket = fakeBucket([
+    { name: objectName(UID, 'originals', HASH), size: 300 },
+    { name: 'users/bob/originals/keep.jpg', size: 1 },
+  ]);
+
+  let out = await purgeExpiredPatreonData({ db, bucket, now: now(NOW0) });
+  assert.equal(out.purged, 1);
+  assert.equal((await db.doc(`users/${UID}`).get()).exists, false);
+  assert.equal((await db.doc(`patreonEntitlements/${UID}`).get()).get('cloudDataPurgedAt').toMillis(), NOW0);
+  assert.equal((await db.doc('config/counters').get()).get('admittedUsers'), 2);
+  assert.equal(bucket.files.has('users/bob/originals/keep.jpg'), true);
+
+  out = await purgeExpiredPatreonData({ db, bucket, now: now(NOW0 + 1000) });
+  assert.equal(out.purged, 0);
+  assert.equal((await db.doc('config/counters').get()).get('admittedUsers'), 2);
+});
+
+test('retention purge retries a Storage failure and releases the captured seat exactly once', async () => {
+  await seedFlags();
+  await seedUser();
+  await db.doc('config/counters').set({ admittedUsers: 3 });
+  await db.doc(`patreonEntitlements/${UID}`).set({
+    state: 'inactive', effective: false, retentionExpiresAt: now(NOW0 - 1),
+  });
+  const bucket = fakeBucket([{ name: objectName(UID, 'originals', HASH), size: 300 }]);
+  const realDeleteFiles = bucket.deleteFiles.bind(bucket);
+  let attempts = 0;
+  bucket.deleteFiles = async (args) => {
+    attempts += 1;
+    if (attempts === 1) throw new Error('transient storage failure');
+    return realDeleteFiles(args);
+  };
+
+  let out = await purgeExpiredPatreonData({ db, bucket, now: now(NOW0) });
+  assert.equal(out.purged, 0);
+  let entitlement = (await db.doc(`patreonEntitlements/${UID}`).get()).data();
+  assert.equal(entitlement.cloudDataPurgedAt, undefined);
+  assert.equal(entitlement.purgeOccupiedSeat, true);
+  assert.equal((await db.doc('config/counters').get()).get('admittedUsers'), 3);
+
+  out = await purgeExpiredPatreonData({ db, bucket, now: now(NOW0 + 1) });
+  assert.equal(out.purged, 1);
+  entitlement = (await db.doc(`patreonEntitlements/${UID}`).get()).data();
+  assert.equal(entitlement.cloudDataPurgedAt.toMillis(), NOW0 + 1);
+  assert.equal((await db.doc('config/counters').get()).get('admittedUsers'), 2);
+
+  out = await purgeExpiredPatreonData({ db, bucket, now: now(NOW0 + 2) });
+  assert.equal(out.purged, 0);
+  assert.equal((await db.doc('config/counters').get()).get('admittedUsers'), 2);
+});
+
+test('retention purge completion failure keeps the seat marker sticky for retry', async () => {
+  await seedFlags();
+  await seedUser();
+  await db.doc('config/counters').set({ admittedUsers: 3 });
+  await db.doc(`patreonEntitlements/${UID}`).set({
+    state: 'inactive', effective: false, retentionExpiresAt: now(NOW0 - 1),
+  });
+  let failures = 0;
+  const first = await purgeExpiredPatreonData({
+    db,
+    bucket: fakeBucket(),
+    now: now(NOW0),
+    beforeComplete: async () => {
+      failures += 1;
+      throw new Error('completion unavailable');
+    },
+  });
+  assert.equal(first.purged, 0);
+  assert.equal(failures, 1);
+  assert.equal((await db.doc(`users/${UID}`).get()).exists, false);
+  assert.equal((await db.doc(`patreonEntitlements/${UID}`).get()).get('purgeOccupiedSeat'), true);
+
+  const second = await purgeExpiredPatreonData({ db, bucket: fakeBucket(), now: now(NOW0 + 1) });
+  assert.equal(second.purged, 1);
+  assert.equal((await db.doc('config/counters').get()).get('admittedUsers'), 2);
+});
+
 test('runMaintenance orchestrates every pass without throwing', async () => {
   await seedFlags();
   await seedUser();
@@ -659,6 +935,8 @@ test('deleteAccount purges the tree + prefix, marks the account, and decrements 
   assert.equal(r.counterDecremented, true);
 
   assert.equal((await db.doc(`deletedAccounts/${UID}`).get()).exists, true);
+  const marker = (await db.doc(`deletedAccounts/${UID}`).get()).data();
+  assert.equal(marker.expiresAt.toMillis(), NOW0 + 30 * 24 * 60 * 60 * 1000);
   assert.equal((await db.doc(`users/${UID}`).get()).exists, false);
   assert.equal((await db.doc(`users/${UID}/sessions/s1`).get()).exists, false);
   assert.equal((await db.doc(`users/${UID}/sessions/s1/photos/p1`).get()).exists, false);
@@ -668,7 +946,7 @@ test('deleteAccount purges the tree + prefix, marks the account, and decrements 
 
   assert.equal([...bucket.files.keys()].some((k) => k.startsWith(`users/${UID}/`)), false);
   assert.equal(bucket.files.has('users/bob/originals/keep.jpg'), true, 'other users are untouched');
-  assert.deepEqual(auth.calls, [UID]);
+  assert.deepEqual(auth.calls, [], 'Auth deletion is the endpoint orchestration final step');
   assert.equal((await db.doc('config/counters').get()).get('admittedUsers'), 2);
 });
 
@@ -684,6 +962,34 @@ test('a retried deleteAccount never decrements the counter twice', async () => {
   assert.equal((await db.doc('config/counters').get()).get('admittedUsers'), 2);
 });
 
+test('deleting a never-admitted Firebase account cannot decrement the seat counter', async () => {
+  await seedFlags();
+  await db.doc('config/counters').set({ admittedUsers: 3 });
+  const uid = 'signed-in-local-only';
+  const result = await deleteAccountCore({
+    db,
+    bucket: fakeBucket(),
+    auth: null,
+    uid,
+    now: now(NOW0),
+  });
+  assert.equal(result.counterDecremented, false);
+  assert.equal((await db.doc('config/counters').get()).get('admittedUsers'), 3);
+});
+
+test('deleting an admitted account fails closed when the authoritative counter is missing', async () => {
+  await seedFlags();
+  await seedUser();
+  await db.doc('config/counters').delete();
+  await assert.rejects(
+    deleteAccountCore({ db, bucket: fakeBucket(), auth: null, uid: UID, now: now(NOW0) }),
+    /administrator repair/
+  );
+  assert.equal((await db.doc(`deletedAccounts/${UID}`).get()).exists, false);
+  assert.equal((await db.doc(`users/${UID}`).get()).exists, true);
+  assert.equal((await db.doc('config/counters').get()).exists, false);
+});
+
 test('a late resumable upload cannot resurrect a purged account (end to end)', async () => {
   await seedFlags();
   await seedUser();
@@ -695,7 +1001,7 @@ test('a late resumable upload cannot resurrect a purged account (end to end)', a
   const auth = { async deleteUser() {} };
   await deleteAccountCore({ db, bucket: fakeBucket(), auth, uid: UID, now: now(NOW0) });
   // 3. the upload completes anyway
-  const bucket = fakeBucket([{ name: NAME, size: 500 }]);
+  const bucket = fakeBucket([{ name: NAME, size: 500, generation: GEN_BIG }]);
   const r = await handleFinalize({
     db,
     bucket,
@@ -710,4 +1016,27 @@ test('a late resumable upload cannot resurrect a purged account (end to end)', a
   const anyUserDocs = await db.collection(`users/${UID}/blobs`).get();
   assert.equal(anyUserDocs.empty, true, 'no Firestore subtree may reappear');
   assert.equal((await db.doc(`users/${UID}`).get()).exists, false);
+});
+
+test('a live retention purge lease makes a late finalize an orphan and prevents resurrection', async () => {
+  await seedFlags();
+  await seedUser();
+  await db.doc(`patreonEntitlements/${UID}`).set({
+    state: 'inactive',
+    effective: false,
+    purgeLeaseId: 'purge',
+    purgeLeaseUntil: now(NOW0 + 60_000),
+  });
+  const bucket = fakeBucket([{ name: NAME, size: 500, generation: GEN_BIG }]);
+  const result = await handleFinalize({
+    db,
+    bucket,
+    name: NAME,
+    generation: GEN_BIG,
+    byteSize: 500,
+    now: now(NOW0),
+  });
+  assert.deepEqual(result, { orphanDeleted: true, reason: 'retention-purge' });
+  assert.equal(bucket.files.size, 0);
+  assert.equal((await db.doc(`users/${UID}/blobs/${HASH}`).get()).exists, false);
 });

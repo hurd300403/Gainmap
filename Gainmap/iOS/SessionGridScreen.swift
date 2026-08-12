@@ -2,11 +2,12 @@
 //  SessionGridScreen.swift
 //  Gainmap for iPhone (P5)
 //
-//  The home screen: shared SessionGridView + waitlist banner + account menu.
+//  The home screen: always-available local library + optional Cloud Sync.
 //
 
 import SwiftUI
 import PhotosUI
+import AuthenticationServices
 import GainmapCore
 
 /// What the editor cover opens: an existing session, or a brand-new one
@@ -29,15 +30,20 @@ struct SessionGridScreen: View {
     @State private var deleting: SessionCard?
     @State private var exportShare: SessionExportShare?
     @State private var partialExportFailures = 0
+    @State private var photoLibrarySaveFailure: String?
     @State private var notice: GridNotice?
+    @State private var deleteAccountConfirmationPresented = false
+    @State private var appleDeletionSheetPresented = false
+    @State private var deletingAccount = false
+    @State private var cloudSettingsPresented = false
 
     var body: some View {
         NavigationStack {
             ZStack {
                 Theme.bg.ignoresSafeArea()
                 VStack(spacing: 0) {
-                    if case .waitlisted = auth.state {
-                        waitlistBanner
+                    if shouldShowCloudBanner {
+                        cloudAccessBanner
                     }
                     if !model.initialLoadDone {
                         VStack {
@@ -69,24 +75,46 @@ struct SessionGridScreen: View {
                 if model.exportingSessionID != nil {
                     exportProgressOverlay
                 }
+                if deletingAccount && !appleDeletionSheetPresented {
+                    accountDeletionProgressOverlay
+                }
             }
             .navigationTitle("Sessions")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItemGroup(placement: .topBarTrailing) {
                     Button {
-                        let state = syncVisualState
-                        notice = GridNotice(title: state.title, message: state.message)
+                        if auth.canSync {
+                            let state = syncVisualState
+                            notice = GridNotice(title: state.title, message: state.message)
+                        } else {
+                            cloudSettingsPresented = true
+                        }
                     } label: {
                         IOSSyncIndicator(state: syncVisualState)
                     }
                     .accessibilityLabel("Sync status: \(syncVisualState.title)")
 
                     Menu {
-                        if let email = auth.email {
-                            Text(email)
+                        if auth.uid == nil {
+                            Button("Set Up Cloud Sync…") {
+                                cloudSettingsPresented = true
+                            }
+                        } else {
+                            if let email = auth.email {
+                                Text(email)
+                            }
+                            Button("Cloud Sync Settings…") {
+                                cloudSettingsPresented = true
+                            }
+                            Button("Sign out of Cloud Sync", role: .destructive) {
+                                auth.signOut()
+                            }
+                            Button("Delete Account", role: .destructive) {
+                                deleteAccountConfirmationPresented = true
+                            }
+                            .disabled(deletingAccount)
                         }
-                        Button("Sign out", role: .destructive) { auth.signOut() }
                     } label: {
                         Image(systemName: "person.circle")
                             .foregroundStyle(Theme.stoneDim)
@@ -106,6 +134,17 @@ struct SessionGridScreen: View {
                     .environmentObject(model)
             }
             .sheet(item: $exportShare, onDismiss: {
+                if let failure = photoLibrarySaveFailure {
+                    photoLibrarySaveFailure = nil
+                    let failedCount = partialExportFailures
+                    partialExportFailures = 0
+                    let suffix = failedCount == 0 ? "" :
+                        "\n\n\(failedCount) photo\(failedCount == 1 ? "" : "s") also could not be exported."
+                    notice = GridNotice(
+                        title: "Couldn't save to Photos",
+                        message: failure + suffix)
+                    return
+                }
                 guard partialExportFailures > 0 else { return }
                 let count = partialExportFailures
                 partialExportFailures = 0
@@ -113,7 +152,25 @@ struct SessionGridScreen: View {
                     title: "Some photos weren't exported",
                     message: "\(count) photo\(count == 1 ? "" : "s") could not be downloaded or encoded. The completed exports are ready.")
             }) { share in
-                SessionShareSheet(items: share.urls)
+                PhotoExportShareSheet(
+                    urls: share.urls,
+                    onPhotoLibraryFailure: { error in
+                        photoLibrarySaveFailure = error.localizedDescription
+                    })
+            }
+            .sheet(isPresented: $appleDeletionSheetPresented) {
+                AppleAccountDeletionSheet(
+                    deleting: deletingAccount,
+                    prepareRequest: auth.prepareAppleAccountDeletionRequest,
+                    onCompletion: { result in
+                        Task { await deleteAccount(withAppleAuthorization: result) }
+                    },
+                    onCancel: { appleDeletionSheetPresented = false })
+                .interactiveDismissDisabled(deletingAccount)
+            }
+            .sheet(isPresented: $cloudSettingsPresented) {
+                SignInScreen()
+                    .environmentObject(auth)
             }
             .alert("Rename Session", isPresented: renameAlertPresented) {
                 TextField("Session name", text: $renameText)
@@ -126,7 +183,9 @@ struct SessionGridScreen: View {
                 }
                 .disabled(renameText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             } message: {
-                Text("This name syncs to your other devices.")
+                Text(auth.canSync
+                     ? "This name syncs to your other devices."
+                     : "This name is saved on this iPhone.")
             }
             .confirmationDialog(
                 "Delete “\(deletingTitle)”?",
@@ -140,7 +199,21 @@ struct SessionGridScreen: View {
                 }
                 Button("Cancel", role: .cancel) { deleting = nil }
             } message: {
-                Text("This removes the session from Gainmap on every synced device.")
+                Text(auth.canSync
+                     ? "This removes the session from Gainmap on every synced device."
+                     : "This removes the session from this iPhone.")
+            }
+            .confirmationDialog(
+                "Delete your Gainmap account?",
+                isPresented: $deleteAccountConfirmationPresented,
+                titleVisibility: .visible
+            ) {
+                Button("Delete Account", role: .destructive) {
+                    beginAccountDeletion()
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("This permanently deletes your account, synced sessions, and private cloud photos. Gainmap also removes its local copies from this iPhone. Images already saved to Photos or Files remain.")
             }
             .alert(item: $notice) { notice in
                 Alert(title: Text(notice.title), message: Text(notice.message),
@@ -194,6 +267,70 @@ struct SessionGridScreen: View {
         renaming = card
     }
 
+    private func beginAccountDeletion() {
+        if auth.providers.contains("apple.com") {
+            appleDeletionSheetPresented = true
+        } else if auth.providers.contains("google.com") {
+            Task { await deleteAccountWithGoogle() }
+        } else {
+            notice = GridNotice(
+                title: "Sign in again",
+                message: "Gainmap couldn't identify the sign-in method for this account. Sign out, sign back in, and try again.")
+        }
+    }
+
+    @MainActor
+    private func deleteAccountWithGoogle() async {
+        await performAccountDeletion {
+            try await auth.deleteAccountWithGoogle()
+        }
+    }
+
+    @MainActor
+    private func deleteAccount(
+        withAppleAuthorization result: Result<ASAuthorization, Error>
+    ) async {
+        await performAccountDeletion {
+            try await auth.deleteAccount(withAppleAuthorization: result)
+        }
+    }
+
+    @MainActor
+    private func performAccountDeletion(
+        _ operation: () async throws -> String
+    ) async {
+        deletingAccount = true
+        defer { deletingAccount = false }
+        do {
+            let uid = try await operation()
+            var cleanupError: Error?
+            do {
+                try await model.purgeLocalAccountData(uid: uid)
+                AuthController.completePendingLocalCleanup(uid: uid)
+            } catch {
+                cleanupError = error
+                AuthController.recordPendingLocalCleanup(uid: uid)
+            }
+            // Cloud deletion is irreversible, so always leave the now-deleted
+            // identity. A failed filesystem cleanup is queued durably and
+            // reported instead of silently contradicting the privacy promise.
+            auth.finishAccountDeletion(uid: uid)
+            appleDeletionSheetPresented = false
+            if cleanupError != nil {
+                notice = GridNotice(
+                    title: "Cloud account deleted",
+                    message: "Your cloud account and synced data were deleted, but Gainmap couldn't remove every local copy from this iPhone. It will retry automatically next launch. You can also remove all app data by deleting Gainmap from this iPhone.")
+            }
+        } catch AccountDeletionError.cancelled {
+            appleDeletionSheetPresented = false
+        } catch {
+            appleDeletionSheetPresented = false
+            notice = GridNotice(
+                title: "Couldn't delete account",
+                message: error.localizedDescription)
+        }
+    }
+
     private func exportSession(_ id: UUID) {
         guard model.exportingSessionID == nil else {
             notice = GridNotice(
@@ -236,13 +373,29 @@ struct SessionGridScreen: View {
         .shadow(color: .black.opacity(0.35), radius: 18, y: 8)
     }
 
+    private var accountDeletionProgressOverlay: some View {
+        VStack(spacing: 10) {
+            ProgressView().tint(Theme.stone)
+            Text("DELETING ACCOUNT")
+                .font(Theme.mono(10, .bold))
+                .tracking(1.4)
+                .foregroundStyle(Theme.stone)
+            Text("Removing your cloud library and local copies…")
+                .font(Theme.ui(11))
+                .foregroundStyle(Theme.stoneDim)
+        }
+        .padding(.horizontal, 24)
+        .padding(.vertical, 18)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
+        .overlay(RoundedRectangle(cornerRadius: 16).stroke(Theme.line))
+        .shadow(color: .black.opacity(0.35), radius: 18, y: 8)
+    }
+
     private func cardSyncState(_ card: SessionCard) -> SessionCardSyncState {
         switch auth.state {
-        case .signedOut, .waitlisted:
+        case .signedOut, .failed, .checking, .localOnly:
             return .neutral
-        case .failed:
-            return card.pendingSync ? .issue(card.syncProgress) : .neutral
-        case .admitting, .ready:
+        case .ready:
             if card.syncIssue {
                 return .issue(card.syncProgress)
             }
@@ -253,11 +406,9 @@ struct SessionGridScreen: View {
 
     private var syncVisualState: IOSSyncVisualState {
         switch auth.state {
-        case .signedOut, .waitlisted:
+        case .signedOut, .failed, .localOnly:
             return .localOnly
-        case .failed:
-            return .issue
-        case .admitting:
+        case .checking:
             return .connecting
         case .ready:
             if model.hasSyncIssue { return .issue }
@@ -292,22 +443,33 @@ struct SessionGridScreen: View {
         quickActions.consume(action)
     }
 
-    private var waitlistBanner: some View {
-        HStack(spacing: 10) {
-            Image(systemName: auth.admissionError == nil ? "hourglass" : "wifi.exclamationmark")
+    private var shouldShowCloudBanner: Bool {
+        if auth.cloudAccess?.entitlement.status == .grace { return true }
+        if case .localOnly = auth.state { return true }
+        return false
+    }
+
+    private var cloudAccessBanner: some View {
+        let entitlement = auth.cloudAccess?.entitlement
+        return HStack(spacing: 10) {
+            Image(systemName: entitlement?.status == .grace
+                  ? "clock" : "icloud.slash")
                 .font(.system(size: 12))
             VStack(alignment: .leading, spacing: 2) {
-                // Tell the truth: a network failure is NOT a waitlist.
-                Text(auth.admissionError
-                     ?? "Sync is full right now — you're on the waitlist.")
+                Text(auth.cloudAccess?.admissionBlockMessage
+                     ?? entitlement?.message
+                     ?? auth.cloudActionError
+                     ?? "Cloud Sync is off. Your sessions remain on this iPhone.")
                     .font(Theme.ui(12, .medium)).foregroundStyle(Theme.stone)
-                Text(auth.admissionError == nil
-                     ? "Everything works offline; sessions sync once a spot opens."
-                     : "Everything works offline; sync connects automatically.")
+                Text(entitlement?.status == .grace
+                     ? "Local editing stays available even if the grace period ends."
+                     : "Gainmap's standard features do not require an account.")
                     .font(Theme.mono(9)).foregroundStyle(Theme.stoneDim)
             }
             Spacer()
-            Button("Re-check") { auth.retryAdmission() }
+            Button(entitlement?.status == .unlinked ? "Connect" : "Details") {
+                cloudSettingsPresented = true
+            }
                 .font(Theme.mono(10, .semibold)).foregroundStyle(Theme.gold)
                 .buttonStyle(.plain)
         }
@@ -328,6 +490,58 @@ private struct GridNotice: Identifiable {
     let id = UUID()
     let title: String
     let message: String
+}
+
+private struct AppleAccountDeletionSheet: View {
+    let deleting: Bool
+    let prepareRequest: (ASAuthorizationAppleIDRequest) -> Void
+    let onCompletion: (Result<ASAuthorization, Error>) -> Void
+    let onCancel: () -> Void
+
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 18) {
+                Image(systemName: "person.crop.circle.badge.xmark")
+                    .font(.system(size: 38, weight: .light))
+                    .foregroundStyle(Theme.accentHot)
+                Text("Confirm with Apple")
+                    .font(Theme.display(28, .semibold))
+                    .foregroundStyle(Theme.stone)
+                Text("Apple requires a fresh sign-in before Gainmap can revoke access and permanently delete your account.")
+                    .font(Theme.ui(14))
+                    .foregroundStyle(Theme.stoneDim)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                SignInWithAppleButton(.continue,
+                                      onRequest: prepareRequest,
+                                      onCompletion: onCompletion)
+                    .signInWithAppleButtonStyle(.white)
+                    .frame(height: 48)
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .disabled(deleting)
+
+                if deleting {
+                    HStack(spacing: 10) {
+                        ProgressView().tint(Theme.stone)
+                        Text("Deleting account and cloud library…")
+                            .font(Theme.ui(13, .medium))
+                            .foregroundStyle(Theme.stoneDim)
+                    }
+                }
+                Spacer()
+            }
+            .padding(24)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .background(Theme.bg.ignoresSafeArea())
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel", action: onCancel)
+                        .disabled(deleting)
+                }
+            }
+        }
+        .presentationDetents([.medium])
+    }
 }
 
 private enum IOSSyncVisualState: Equatable {
@@ -404,15 +618,4 @@ private struct IOSSyncIndicator: View {
         .frame(width: 24, height: 24)
         .overlay(Circle().stroke(state.color.opacity(0.9), lineWidth: 1.5))
     }
-}
-
-private struct SessionShareSheet: UIViewControllerRepresentable {
-    let items: [URL]
-
-    func makeUIViewController(context: Context) -> UIActivityViewController {
-        UIActivityViewController(activityItems: items, applicationActivities: nil)
-    }
-
-    func updateUIViewController(_ controller: UIActivityViewController,
-                                context: Context) {}
 }

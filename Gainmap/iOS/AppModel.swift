@@ -2,10 +2,9 @@
 //  AppModel.swift
 //  Gainmap for iPhone (P5)
 //
-//  Per-uid app state: the session store, the sync engine's lifecycle, and
-//  the grid's card list. Auth drives it: `.ready` runs the engine; `.admitting`
-//  and `.waitlisted` keep the app fully local (store, no engine); sign-out
-//  tears everything down.
+//  Per-namespace app state: the session store, the sync engine's lifecycle,
+//  and the grid's card list. The local namespace is always available without
+//  authentication. Only `.ready` attaches the cloud engine.
 //
 
 import Foundation
@@ -37,6 +36,11 @@ enum SessionExportError: LocalizedError {
 @MainActor
 final class AppModel: ObservableObject {
 
+    private struct LifecycleConfiguration: Equatable {
+        let uid: String
+        let syncing: Bool
+    }
+
     @Published private(set) var cards: [SessionCard] = []
     @Published private(set) var syncing = false
     @Published private(set) var initialSyncComplete = false
@@ -55,8 +59,14 @@ final class AppModel: ObservableObject {
     @Published private(set) var initialLoadDone = false
 
     private(set) var store: FileSessionStore?
+    /// Entitled engine: may listen, upload, download, and drain.
     private(set) var engine: SyncEngine?
+    /// Unentitled, previously activated namespace: records local mutations in
+    /// the durable journal but is never connected to Firebase.
+    private var journalEngine: SyncEngine?
     private var activeUID: String?
+
+    private var mutationEngine: SyncEngine? { engine ?? journalEngine }
 
     /// The MergeModel of the currently open editor (if any) — inbound sync
     /// folds into it via reloadFromRemote, exactly like the Mac coordinator.
@@ -71,6 +81,13 @@ final class AppModel: ObservableObject {
     private var refreshQueued = false
     private var progressRefreshTask: Task<Void, Never>?
     private var lastSyncStatusSnapshot: SyncStatusSnapshot?
+    /// Every observed auth state invalidates all older transition continuations
+    /// before they can resume from an actor/network await.
+    private var lifecycleGeneration: UInt = 0
+    private var lifecycleTask: Task<Void, Never>?
+    private var completedConfiguration: LifecycleConfiguration?
+    private var refreshGeneration: UInt = 0
+    private var refreshRunID: UUID?
 
     /// Stable per-install device identity (the `by` in rev metadata).
     static var deviceID: String {
@@ -84,72 +101,188 @@ final class AppModel: ObservableObject {
     // ------------------------------------------------------------- lifecycle
 
     func authStateChanged(_ state: AuthState) async {
+        let target: (uid: String, syncing: Bool)
         switch state {
         case .ready(let uid):
-            await activate(uid: uid, syncing: true)
-        case .admitting(let uid), .waitlisted(let uid):
-            // The grid is interactive in both states — a nil store here made
-            // every import during the admission round-trip a silent no-op
-            // (P5 review). Store now; the engine attaches when .ready lands.
-            await activate(uid: uid, syncing: false)
+            target = (uid, true)
+        case .checking(let uid), .localOnly(let uid):
+            // Before first Cloud Sync activation, checking Patreon must not
+            // move the user's existing local library. After activation, keep
+            // using the uid namespace during grace/lapse so sessions never
+            // appear to vanish merely because sync stopped.
+            let namespace = AuthController.hasCloudNamespace(for: uid) ? uid : "local"
+            target = (namespace, false)
         case .signedOut, .failed:
-            await deactivate()
+            target = ("local", false)
         }
+
+        if hasCompletedConfiguration(uid: target.uid, syncing: target.syncing) {
+            scheduleRefresh()
+            return
+        }
+
+        lifecycleGeneration &+= 1
+        refreshGeneration &+= 1
+        completedConfiguration = nil
+        let generation = lifecycleGeneration
+
+        // SwiftUI launch can deliver the same state through both `.task` and
+        // `.onChange`. Serialize transitions, cancel the superseded intent,
+        // and let only the newest generation publish resources.
+        let previous = lifecycleTask
+        previous?.cancel()
+        let task = Task { @MainActor [weak self] in
+            await previous?.value
+            guard let self,
+                  self.isCurrentLifecycle(generation) else { return }
+            await self.activate(
+                uid: target.uid,
+                syncing: target.syncing,
+                generation: generation)
+        }
+        lifecycleTask = task
+        await task.value
     }
 
-    private func activate(uid: String, syncing wantSync: Bool) async {
-        if activeUID == uid, (engine != nil) == wantSync { return }
-        await deactivate(clearCards: activeUID != uid)
+    private func activate(
+        uid: String,
+        syncing wantSync: Bool,
+        generation: UInt
+    ) async {
+        guard isCurrentLifecycle(generation) else { return }
+        let switchingNamespace = activeUID != uid
+        await deactivate(
+            clearCards: switchingNamespace,
+            preserveEditor: !switchingNamespace)
+        guard isCurrentLifecycle(generation) else { return }
+
+        let nextStore = FileSessionStore(uid: uid)
+        if uid != "local" {
+            await nextStore.adoptLocalSessions()
+        }
+        guard isCurrentLifecycle(generation) else { return }
         activeUID = uid
-        let store = FileSessionStore(uid: uid)
-        self.store = store
-        let root = await store.root
+        store = nextStore
+        let root = await nextStore.root
             .appendingPathComponent("users/\(uid)", isDirectory: true)
+        guard isCurrentLifecycle(generation),
+              store === nextStore,
+              activeUID == uid else { return }
         lastSyncStatusSnapshot =
             SyncEngine.persistedStatusSnapshot(root: root)
         if wantSync {
-            let engine = SyncEngine(uid: uid, deviceID: Self.deviceID,
-                                    backend: FirebaseSyncBackend(),
-                                    store: store, root: root)
-            self.engine = engine
-            await engine.setOnRemoteChange { [weak self] id in
-                Task { @MainActor in await self?.remoteChanged(id, expectedUID: uid) }
-            }
-            await engine.setOnTransferProgress { [weak self] in
+            let nextEngine = SyncEngine(uid: uid, deviceID: Self.deviceID,
+                                        backend: FirebaseSyncBackend(),
+                                        store: nextStore, root: root)
+            engine = nextEngine
+            await nextEngine.setOnRemoteChange { [weak self] id in
                 Task { @MainActor in
-                    self?.transferProgressChanged(expectedUID: uid)
+                    await self?.remoteChanged(
+                        id,
+                        expectedUID: uid,
+                        generation: generation,
+                        expectedEngine: nextEngine)
                 }
             }
-            await engine.start()
-            lastSyncStatusSnapshot = await engine.statusSnapshot
+            guard isCurrentLifecycle(generation), engine === nextEngine else {
+                await abandonEngine(nextEngine)
+                return
+            }
+            await nextEngine.setOnTransferProgress { [weak self] in
+                Task { @MainActor in
+                    self?.transferProgressChanged(
+                        expectedUID: uid,
+                        generation: generation,
+                        expectedEngine: nextEngine)
+                }
+            }
+            guard isCurrentLifecycle(generation), engine === nextEngine else {
+                await abandonEngine(nextEngine)
+                return
+            }
+            await nextEngine.start()
+            guard isCurrentLifecycle(generation), engine === nextEngine else {
+                await abandonEngine(nextEngine)
+                return
+            }
+            let snapshot = await nextEngine.statusSnapshot
+            guard isCurrentLifecycle(generation), engine === nextEngine else {
+                await abandonEngine(nextEngine)
+                return
+            }
+            lastSyncStatusSnapshot = snapshot
             syncing = true
             syncPassInFlight = true
+            completedConfiguration = LifecycleConfiguration(
+                uid: uid, syncing: true)
             Task { [weak self] in
-                await engine.drainOnce()
-                await engine.pumpTransfers()
-                guard let self, self.activeUID == uid else { return }
+                await nextEngine.drainOnce()
+                await nextEngine.pumpTransfers()
+                guard let self,
+                      self.isCurrentLifecycle(generation),
+                      self.activeUID == uid,
+                      self.engine === nextEngine else { return }
                 self.syncPassInFlight = false
                 self.initialSyncComplete = true
                 self.scheduleRefresh()
             }
+        } else if uid != "local" {
+            let nextJournal = SyncEngine(
+                uid: uid,
+                deviceID: Self.deviceID,
+                backend: FirebaseSyncBackend(),
+                store: nextStore,
+                root: root)
+            journalEngine = nextJournal
+            await nextJournal.start(connectToBackend: false)
+            guard isCurrentLifecycle(generation),
+                  journalEngine === nextJournal else {
+                await abandonEngine(nextJournal)
+                return
+            }
+            let snapshot = await nextJournal.statusSnapshot
+            guard isCurrentLifecycle(generation),
+                  journalEngine === nextJournal else {
+                await abandonEngine(nextJournal)
+                return
+            }
+            lastSyncStatusSnapshot = snapshot
+            completedConfiguration = LifecycleConfiguration(
+                uid: uid, syncing: false)
+        } else {
+            completedConfiguration = LifecycleConfiguration(
+                uid: uid, syncing: false)
         }
+        guard isCurrentLifecycle(generation) else { return }
         scheduleRefresh()
     }
 
-    private func deactivate(clearCards: Bool = true) async {
+    private func deactivate(
+        clearCards: Bool = true,
+        preserveEditor: Bool = false
+    ) async {
         refreshTask?.cancel()
         refreshTask = nil
+        refreshRunID = nil
+        refreshGeneration &+= 1
         progressRefreshTask?.cancel()
         progressRefreshTask = nil
         refreshQueued = false
-        if let engine {
-            await engine.setOnRemoteChange(nil)
-            await engine.setOnTransferProgress(nil)
-            await engine.stop()
-        }
+        completedConfiguration = nil
+        let outgoingEngine = engine
+        let outgoingJournal = journalEngine
         engine = nil
+        journalEngine = nil
         store = nil
         activeUID = nil
+        if let outgoingEngine {
+            await outgoingEngine.setOnRemoteChange(nil)
+            await outgoingEngine.setOnTransferProgress(nil)
+            await outgoingEngine.stop()
+        }
+        if let outgoingJournal {
+            await outgoingJournal.stop()
+        }
         syncing = false
         initialSyncComplete = false
         syncPassInFlight = false
@@ -157,21 +290,88 @@ final class AppModel: ObservableObject {
         hasSyncIssue = false
         lastSyncStatusSnapshot = nil
         failedThumbs = []
-        editorThumbnailSessionID = nil
-        editorThumbnailURLs = [:]
-        activeEditorModel = nil
+        if !preserveEditor {
+            editorThumbnailSessionID = nil
+            editorThumbnailURLs = [:]
+            activeEditorModel = nil
+        }
         if clearCards {
             cards = []
             initialLoadDone = false
         }
     }
 
+    /// Stop every reader/writer before removing the deleted account's local
+    /// namespace. Exports already saved to Photos or Files live outside this
+    /// container and intentionally remain under the user's control.
+    func purgeLocalAccountData(uid: String) async throws {
+        lifecycleGeneration &+= 1
+        refreshGeneration &+= 1
+        lifecycleTask?.cancel()
+        await lifecycleTask?.value
+        lifecycleTask = nil
+        await deactivate()
+        try await Self.removeAccountNamespace(uid: uid)
+    }
+
+    private func isCurrentLifecycle(_ generation: UInt) -> Bool {
+        generation == lifecycleGeneration && !Task.isCancelled
+    }
+
+    private func hasCompletedConfiguration(uid: String, syncing: Bool) -> Bool {
+        guard completedConfiguration == LifecycleConfiguration(
+            uid: uid, syncing: syncing),
+              activeUID == uid,
+              store != nil else { return false }
+        if syncing {
+            return engine != nil && journalEngine == nil
+        }
+        return engine == nil && (uid == "local" || journalEngine != nil)
+    }
+
+    private func abandonEngine(_ candidate: SyncEngine) async {
+        await candidate.setOnRemoteChange(nil)
+        await candidate.setOnTransferProgress(nil)
+        await candidate.stop()
+        if engine === candidate { engine = nil }
+        if journalEngine === candidate { journalEngine = nil }
+    }
+
+    func retryPendingLocalAccountCleanup() async {
+        for uid in AuthController.pendingLocalCleanupUIDs where uid != activeUID {
+            do {
+                try await Self.removeAccountNamespace(uid: uid)
+                AuthController.completePendingLocalCleanup(uid: uid)
+            } catch {
+                // Keep the durable marker for the next foreground/launch.
+            }
+        }
+    }
+
+    private static func removeAccountNamespace(uid: String) async throws {
+        guard uid != "local" else { return }
+        guard let accountRoot = FileSessionStore.namespaceRoot(for: uid) else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+        guard FileManager.default.fileExists(atPath: accountRoot.path) else { return }
+        try await Task.detached(priority: .userInitiated) {
+            try FileManager.default.removeItem(at: accountRoot)
+        }.value
+    }
+
     func appBecameActive() async {
         failedThumbs = []   // give failed thumb downloads another chance
-        guard let engine else { return }
+        let generation = lifecycleGeneration
+        guard let engine,
+              let activeUID,
+              isCurrentLifecycle(generation),
+              hasCompletedConfiguration(
+                uid: activeUID, syncing: true) else { return }
         syncPassInFlight = true
         await engine.retryTransfers()
+        guard isCurrentLifecycle(generation), self.engine === engine else { return }
         await engine.drainOnce()
+        guard isCurrentLifecycle(generation), self.engine === engine else { return }
         syncPassInFlight = false
         scheduleRefresh()
         if let sessionID = editorThumbnailSessionID {
@@ -180,7 +380,19 @@ final class AppModel: ObservableObject {
     }
 
     /// The editor's persist hook: journal + drain local edits.
-    func sessionPersisted(_ session: Session, before: Session?) {
+    func sessionPersisted(
+        _ session: Session,
+        before: Session?,
+        sourceModel: MergeModel? = nil,
+        expectedGeneration: UInt? = nil,
+        expectedStore: FileSessionStore? = nil
+    ) {
+        let generation = expectedGeneration ?? lifecycleGeneration
+        let contextStore = expectedStore ?? store
+        guard isCurrentLifecycle(generation),
+              let contextStore,
+              store === contextStore else { return }
+        if let sourceModel, activeEditorModel !== sourceModel { return }
         // Publish the local mutation immediately. Waiting for a full upload
         // made the editor ring and covers look stale; without an engine
         // (local/waitlisted use), they otherwise never refreshed at all.
@@ -190,14 +402,24 @@ final class AppModel: ObservableObject {
                 await self?.prepareEditorThumbnails(sessionID: session.id)
             }
         }
-        guard let engine else { return }
+        guard let recorder = mutationEngine else { return }
         let expectedUID = activeUID
-        syncPassInFlight = true
+        syncPassInFlight = engine != nil
         Task { [weak self] in
-            await engine.noteLocalSession(session, before: before)
-            await engine.drainOnce()
-            await engine.pumpTransfers()
-            guard let self, self.activeUID == expectedUID else { return }
+            await recorder.noteLocalSession(session, before: before)
+            guard let self,
+                  self.isCurrentLifecycle(generation),
+                  self.activeUID == expectedUID,
+                  self.mutationEngine === recorder else { return }
+            guard self.engine === recorder else {
+                self.scheduleRefresh()
+                return
+            }
+            await recorder.drainOnce()
+            await recorder.pumpTransfers()
+            guard self.isCurrentLifecycle(generation),
+                  self.activeUID == expectedUID,
+                  self.engine === recorder else { return }
             self.syncPassInFlight = false
             self.scheduleRefresh()
         }
@@ -205,10 +427,24 @@ final class AppModel: ObservableObject {
 
     /// Inbound change: fold into the open editor (if it's this session),
     /// then rebuild the grid.
-    private func remoteChanged(_ sessionID: UUID, expectedUID: String) async {
-        guard activeUID == expectedUID else { return }
+    private func remoteChanged(
+        _ sessionID: UUID,
+        expectedUID: String,
+        generation: UInt,
+        expectedEngine: SyncEngine
+    ) async {
+        guard isCurrentLifecycle(generation),
+              activeUID == expectedUID,
+              engine === expectedEngine,
+              hasCompletedConfiguration(
+                uid: expectedUID, syncing: true),
+              let expectedStore = store else { return }
         if let editorModel = activeEditorModel, editorModel.session.id == sessionID,
-           let fresh = await store?.load(id: sessionID) {
+           let fresh = await expectedStore.load(id: sessionID) {
+            guard isCurrentLifecycle(generation),
+                  activeUID == expectedUID,
+                  engine === expectedEngine,
+                  store === expectedStore else { return }
             editorModel.reloadFromRemote(fresh)
             Task { [weak self] in
                 await self?.prepareEditorThumbnails(sessionID: sessionID)
@@ -217,12 +453,25 @@ final class AppModel: ObservableObject {
         scheduleRefresh()
     }
 
-    private func transferProgressChanged(expectedUID: String) {
-        guard activeUID == expectedUID, progressRefreshTask == nil else { return }
+    private func transferProgressChanged(
+        expectedUID: String,
+        generation: UInt,
+        expectedEngine: SyncEngine
+    ) {
+        guard isCurrentLifecycle(generation),
+              activeUID == expectedUID,
+              engine === expectedEngine,
+              hasCompletedConfiguration(
+                uid: expectedUID, syncing: true),
+              progressRefreshTask == nil else { return }
         progressRefreshTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 120_000_000)
-            guard let self, !Task.isCancelled,
-                  self.activeUID == expectedUID else { return }
+            guard let self,
+                  self.isCurrentLifecycle(generation),
+                  self.activeUID == expectedUID,
+                  self.engine === expectedEngine,
+                  self.hasCompletedConfiguration(
+                    uid: expectedUID, syncing: true) else { return }
             self.progressRefreshTask = nil
             self.scheduleRefresh()
         }
@@ -238,10 +487,15 @@ final class AppModel: ObservableObject {
             refreshQueued = true
             return
         }
+        let generation = refreshGeneration
+        let runID = UUID()
+        refreshRunID = runID
         refreshTask = Task { [weak self] in
-            await self?.performRefresh()
-            guard let self else { return }
+            await self?.performRefresh(generation: generation)
+            guard let self,
+                  self.refreshRunID == runID else { return }
             self.refreshTask = nil
+            self.refreshRunID = nil
             if self.refreshQueued {
                 self.refreshQueued = false
                 self.scheduleRefresh()
@@ -255,18 +509,28 @@ final class AppModel: ObservableObject {
         scheduleRefresh()
     }
 
-    private func performRefresh() async {
-        guard let store else {
+    private func performRefresh(generation: UInt) async {
+        guard generation == refreshGeneration,
+              let expectedStore = store else {
+            guard generation == refreshGeneration else { return }
             cards = []
+            initialLoadDone = true
             return
         }
         // Phase 1 — LOCAL ONLY, no network: publish immediately so the grid
         // never sits on "No sessions yet" behind downloads.
-        let sessions = await store.loadAll()
+        let sessions = await expectedStore.loadAll()
+        guard generation == refreshGeneration,
+              store === expectedStore,
+              !Task.isCancelled else { return }
         let status: SyncStatusSnapshot?
-        if let engine {
-            let live = await engine.statusSnapshot
-            lastSyncStatusSnapshot = live
+        let expectedStatusEngine = mutationEngine
+        if let statusEngine = expectedStatusEngine {
+            let live = await statusEngine.statusSnapshot
+            guard generation == refreshGeneration,
+                  store === expectedStore,
+                  mutationEngine === statusEngine,
+                  !Task.isCancelled else { return }
             status = live
         } else {
             status = lastSyncStatusSnapshot
@@ -277,6 +541,17 @@ final class AppModel: ObservableObject {
             journal: status?.journal,
             transfers: status?.transfers,
             persistedSyncedSessionIDs: knownSynced)
+        var missing: [String] = []   // thumb hashes to hydrate in phase 2
+        let localCards = buildCards(
+            sessions: sessions,
+            metrics: metrics,
+            collectMissing: &missing,
+            store: expectedStore)
+        guard generation == refreshGeneration,
+              store === expectedStore,
+              mutationEngine === expectedStatusEngine,
+              !Task.isCancelled else { return }
+        lastSyncStatusSnapshot = status
         if let status {
             pendingWorkCount = status.journal.entries.count
                 + status.transfers.transfers.filter { $0.status != .done }.count
@@ -287,16 +562,12 @@ final class AppModel: ObservableObject {
             pendingWorkCount = 0
             hasSyncIssue = false
         }
-        var missing: [String] = []   // thumb hashes to hydrate in phase 2
-        cards = buildCards(
-            sessions: sessions,
-            metrics: metrics,
-            collectMissing: &missing)
+        cards = localCards
         initialLoadDone = true
 
         // Phase 2 — hydrate missing thumbs (bounded, deduped, no eternal
         // retries), then publish once more.
-        guard let engine, !missing.isEmpty else { return }
+        guard let expectedEngine = engine, !missing.isEmpty else { return }
         let wanted = Array(Set(missing)).filter { !failedThumbs.contains($0) }
         guard !wanted.isEmpty else { return }
         var anyLanded = false
@@ -304,26 +575,44 @@ final class AppModel: ObservableObject {
             var next = min(4, wanted.count)
             for hash in wanted.prefix(next) {
                 group.addTask {
-                    let url = await engine.hydrateThumb(hash: hash)
+                    let url = await expectedEngine.hydrateThumb(hash: hash)
                     return (hash, url != nil)
                 }
             }
             while let (hash, ok) = await group.next() {
+                guard generation == refreshGeneration,
+                      store === expectedStore,
+                      engine === expectedEngine,
+                      !Task.isCancelled else {
+                    group.cancelAll()
+                    return
+                }
                 if ok { anyLanded = true } else { failedThumbs.insert(hash) }
                 if next < wanted.count {
                     let upNext = wanted[next]
                     next += 1
                     group.addTask {
-                        let url = await engine.hydrateThumb(hash: upNext)
+                        let url = await expectedEngine.hydrateThumb(hash: upNext)
                         return (upNext, url != nil)
                     }
                 }
             }
         }
-        guard anyLanded, !Task.isCancelled else { return }
-        let fresh = await store.loadAll()
-        let refreshedStatus = await engine.statusSnapshot
-        lastSyncStatusSnapshot = refreshedStatus
+        guard anyLanded,
+              generation == refreshGeneration,
+              store === expectedStore,
+              engine === expectedEngine,
+              !Task.isCancelled else { return }
+        let fresh = await expectedStore.loadAll()
+        guard generation == refreshGeneration,
+              store === expectedStore,
+              engine === expectedEngine,
+              !Task.isCancelled else { return }
+        let refreshedStatus = await expectedEngine.statusSnapshot
+        guard generation == refreshGeneration,
+              store === expectedStore,
+              engine === expectedEngine,
+              !Task.isCancelled else { return }
         let refreshedKnown =
             refreshedStatus.knownSyncedSessionIDs(for: fresh)
         let refreshedMetrics = SessionSyncMetrics.calculate(
@@ -332,19 +621,25 @@ final class AppModel: ObservableObject {
             transfers: refreshedStatus.transfers,
             persistedSyncedSessionIDs: refreshedKnown)
         var ignored: [String] = []
-        cards = buildCards(
+        let refreshedCards = buildCards(
             sessions: fresh,
             metrics: refreshedMetrics,
-            collectMissing: &ignored)
+            collectMissing: &ignored,
+            store: expectedStore)
+        guard generation == refreshGeneration,
+              store === expectedStore,
+              engine === expectedEngine else { return }
+        lastSyncStatusSnapshot = refreshedStatus
+        cards = refreshedCards
     }
 
     /// Cover URL preference: local thumb file if present; else the photo's
     /// own local source file (imports on this device); else nil (placeholder)
     /// with the hash queued for hydration.
     private func buildCards(sessions: [Session], metrics: SessionSyncMetrics,
-                            collectMissing: inout [String]) -> [SessionCard] {
+                            collectMissing: inout [String],
+                            store: FileSessionStore) -> [SessionCard] {
         let fm = FileManager.default
-        guard let store else { return [] }
         let managedRoot = store.managedFilesDir
         return sessions.map { session in
             var covers: [URL?] = []
@@ -396,17 +691,21 @@ final class AppModel: ObservableObject {
     /// four at a time. A 20–30 photo session therefore fills its filmstrip
     /// without bulk-downloading 20–30 originals.
     func prepareEditorThumbnails(sessionID: UUID) async {
+        let generation = lifecycleGeneration
         guard editorThumbnailSessionID == sessionID,
-              let store,
-              let session = await store.load(id: sessionID)
+              completedConfiguration != nil,
+              let expectedStore = store,
+              let session = await expectedStore.load(id: sessionID),
+              isCurrentLifecycle(generation),
+              store === expectedStore
         else { return }
 
-        let plan = store.thumbnailPlan(for: session)
+        let plan = expectedStore.thumbnailPlan(for: session)
         guard editorThumbnailSessionID == sessionID,
               !Task.isCancelled else { return }
         editorThumbnailURLs = plan.localURLsByPhotoID
 
-        guard let engine, !plan.missing.isEmpty else { return }
+        guard let expectedEngine = engine, !plan.missing.isEmpty else { return }
         let requestsByHash = Dictionary(
             grouping: plan.missing,
             by: \.contentHash)
@@ -416,11 +715,13 @@ final class AppModel: ObservableObject {
             var next = min(4, hashes.count)
             for hash in hashes.prefix(next) {
                 group.addTask {
-                    (hash, await engine.hydrateThumb(hash: hash))
+                    (hash, await expectedEngine.hydrateThumb(hash: hash))
                 }
             }
             while let (hash, url) = await group.next() {
-                guard !Task.isCancelled,
+                guard isCurrentLifecycle(generation),
+                      store === expectedStore,
+                      engine === expectedEngine,
                       editorThumbnailSessionID == sessionID else {
                     group.cancelAll()
                     return
@@ -437,7 +738,7 @@ final class AppModel: ObservableObject {
                     let nextHash = hashes[next]
                     next += 1
                     group.addTask {
-                        (nextHash, await engine.hydrateThumb(hash: nextHash))
+                        (nextHash, await expectedEngine.hydrateThumb(hash: nextHash))
                     }
                 }
             }
@@ -460,41 +761,73 @@ final class AppModel: ObservableObject {
 
     func renameSession(id: UUID, to title: String) async {
         let clean = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !clean.isEmpty, let store,
-              var session = await store.load(id: id),
+        let generation = lifecycleGeneration
+        guard !clean.isEmpty,
+              let expectedStore = store,
+              var session = await expectedStore.load(id: id),
+              isCurrentLifecycle(generation),
+              store === expectedStore,
               session.title != clean else { return }
         let before = session
         session.title = clean
         session.updatedAt = Date()
-        try? await store.save(session)
-        if let engine {
-            syncPassInFlight = true
-            await engine.noteLocalSession(session, before: before)
-            await engine.drainOnce()
-            await engine.pumpTransfers()
-            syncPassInFlight = false
+        try? await expectedStore.save(session)
+        guard isCurrentLifecycle(generation),
+              store === expectedStore else { return }
+        if let recorder = mutationEngine {
+            await recorder.noteLocalSession(session, before: before)
+            guard isCurrentLifecycle(generation),
+                  store === expectedStore,
+                  mutationEngine === recorder else { return }
+            if engine === recorder {
+                syncPassInFlight = true
+                await recorder.drainOnce()
+                await recorder.pumpTransfers()
+                guard isCurrentLifecycle(generation),
+                      store === expectedStore,
+                      engine === recorder else { return }
+                syncPassInFlight = false
+            }
         }
         scheduleRefresh()
     }
 
     func deleteSession(id: UUID) async {
-        guard exportingSessionID != id, let store else { return }
-        if let engine {
-            syncPassInFlight = true
-            await engine.deleteSessionLocally(id)
-            await engine.drainOnce()
-            syncPassInFlight = false
+        let generation = lifecycleGeneration
+        guard exportingSessionID != id,
+              let expectedStore = store else { return }
+        let recorder = mutationEngine
+        if let recorder {
+            await recorder.deleteSessionLocally(id)
+            guard isCurrentLifecycle(generation),
+                  store === expectedStore,
+                  mutationEngine === recorder else { return }
+            if engine === recorder {
+                syncPassInFlight = true
+                await recorder.drainOnce()
+                guard isCurrentLifecycle(generation),
+                      store === expectedStore,
+                      engine === recorder else { return }
+                syncPassInFlight = false
+            }
         } else {
-            await store.delete(id: id)
+            await expectedStore.delete(id: id)
+            guard isCurrentLifecycle(generation),
+                  store === expectedStore else { return }
         }
         scheduleRefresh()
     }
 
     func exportSession(id: UUID) async throws -> SessionExportResult {
+        let generation = lifecycleGeneration
         guard exportingSessionID == nil else { throw SessionExportError.busy }
-        guard let store, let session = await store.load(id: id) else {
+        guard let expectedStore = store,
+              let session = await expectedStore.load(id: id),
+              isCurrentLifecycle(generation),
+              store === expectedStore else {
             throw SessionExportError.missingSession
         }
+        let exportEngine = engine
 
         exportingSessionID = id
         exportCompletedCount = 0
@@ -511,10 +844,16 @@ final class AppModel: ObservableObject {
             at: exportDir, withIntermediateDirectories: true)
         let merge = MergeModel(
             session: session,
-            store: store,
+            store: expectedStore,
             output: .managedDirectory(exportDir))
         merge.onSessionPersisted = { [weak self] updated, before in
-            Task { @MainActor in self?.sessionPersisted(updated, before: before) }
+            Task { @MainActor in
+                self?.sessionPersisted(
+                    updated,
+                    before: before,
+                    expectedGeneration: generation,
+                    expectedStore: expectedStore)
+            }
         }
 
         var outputs: [URL] = []
@@ -522,7 +861,8 @@ final class AppModel: ObservableObject {
         for item in merge.items {
             if !FileManager.default.fileExists(atPath: item.sdrURL.path) {
                 let hash = session.photos.first(where: { $0.id == item.id })?.contentHash
-                guard let hash, await engine?.hydrateOriginal(hash: hash) != nil else {
+                guard let hash,
+                      await exportEngine?.hydrateOriginal(hash: hash) != nil else {
                     failed += 1
                     exportCompletedCount += 1
                     continue
@@ -548,6 +888,11 @@ final class AppModel: ObservableObject {
     }
 
     func session(id: UUID) async -> Session? {
-        await store?.load(id: id)
+        let generation = lifecycleGeneration
+        guard let expectedStore = store else { return nil }
+        let session = await expectedStore.load(id: id)
+        guard isCurrentLifecycle(generation),
+              store === expectedStore else { return nil }
+        return session
     }
 }

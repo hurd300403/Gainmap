@@ -144,11 +144,13 @@ after(async () => {
 // ---------------------------------------------------------------------------
 const T = (ms) => Timestamp.fromMillis(ms);
 
-async function seed({ syncEnabled = true } = {}) {
+async function seed({ syncEnabled = true, patreonEnforcementEnabled = true } = {}) {
   await testEnv.clearFirestore();
   await testEnv.withSecurityRulesDisabled(async (ctx) => {
     const db = ctx.firestore();
-    await setDoc(doc(db, 'config/flags'), { syncEnabled, signupsOpen: true, maxUsers: 200 });
+    await setDoc(doc(db, 'config/flags'), {
+      syncEnabled, signupsOpen: true, maxUsers: 200, patreonEnforcementEnabled,
+    });
     await setDoc(doc(db, 'config/counters'), { admittedUsers: 2 });
 
     // alice: admitted
@@ -158,6 +160,10 @@ async function seed({ syncEnabled = true } = {}) {
       syncAdmitted: true,
       createdAt: T(1000),
       hasCustomDefault: false,
+      entitlement: {
+        state: 'active', effective: true,
+        verificationExpiresAt: T(Date.now() + 7 * 24 * 3600 * 1000),
+      },
     });
     await setDoc(doc(db, 'users/alice/usage/storage'), {
       schemaVersion: 1,
@@ -206,6 +212,10 @@ async function seed({ syncEnabled = true } = {}) {
       quotaBytes: 5 * GIB,
       syncAdmitted: false,
       createdAt: T(1000),
+      entitlement: {
+        state: 'active', effective: true,
+        verificationExpiresAt: T(Date.now() + 7 * 24 * 3600 * 1000),
+      },
     });
 
     // bob: an unrelated admitted user (the "stranger")
@@ -214,6 +224,10 @@ async function seed({ syncEnabled = true } = {}) {
       quotaBytes: 5 * GIB,
       syncAdmitted: true,
       createdAt: T(1000),
+      entitlement: {
+        state: 'active', effective: true,
+        verificationExpiresAt: T(Date.now() + 7 * 24 * 3600 * 1000),
+      },
     });
 
     await setDoc(doc(db, 'deletedAccounts/ghost'), { schemaVersion: 1, deletedAt: T(1000) });
@@ -280,6 +294,50 @@ test('a signed-in but un-admitted user cannot write', async () => {
     setDoc(doc(db, 'users/mallory/sessions/s1'), { schemaVersion: 1, title: 'nope' })
   );
   await assertFails(updateDoc(doc(db, 'users/mallory'), { hasCustomDefault: true }));
+});
+
+test('inactive patrons cannot read cloud data but may still write tombstones', async () => {
+  await seed();
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    await updateDoc(doc(ctx.firestore(), 'users/alice'), {
+      entitlement: { state: 'inactive', effective: false },
+    });
+  });
+  await assertFails(getDoc(doc(aliceDb(), SESSION)));
+  await assertFails(getDoc(doc(aliceDb(), PHOTO)));
+  await assertFails(getDoc(doc(aliceDb(), `users/alice/blobs/${HASH_A}`)));
+  await assertSucceeds(
+    updateDoc(doc(aliceDb(), PHOTO), {
+      deletedAt: T(6000),
+      delRev: 1,
+      delBy: 'ios',
+      delMut: 'leave',
+      updatedAt: T(6000),
+    })
+  );
+});
+
+test('staged enforcement preserves an admitted legacy client only while explicitly disabled', async () => {
+  await seed({ patreonEnforcementEnabled: false });
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    await updateDoc(doc(ctx.firestore(), 'users/alice'), { entitlement: null });
+  });
+  await assertSucceeds(getDoc(doc(aliceDb(), SESSION)));
+  await assertSucceeds(
+    updateDoc(doc(aliceDb(), SESSION), {
+      title: 'Legacy rollout', titleRev: 3, titleBy: 'mac', titleMut: 'legacy',
+    })
+  );
+
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    await updateDoc(doc(ctx.firestore(), 'config/flags'), { patreonEnforcementEnabled: true });
+  });
+  await assertFails(getDoc(doc(aliceDb(), SESSION)));
+  await assertFails(
+    updateDoc(doc(aliceDb(), SESSION), {
+      title: 'Blocked', titleRev: 4, titleBy: 'mac', titleMut: 'blocked',
+    })
+  );
 });
 
 // ===========================================================================
@@ -772,13 +830,45 @@ test('Storage: client DELETE is denied (no client GC)', async () => {
     await uploadBytes(ref(ctx.storage(), objectPath), bytes(16), JPEG);
   });
   await assertFails(deleteObject(ref(aliceStorage(), objectPath)));
-  // ...and the owner can still read it
+});
+
+test('Storage: current entitlement gates direct object reads', async (t) => {
+  if (xsSkip(t)) return;
+  await seed();
+  await testEnv.clearStorage();
+  const hash = hashOf(0x10b);
+  const objectPath = `users/alice/originals/${hash}.jpg`;
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    await uploadBytes(ref(ctx.storage(), objectPath), bytes(16), JPEG);
+  });
+  const { getMetadata } = await import('firebase/storage');
   await assertSucceeds(
-    (async () => {
-      const { getMetadata } = await import('firebase/storage');
-      return getMetadata(ref(aliceStorage(), objectPath));
-    })()
+    getMetadata(ref(aliceStorage(), objectPath))
   );
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    await updateDoc(doc(ctx.firestore(), 'users/alice'), {
+      entitlement: { state: 'inactive', effective: false },
+    });
+  });
+  await assertFails(getMetadata(ref(aliceStorage(), objectPath)));
+});
+
+test('Storage: staged enforcement preserves legacy reads only while explicitly disabled', async (t) => {
+  if (xsSkip(t)) return;
+  await seed({ patreonEnforcementEnabled: false });
+  await testEnv.clearStorage();
+  const hash = hashOf(0x10c);
+  const objectPath = `users/alice/originals/${hash}.jpg`;
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    await updateDoc(doc(ctx.firestore(), 'users/alice'), { entitlement: null });
+    await uploadBytes(ref(ctx.storage(), objectPath), bytes(16), JPEG);
+  });
+  const { getMetadata } = await import('firebase/storage');
+  await assertSucceeds(getMetadata(ref(aliceStorage(), objectPath)));
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    await updateDoc(doc(ctx.firestore(), 'config/flags'), { patreonEnforcementEnabled: true });
+  });
+  await assertFails(getMetadata(ref(aliceStorage(), objectPath)));
 });
 
 test('Storage: the 64 MB cap and CREATE-only posture are expressed in the ruleset', () => {
@@ -789,15 +879,12 @@ test('Storage: the 64 MB cap and CREATE-only posture are expressed in the rulese
   assert.match(STORAGE_RULES, /allow update:\s*if false/);
   assert.match(STORAGE_RULES, /allow delete:\s*if false/);
   assert.match(STORAGE_RULES, /request\.resource\.contentType\s*==\s*'image\/jpeg'/);
-  // exactly two cross-service reads in the ACTIVE ruleset (comments excluded)
+  // Each allow branch stays within Storage rules' two-get ceiling: read has
+  // user + rollout flags; create has reservation + global flags.
   const active = STORAGE_RULES.split('\n')
     .filter((line) => !line.trim().startsWith('//'))
     .join('\n');
-  assert.equal(
-    (active.match(/firestore\.get\(/g) || []).length,
-    2,
-    'Storage rules may make at most two cross-service Firestore reads'
-  );
+  assert.equal((active.match(/firestore\.get\(/g) || []).length, 4);
 });
 
 test('cross-service support was probed, not assumed', () => {

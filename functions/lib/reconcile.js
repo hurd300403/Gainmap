@@ -42,14 +42,24 @@ function tierLedger(blobSnap, tier) {
   return entry && typeof entry === 'object' ? entry : null;
 }
 
-async function deleteObjectQuietly(bucket, name) {
+async function deleteObjectQuietly(bucket, name, generation) {
   if (!bucket) return false;
   try {
-    await bucket.file(name).delete({ ignoreNotFound: true });
+    // Scope cleanup to the exact object generation that emitted this event.
+    // The transaction above can decide that generation N is orphaned, then a
+    // reactivated user can upload generation N+1 at the same path before this
+    // request reaches Storage. An unconditional name-only delete would destroy
+    // that replacement. GCS evaluates ifGenerationMatch atomically.
+    await bucket.file(name, {
+      preconditionOpts: { ifGenerationMatch: String(generation) },
+    }).delete({ ignoreNotFound: true });
     return true;
   } catch (err) {
-    // Already gone / raced with another delete — nothing to reconcile.
-    if (err && (err.code === 404 || err.code === 'storage/object-not-found')) return false;
+    // 404: the event generation is already gone. 412: a newer generation now
+    // occupies the name. Both are successful no-ops for this stale event.
+    if (err && (err.code === 404 || err.code === 412 ||
+        err.code === 'storage/object-not-found' ||
+        err.code === 'storage/precondition-failed')) return false;
     throw err;
   }
 }
@@ -74,6 +84,7 @@ async function handleFinalize({ db, bucket, name, generation, byteSize, now }) {
   const size = num(byteSize);
 
   const markerRef = db.doc(`deletedAccounts/${uid}`);
+  const entitlementRef = db.doc(`patreonEntitlements/${uid}`);
   const userRef = db.doc(`users/${uid}`);
   const blobRef = db.doc(`users/${uid}/blobs/${contentHash}`);
   const usageRef = db.doc(`users/${uid}/usage/storage`);
@@ -92,10 +103,17 @@ async function handleFinalize({ db, bucket, name, generation, byteSize, now }) {
     // marker) or after our commit (its recursiveDelete removes whatever we
     // wrote). Reading the guard outside the transaction would leave a window in
     // which both miss and an orphaned subtree survives.
-    const markerSnap = await tx.get(markerRef);
-    const userSnap = await tx.get(userRef);
-    if (markerSnap.exists || !userSnap.exists) {
-      return { orphan: true, reason: markerSnap.exists ? 'account-deleted' : 'no-user-doc' };
+    const [markerSnap, userSnap, entitlementSnap] = await Promise.all([
+      tx.get(markerRef), tx.get(userRef), tx.get(entitlementRef),
+    ]);
+    const entitlement = entitlementSnap.exists ? entitlementSnap.data() || {} : {};
+    const livePurge = Boolean(entitlement.purgeLeaseId);
+    if (markerSnap.exists || !userSnap.exists || livePurge || entitlement.cloudDataPurgedAt) {
+      return {
+        orphan: true,
+        reason: markerSnap.exists ? 'account-deleted'
+          : (livePurge || entitlement.cloudDataPurgedAt ? 'retention-purge' : 'no-user-doc'),
+      };
     }
 
     const blobSnap = await tx.get(blobRef);
@@ -162,8 +180,10 @@ async function handleFinalize({ db, bucket, name, generation, byteSize, now }) {
   });
 
   if (outcome.orphan) {
-    await deleteObjectQuietly(bucket, name);
-    return { orphanDeleted: true, reason: outcome.reason };
+    const deleted = await deleteObjectQuietly(bucket, name, gen);
+    return deleted
+      ? { orphanDeleted: true, reason: outcome.reason }
+      : { orphanDeleted: false, skipped: 'already-gone-or-replaced', reason: outcome.reason };
   }
   return outcome;
 }
@@ -178,6 +198,7 @@ async function handleDelete({ db, name, generation, now }) {
   const gen = String(generation);
 
   const markerRef = db.doc(`deletedAccounts/${uid}`);
+  const entitlementRef = db.doc(`patreonEntitlements/${uid}`);
   const userRef = db.doc(`users/${uid}`);
   const blobRef = db.doc(`users/${uid}/blobs/${contentHash}`);
   const usageRef = db.doc(`users/${uid}/usage/storage`);
@@ -185,9 +206,14 @@ async function handleDelete({ db, name, generation, now }) {
   return db.runTransaction(async (tx) => {
     // Same in-transaction deletion guard as handleFinalize: the whole subtree is
     // gone (or going), and writing a ledger here would resurrect it.
-    const markerSnap = await tx.get(markerRef);
-    const userSnap = await tx.get(userRef);
-    if (markerSnap.exists || !userSnap.exists) return { skipped: 'account-deleted' };
+    const [markerSnap, userSnap, entitlementSnap] = await Promise.all([
+      tx.get(markerRef), tx.get(userRef), tx.get(entitlementRef),
+    ]);
+    const entitlement = entitlementSnap.exists ? entitlementSnap.data() || {} : {};
+    const livePurge = Boolean(entitlement.purgeLeaseId);
+    if (markerSnap.exists || !userSnap.exists || livePurge || entitlement.cloudDataPurgedAt) {
+      return { skipped: 'account-deleted' };
+    }
 
     const blobSnap = await tx.get(blobRef);
     const usageSnap = await tx.get(usageRef);

@@ -658,6 +658,166 @@ final class SessionPersistenceTests: XCTestCase {
         XCTAssertEqual(kept?.title, "edited while signed out")
     }
 
+    func testAdoptLocalSessionsReplacesCorruptDestinationWithoutLosingBytes() async throws {
+        let uidStore = FileSessionStore(root: root, uid: "uA")
+        let localStore = FileSessionStore(root: root, uid: "local")
+        let local = Session(
+            title: "valid local session",
+            photos: [PhotoRecord(origin: .linked(path: "/valid.jpg"))])
+        try await localStore.save(local)
+
+        let destinationDir = root.appendingPathComponent("users/uA/sessions")
+        try FileManager.default.createDirectory(
+            at: destinationDir, withIntermediateDirectories: true)
+        let destination = destinationDir
+            .appendingPathComponent("\(local.id.uuidString).json")
+        let corrupt = Data("{truncated-cloud-json".utf8)
+        try corrupt.write(to: destination)
+
+        await uidStore.adoptLocalSessions()
+
+        let installed = await uidStore.load(id: local.id)
+        let removedLocal = await localStore.load(id: local.id)
+        XCTAssertEqual(installed?.title, "valid local session")
+        XCTAssertNil(removedLocal)
+        let recovery = root.appendingPathComponent(
+            "users/uA/recovery/session-collisions")
+        let recoveredFiles = try FileManager.default.contentsOfDirectory(
+            at: recovery, includingPropertiesForKeys: nil)
+        XCTAssertEqual(recoveredFiles.count, 1)
+        XCTAssertEqual(try Data(contentsOf: recoveredFiles[0]), corrupt)
+
+        await uidStore.adoptLocalSessions()
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(
+            at: recovery, includingPropertiesForKeys: nil).count, 1,
+            "a retry must not create another recovery artifact")
+    }
+
+    func testAdoptLocalSessionsPreservesEqualTimestampDivergenceOnce() async throws {
+        let uidStore = FileSessionStore(root: root, uid: "uA")
+        let localStore = FileSessionStore(root: root, uid: "local")
+        let timestamp = Date(timeIntervalSince1970: 1_800_000_000)
+        var destination = Session(
+            title: "cloud edit",
+            photos: [PhotoRecord(origin: .linked(path: "/cloud.jpg"))])
+        destination.updatedAt = timestamp
+        try await uidStore.save(destination)
+
+        var local = destination
+        local.title = "local edit"
+        local.photos = [PhotoRecord(origin: .linked(path: "/local.jpg"))]
+        local.updatedAt = timestamp
+        try await localStore.save(local)
+        let localURL = root.appendingPathComponent(
+            "users/local/sessions/\(local.id.uuidString).json")
+        let sourceBytes = try Data(contentsOf: localURL)
+
+        await uidStore.adoptLocalSessions()
+
+        let firstPass = await uidStore.loadAll()
+        XCTAssertEqual(firstPass.count, 2)
+        XCTAssertTrue(firstPass.contains(where: { $0.title == "cloud edit" }))
+        XCTAssertTrue(firstPass.contains(where: {
+            $0.title == "local edit (Recovered local copy)"
+                && $0.photos.first?.origin == .linked(path: "/local.jpg")
+        }))
+        let removedLocal = await localStore.load(id: local.id)
+        XCTAssertNil(removedLocal)
+
+        // Simulate a crash/retry boundary where the source removal did not
+        // stick. The content-derived recovery identity must deduplicate it.
+        try FileManager.default.createDirectory(
+            at: localURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true)
+        try sourceBytes.write(to: localURL)
+        await uidStore.adoptLocalSessions()
+        let secondPass = await uidStore.loadAll()
+        XCTAssertEqual(secondPass.count, 2)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: localURL.path))
+        let recovery = root.appendingPathComponent(
+            "users/uA/recovery/session-collisions")
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(
+            at: recovery, includingPropertiesForKeys: nil).count, 1)
+    }
+
+    func testStoredNamespaceDetectionRequiresSafeUIDAndActualData() throws {
+        let empty = try XCTUnwrap(FileSessionStore.namespaceRoot(
+            for: "legacy-user", root: root))
+        try FileManager.default.createDirectory(
+            at: empty.appendingPathComponent("sessions", isDirectory: true),
+            withIntermediateDirectories: true)
+        XCTAssertFalse(FileSessionStore.hasStoredNamespaceData(
+            for: "legacy-user", root: root))
+
+        try Data("legacy session".utf8).write(
+            to: empty.appendingPathComponent("sessions/old.json"))
+        XCTAssertTrue(FileSessionStore.hasStoredNamespaceData(
+            for: "legacy-user", root: root))
+        for unsafe in ["", ".", "..", "../local", "nested/user", "nested\\user"] {
+            XCTAssertNil(FileSessionStore.namespaceRoot(for: unsafe, root: root))
+            XCTAssertFalse(FileSessionStore.hasStoredNamespaceData(
+                for: unsafe, root: root))
+        }
+    }
+
+    func testAdoptLocalSessionsCarriesManagedPhotoBytes() async throws {
+        let localStore = FileSessionStore(root: root, uid: "local")
+        let uidStore = FileSessionStore(root: root, uid: "uA")
+        let relativePath = "imports/local-photo.jpg"
+        let localPhoto = localStore.managedFilesDir
+            .appendingPathComponent(relativePath)
+        try FileManager.default.createDirectory(
+            at: localPhoto.deletingLastPathComponent(),
+            withIntermediateDirectories: true)
+        let bytes = Data("managed-local-photo".utf8)
+        try bytes.write(to: localPhoto)
+        let session = Session(
+            title: "Before Cloud Sync",
+            photos: [PhotoRecord(origin: .managed(relativePath: relativePath))])
+        try await localStore.save(session)
+
+        await uidStore.adoptLocalSessions()
+
+        let adopted = await uidStore.load(id: session.id)
+        XCTAssertNotNil(adopted)
+        let adoptedPhoto = uidStore.managedFilesDir
+            .appendingPathComponent(relativePath)
+        XCTAssertEqual(try Data(contentsOf: adoptedPhoto), bytes)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: localPhoto.path),
+                       "source bytes are removed only after every session is adopted")
+    }
+
+    func testAdoptLocalSessionsDoesNotOverwriteManagedFileCollision() async throws {
+        let localStore = FileSessionStore(root: root, uid: "local")
+        let uidStore = FileSessionStore(root: root, uid: "uA")
+        let relativePath = "imports/collision.jpg"
+        let localPhoto = localStore.managedFilesDir
+            .appendingPathComponent(relativePath)
+        let uidPhoto = uidStore.managedFilesDir
+            .appendingPathComponent(relativePath)
+        try FileManager.default.createDirectory(
+            at: localPhoto.deletingLastPathComponent(),
+            withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(
+            at: uidPhoto.deletingLastPathComponent(),
+            withIntermediateDirectories: true)
+        try Data("local".utf8).write(to: localPhoto)
+        try Data("cloud".utf8).write(to: uidPhoto)
+        let session = Session(
+            title: "Still Local",
+            photos: [PhotoRecord(origin: .managed(relativePath: relativePath))])
+        try await localStore.save(session)
+
+        await uidStore.adoptLocalSessions()
+
+        let uidSession = await uidStore.load(id: session.id)
+        let localSession = await localStore.load(id: session.id)
+        XCTAssertNil(uidSession)
+        XCTAssertNotNil(localSession)
+        XCTAssertEqual(try Data(contentsOf: uidPhoto), Data("cloud".utf8))
+        XCTAssertEqual(try Data(contentsOf: localPhoto), Data("local".utf8))
+    }
+
     // MARK: attach reset (P5 review — old account's session must not stay live)
 
     func testAttachWithResetSwapsToTheNewStoresContent() async throws {

@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Gainmap Privacy Policy</title>
+  <meta name="description" content="Privacy policy for the Gainmap app.">
+  <style>
+    :root { color-scheme:dark; --bg:#171717; --panel:#222; --text:#f2efea; --muted:#b7b0a8; --accent:#ef725f; --line:#383634; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--bg); color:var(--text); font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+    main { width:min(780px,calc(100% - 40px)); margin:0 auto; padding:64px 0 96px; }
+    a { color:#ff9b89; } h1 { font-size:42px; letter-spacing:-.035em; margin:0; } h2 { margin:40px 0 8px; font-size:23px; }
+    p,li { color:var(--muted); } strong { color:var(--text); } .eyebrow { color:var(--accent); font-weight:700; letter-spacing:.08em; text-transform:uppercase; font-size:12px; }
+    .updated { margin-top:4px; } .notice { margin:28px 0; padding:18px 20px; background:var(--panel); border:1px solid var(--line); border-radius:14px; }
+    footer { margin-top:52px; padding-top:22px; border-top:1px solid var(--line); }
+  </style>
+</head>
+<body>
+<main>
+  <div class="eyebrow">Gainmap</div>
+  <h1>Privacy Policy</h1>
+  <p class="updated">Last updated August 12, 2026</p>
+
+  <div class="notice"><strong>The short version:</strong> Gainmap's standard editing and export features work locally without an account. If you choose Cloud Sync, Gainmap uses your information to authenticate you, verify an active, eligible Patreon membership, and privately sync photo sessions. It does not sell your data, show advertising, track you across other companies' apps or websites, or use your photos to train AI models.</div>
+
+  <h2>Information Gainmap handles</h2>
+  <ul>
+    <li><strong>Optional account information:</strong> if you enable Cloud Sync, your name, email address, and identifiers supplied by Sign in with Apple or Google Sign-In.</li>
+    <li><strong>Patreon membership information:</strong> if you enable Cloud Sync, identifiers and current membership status supplied by Patreon. A verified account email may be compared with the campaign's member list to offer temporary access while you connect Patreon. Gainmap stores keyed hashes, rather than readable email addresses, in its membership lookup indexes.</li>
+    <li><strong>Photos and session content:</strong> photos you choose to import or sync; thumbnails and derived previews; session names, ordering, looks, and editing settings. Synced full-resolution files retain their embedded metadata, which can include camera details, capture time, and precise GPS location when the original photo contains it.</li>
+    <li><strong>Service and security information:</strong> pseudonymous user and device identifiers, sync state, storage and quota records, and app-attestation information used to operate and protect the service.</li>
+    <li><strong>Diagnostics:</strong> when anonymous crash reporting is available and enabled, Gainmap may receive crash and reliability information. Reports are configured not to include photos, screenshots, file names, file paths, account PII, or IP addresses.</li>
+  </ul>
+
+  <h2>How the information is used</h2>
+  <p>Gainmap uses this information only to provide local import, editing, and export; authenticate an optional Cloud Sync account; verify Cloud Sync eligibility; privately sync your sessions; secure the service and enforce storage limits; answer support requests; and diagnose reliability problems.</p>
+
+  <h2>Private photo sync</h2>
+  <p>Cloud Sync is optional and is available to active Patreon members with an eligible membership tier. Photos you choose to sync are uploaded to storage scoped to your authenticated Gainmap account. Other Gainmap users cannot browse your library. Gainmap does not use your photos for advertising, profiling, or model training.</p>
+
+  <h2>Service providers</h2>
+  <p>Gainmap relies on service providers only as needed to run the app:</p>
+  <ul>
+    <li><strong>Apple</strong> and <strong>Google</strong> for the sign-in method you select.</li>
+    <li><strong>Patreon</strong> to connect your membership and verify that it currently qualifies for Cloud Sync.</li>
+    <li><strong>Google Firebase</strong> for authentication, private database and file storage, cloud functions, and abuse prevention.</li>
+    <li><strong>Sentry</strong> for privacy-scrubbed diagnostics in app builds where anonymous crash reporting is available and enabled.</li>
+  </ul>
+  <p>These providers process information under their own privacy and security terms. Gainmap does not permit them to use your private photos for their advertising.</p>
+
+  <h2>Retention and account deletion</h2>
+  <p>Your account and synced library are retained while you use Gainmap. If your qualifying Patreon membership becomes inactive, Cloud Sync access ends after a limited grace period. The cloud library is retained for a 90-day recovery window from the inactive date so it can be restored if eligibility returns, then it is scheduled for automatic deletion.</p>
+  <p>You can request immediate deletion inside the app from the account menu by choosing <strong>Delete Account</strong>. Gainmap then deletes the Firebase Authentication account, Patreon link and entitlement records, synced session records, and private cloud photos associated with it, and removes Gainmap's local account copies from that device. Images you previously saved to Photos or Files remain under your control. Limited security logs or provider backups may persist temporarily according to provider retention schedules or legal requirements.</p>
+
+  <h2>Your choices</h2>
+  <ul>
+    <li>Use all standard local features without signing in, or create an account only when you want Cloud Sync.</li>
+    <li>Import and sync only the photos you choose.</li>
+    <li>Remove embedded location metadata before importing if you do not want it retained in the synced original.</li>
+    <li>Disable anonymous crash reports in Gainmap settings where that option is available.</li>
+    <li>Sign out at any time, or use Delete Account to remove your Gainmap account and cloud library.</li>
+  </ul>
+
+  <h2>Security</h2>
+  <p>Gainmap uses authenticated, encrypted network connections and access controls intended to keep each library private. No online service can guarantee absolute security, but access to stored account content is restricted to the authenticated account and the systems required to operate the service.</p>
+
+  <h2>Children</h2>
+  <p>Gainmap is not directed to children under 13, and the developer does not knowingly collect personal information from children under 13.</p>
+
+  <h2>Changes</h2>
+  <p>This policy may be updated as Gainmap changes. The current version and its effective date will remain available on this page.</p>
+
+  <h2>Contact</h2>
+  <p>For privacy questions or requests, email <a href="mailto:samhurd@gmail.com">samhurd@gmail.com</a>.</p>
+
+  <footer><a href="/">Gainmap</a> · <a href="/support/">Support</a></footer>
+</main>
+</body>
+</html>

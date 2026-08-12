@@ -3,6 +3,10 @@ build/
 DerivedData/
 *.xcarchive
 *.dmg
+*.profraw
+
+# Firebase CLI deployment cache
+.firebase/
 
 # Xcode user state
 **/xcuserdata/
