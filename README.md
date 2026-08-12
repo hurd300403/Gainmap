@@ -53,6 +53,10 @@ both the app's `Resources/Helpers/` and the plugin's `bin/mac/`.
 
 ## Release (notarized)
 
+For the complete Mac + TestFlight + Firebase download-page workflow, release
+gates, and permanent URL behavior, read
+[`docs/gainmap-release-and-download.md`](docs/gainmap-release-and-download.md).
+
 ```bash
 # One-time: install the portal-created "Gainmap Developer ID" provisioning
 # profile, then store an app-specific password in the canonical Keychain profile.
