@@ -61,6 +61,7 @@ public enum PatreonEntitlementSource: String, Equatable, Sendable {
     case none
     case patreonEmail = "patreon_email"
     case patreonOAuth = "patreon_oauth"
+    case operatorAccess = "operator"
 }
 
 public enum PatreonConnectionAction: String, Equatable, Sendable {

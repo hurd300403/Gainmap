@@ -447,7 +447,7 @@ test('blob renditions / state / gcCandidateAt are server-only', async () => {
   );
 });
 
-test('config/** and deletedAccounts/** are not client-writable', async () => {
+test('config/** is read-only and private operator data is inaccessible to clients', async () => {
   await seed();
   const db = aliceDb();
   await assertSucceeds(getDoc(doc(db, 'config/flags')));
@@ -455,6 +455,8 @@ test('config/** and deletedAccounts/** are not client-writable', async () => {
   await assertFails(updateDoc(doc(db, 'config/counters'), { admittedUsers: 0 }));
   await assertFails(getDoc(doc(db, 'deletedAccounts/ghost')));
   await assertFails(setDoc(doc(db, 'deletedAccounts/alice'), { deletedAt: T(1) }));
+  await assertFails(getDoc(doc(db, 'syncOperatorGrants/alice')));
+  await assertFails(setDoc(doc(db, 'syncOperatorGrants/alice'), { enabled: true }));
 });
 
 // ===========================================================================

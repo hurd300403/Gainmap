@@ -30,10 +30,12 @@ const {
 const {
   safeEntitlement,
   activeEntitlement,
+  operatorEntitlement,
   inactiveTransition,
   errorTransition,
   verifiedEmailEntitlement,
   emailLossTransition,
+  preferEntitlement,
   resolveEntitlement,
 } = entitlementMod.default || entitlementMod;
 const {
@@ -46,7 +48,11 @@ const {
   verifyOAuthMembership,
   linkPatreonIdentity,
 } = oauthMod.default || oauthMod;
-const { syncCampaignCore, reconcileMemberCore } = syncMod.default || syncMod;
+const {
+  syncCampaignCore,
+  markCampaignUnavailableCore,
+  reconcileMemberCore,
+} = syncMod.default || syncMod;
 const { PatreonTokenStore, PatreonTokenError } = tokenMod.default || tokenMod;
 const { authenticatedWebhookPayload, WebhookError } = webhookMod.default || webhookMod;
 const { PatreonRateLimiter } = limiterMod.default || limiterMod;
@@ -474,6 +480,131 @@ test('verified email bootstrap requires a fresh completed campaign snapshot', as
   });
 });
 
+test('private UID operator grant is finite, mirrored, and independent of Patreon', async () => {
+  const db = new FakeDB({
+    'syncOperatorGrants/creator-user': {
+      enabled: true,
+      reason: 'campaign_creator',
+      expiresAt: ts(NOW + 30 * DAY),
+    },
+    'users/creator-user': { schemaVersion: 1, syncAdmitted: true },
+  });
+  const access = await resolveEntitlement({
+    db,
+    uid: 'creator-user',
+    authToken: {},
+    api: null,
+    hmacKey: HMAC_KEY,
+    nowMs: NOW,
+  });
+  assert.equal(access.state, 'active');
+  assert.equal(access.effective, true);
+  assert.equal(access.source, 'operator');
+  assert.equal(access.connectionAction, 'none');
+  const outer = db.docs.get('patreonEntitlements/creator-user');
+  assert.equal(outer.source, 'operator');
+  assert.equal(outer.verificationExpiresAt.toMillis(), NOW + 7 * DAY);
+  assert.equal(db.docs.get('users/creator-user').entitlement.source, 'operator');
+
+  const shortDB = new FakeDB({
+    'syncOperatorGrants/short': {
+      enabled: true,
+      reason: 'support',
+      expiresAt: ts(NOW + 2 * DAY),
+    },
+  });
+  await resolveEntitlement({
+    db: shortDB, uid: 'short', api: null, hmacKey: HMAC_KEY, nowMs: NOW,
+  });
+  assert.equal(
+    shortDB.docs.get('patreonEntitlements/short').verificationExpiresAt.toMillis(),
+    NOW + 2 * DAY
+  );
+});
+
+test('disabled, expired, or malformed operator grants fail closed immediately', async () => {
+  for (const [uid, grant] of Object.entries({
+    disabled: { enabled: false, reason: 'creator', expiresAt: ts(NOW + DAY) },
+    expired: { enabled: true, reason: 'creator', expiresAt: ts(NOW - 1) },
+    malformed: { enabled: true, expiresAt: ts(NOW + DAY) },
+  })) {
+    const prior = operatorEntitlement(NOW - DAY, NOW + 6 * DAY);
+    const db = new FakeDB({
+      [`syncOperatorGrants/${uid}`]: grant,
+      [`patreonEntitlements/${uid}`]: prior,
+      [`users/${uid}`]: { entitlement: prior },
+      'patreonPrivate/runtime': { currentSyncId: 'fresh', lastCompletedAt: ts(NOW) },
+    });
+    const access = await resolveEntitlement({
+      db, uid, api: null, hmacKey: HMAC_KEY, nowMs: NOW,
+    });
+    assert.equal(access.state, 'unlinked');
+    assert.equal(access.effective, false);
+    assert.equal(db.docs.get(`patreonEntitlements/${uid}`).source, 'none');
+    assert.equal(db.docs.get(`users/${uid}`).entitlement.effective, false);
+  }
+});
+
+test('revoked operator grant falls through to a real Patreon proof', async () => {
+  const email = 'patron@example.com';
+  const hash = emailIndex(HMAC_KEY, email);
+  const prior = operatorEntitlement(NOW - DAY, NOW + 6 * DAY);
+  const db = new FakeDB({
+    'syncOperatorGrants/also-patron': {
+      enabled: false,
+      reason: 'campaign_creator',
+      expiresAt: ts(NOW + 30 * DAY),
+    },
+    'patreonPrivate/runtime': { currentSyncId: 'fresh', lastCompletedAt: ts(NOW) },
+    [`patreonEmailIndex/${snapshotIndexId('fresh', hash)}`]: {
+      lastSyncId: 'fresh', isActiveEligible: true, memberId: 'm1', lastVerifiedAt: ts(NOW),
+    },
+    'patreonEntitlements/also-patron': prior,
+  });
+  const access = await resolveEntitlement({
+    db,
+    uid: 'also-patron',
+    authToken: { email, email_verified: true },
+    api: null,
+    hmacKey: HMAC_KEY,
+    nowMs: NOW,
+  });
+  assert.equal(access.state, 'active');
+  assert.equal(access.source, 'patreon_email');
+});
+
+test('effective operator proof wins over concurrent Patreon writers', async () => {
+  const operator = operatorEntitlement(NOW, NOW + 30 * DAY);
+  assert.equal(preferEntitlement(operator, activeEntitlement(NOW), NOW).source, 'operator');
+  assert.equal(preferEntitlement(operator, errorTransition(operator, NOW), NOW).state, 'active');
+
+  const identity = { data: { type: 'user', id: 'patreon-subject' } };
+  const member = parseMember(memberResource());
+  const oauthDB = new FakeDB({
+    'patreonEntitlements/creator': operator,
+    'users/creator': { entitlement: operator },
+  });
+  await linkPatreonIdentity({
+    db: oauthDB,
+    uid: 'creator',
+    identity,
+    member,
+    hmacKey: HMAC_KEY,
+    nowMs: NOW + DAY,
+  });
+  assert.equal(oauthDB.docs.get('patreonEntitlements/creator').source, 'operator');
+  assert.equal(oauthDB.docs.get('users/creator').entitlement.source, 'operator');
+
+  const outageDB = new FakeDB({
+    'patreonEntitlements/creator': operator,
+    'users/creator': { entitlement: operator },
+    'patreonLinks/creator': { memberId: 'member' },
+  });
+  await markCampaignUnavailableCore({ db: outageDB, nowMs: NOW + DAY });
+  assert.equal(outageDB.docs.get('patreonEntitlements/creator').state, 'active');
+  assert.equal(outageDB.docs.get('users/creator').entitlement.source, 'operator');
+});
+
 test('verified-email proof is bound to the exact current verified claim', async () => {
   const oldEmail = 'patron@example.com';
   const newEmail = 'different@example.com';
@@ -782,7 +913,7 @@ test('Patreon campaign member IDs are unique across Gainmap accounts', async () 
   );
 });
 
-test('Patreon account cleanup removes link, entitlement, uniqueness indexes, and OAuth throttle', async () => {
+test('Patreon account cleanup removes link, entitlement, operator grant, indexes, and throttle', async () => {
   const subjectHash = crypto.createHmac('sha256', HMAC_KEY)
     .update('subject\0subject').digest('hex');
   const memberHash = crypto.createHmac('sha256', HMAC_KEY)
@@ -790,6 +921,9 @@ test('Patreon account cleanup removes link, entitlement, uniqueness indexes, and
   const db = new FakeDB({
     'patreonLinks/firebase-uid': { subjectHash, memberHash },
     'patreonEntitlements/firebase-uid': activeEntitlement(NOW),
+    'syncOperatorGrants/firebase-uid': {
+      enabled: true, reason: 'campaign_creator', expiresAt: ts(NOW + DAY),
+    },
     'patreonOAuthStarts/firebase-uid': { lastStartedAt: ts(NOW) },
     [`patreonSubjectIndex/${subjectHash}`]: { uid: 'firebase-uid' },
     [`patreonMemberIndex/${memberHash}`]: { uid: 'firebase-uid' },
@@ -798,6 +932,7 @@ test('Patreon account cleanup removes link, entitlement, uniqueness indexes, and
   for (const path of [
     'patreonLinks/firebase-uid',
     'patreonEntitlements/firebase-uid',
+    'syncOperatorGrants/firebase-uid',
     'patreonOAuthStarts/firebase-uid',
     `patreonSubjectIndex/${subjectHash}`,
     `patreonMemberIndex/${memberHash}`,

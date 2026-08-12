@@ -396,6 +396,25 @@ final class RemoteSchemaTests: XCTestCase {
         ]))
     }
 
+    func testOperatorEntitlementHasTruthfulDisplayCopy() throws {
+        let entitlement = try XCTUnwrap(PatreonEntitlement(payload: [
+            "state": "active",
+            "effective": true,
+            "source": "operator",
+            "connectionAction": "none",
+            "linkRequired": false,
+            "message": "Cloud Sync access is verified.",
+        ]))
+        XCTAssertEqual(entitlement.source, .operatorAccess)
+        let display = CloudSyncDisplayState.resolve(
+            authState: .ready(uid: "creator"),
+            access: CloudSyncAccess(entitlement: entitlement, admitted: true))
+        XCTAssertEqual(display.kind, .enabled)
+        XCTAssertEqual(display.title, "Cloud Sync is on")
+        XCTAssertEqual(display.detail, "Creator access verified.")
+        XCTAssertEqual(display.action, .none)
+    }
+
     func testPatreonConnectionActionDistinguishesConnectFromSwitch() throws {
         let unlinked = try XCTUnwrap(PatreonEntitlement(payload: [
             "state": "unlinked",

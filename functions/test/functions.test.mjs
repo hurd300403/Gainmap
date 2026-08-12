@@ -25,6 +25,7 @@ const reconcileMod = await import('../lib/reconcile.js');
 const maintenanceMod = await import('../lib/maintenance.js');
 const deleteMod = await import('../lib/deleteAccount.js');
 const constantsMod = await import('../lib/constants.js');
+const operatorAdminMod = await import('../scripts/manage-sync-operator.js');
 
 const { admitSyncUserCore } = admitMod.default || admitMod;
 const { reserveUploadCore } = reserveMod.default || reserveMod;
@@ -36,10 +37,13 @@ const {
   gcPassOne,
   gcPassTwo,
   recomputeUsage,
+  expireOperatorGrants,
   purgeExpiredPatreonData,
 } = maintenanceMod.default || maintenanceMod;
 const { deleteAccountCore, assertRecentAuth } = deleteMod.default || deleteMod;
-const { DEFAULT_QUOTA_BYTES, compareGenerations, objectName } =
+const { grant: grantOperator, revoke: revokeOperator } =
+  operatorAdminMod.default || operatorAdminMod;
+const { DEFAULT_QUOTA_BYTES, PATREON_RETENTION_MS, compareGenerations, objectName } =
   constantsMod.default || constantsMod;
 
 const PROJECT_ID = process.env.GCLOUD_PROJECT;
@@ -832,6 +836,74 @@ test('maintenance purges cloud data after 90 inactive days exactly once', async 
   assert.equal((await db.doc('config/counters').get()).get('admittedUsers'), 2);
 });
 
+test('operator grant administration is finite, mirrored, revocable, and deletion-safe', async () => {
+  await seedFlags();
+  await seedUser();
+  const user = { uid: UID };
+  const expiresMs = await grantOperator({
+    db, user, days: 30, reason: 'campaign_creator', nowMs: NOW0,
+  });
+  assert.equal(expiresMs, NOW0 + 30 * 24 * 60 * 60 * 1000);
+  const grant = (await db.doc(`syncOperatorGrants/${UID}`).get()).data();
+  assert.equal(grant.enabled, true);
+  assert.equal(grant.reason, 'campaign_creator');
+  assert.equal(Object.hasOwn(grant, 'email'), false);
+  assert.equal((await db.doc(`patreonEntitlements/${UID}`).get()).get('source'), 'operator');
+  assert.equal((await db.doc(`users/${UID}`).get()).get('entitlement').source, 'operator');
+
+  await revokeOperator({ db, user, nowMs: NOW0 + 1 });
+  assert.equal((await db.doc(`syncOperatorGrants/${UID}`).get()).get('enabled'), false);
+  const revoked = (await db.doc(`patreonEntitlements/${UID}`).get()).data();
+  assert.equal(revoked.state, 'inactive');
+  assert.equal(revoked.effective, false);
+  assert.equal(revoked.retentionExpiresAt.toMillis(), NOW0 + 1 + PATREON_RETENTION_MS);
+  assert.equal((await db.doc(`users/${UID}`).get()).get('entitlement').effective, false);
+
+  await db.doc(`syncOperatorGrants/${UID}`).set({ enabled: true }, { merge: true });
+  await db.doc(`deletedAccounts/${UID}`).set({ deletedAt: now(NOW0 + 2) });
+  await revokeOperator({ db, user, nowMs: NOW0 + 3 });
+  assert.equal((await db.doc(`syncOperatorGrants/${UID}`).get()).exists, false);
+  await assert.rejects(
+    grantOperator({ db, user, days: 30, reason: 'campaign_creator', nowMs: NOW0 + 4 }),
+    /deleted/
+  );
+});
+
+test('nightly maintenance starts retention for invalid operator grants exactly once', async () => {
+  await seedFlags();
+  await seedUser();
+  await db.doc(`syncOperatorGrants/${UID}`).set({
+    enabled: true,
+    reason: 'campaign_creator',
+    expiresAt: now(NOW0 - 1),
+  });
+  const operator = {
+    state: 'active',
+    effective: true,
+    source: 'operator',
+    lastVerifiedAt: now(NOW0 - 7 * 24 * 60 * 60 * 1000),
+    verificationExpiresAt: now(NOW0 + 7 * 24 * 60 * 60 * 1000),
+  };
+  await db.doc(`patreonEntitlements/${UID}`).set(operator);
+  await db.doc(`users/${UID}`).set({ entitlement: operator }, { merge: true });
+
+  let result = await expireOperatorGrants({ db, now: now(NOW0) });
+  assert.equal(result.expired, 1);
+  const expired = (await db.doc(`patreonEntitlements/${UID}`).get()).data();
+  assert.equal(expired.state, 'inactive');
+  assert.equal(expired.effective, false);
+  assert.equal(expired.inactiveSince.toMillis(), NOW0);
+  assert.equal(expired.retentionExpiresAt.toMillis(), NOW0 + PATREON_RETENTION_MS);
+  assert.equal((await db.doc(`users/${UID}`).get()).get('entitlement').effective, false);
+
+  result = await expireOperatorGrants({ db, now: now(NOW0 + 24 * 60 * 60 * 1000) });
+  assert.equal(result.expired, 0);
+  assert.equal(
+    (await db.doc(`patreonEntitlements/${UID}`).get()).get('retentionExpiresAt').toMillis(),
+    NOW0 + PATREON_RETENTION_MS
+  );
+});
+
 test('retention purge retries a Storage failure and releases the captured seat exactly once', async () => {
   await seedFlags();
   await seedUser();
@@ -901,6 +973,7 @@ test('runMaintenance orchestrates every pass without throwing', async () => {
   const report = await runMaintenance({ db, bucket, now: now(NOW0 + 30 * 24 * 3600 * 1000) });
   assert.deepEqual(report.errors, []);
   assert.ok(report.gc);
+  assert.equal(report.operatorGrants.expired, 0);
   assert.equal(report.reservations.released, 1);
 });
 

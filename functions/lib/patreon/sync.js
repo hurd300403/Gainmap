@@ -281,7 +281,6 @@ async function markCampaignUnavailableCore({ db, nowMs = Date.now() }) {
   const linkedUIDs = new Set(linksSnap.docs.map((doc) => doc.id));
   for (const doc of entitlementsSnap.docs) {
     if (!linkedUIDs.has(doc.id)) continue;
-    const entitlement = errorTransition(doc.data() || {}, nowMs);
     // eslint-disable-next-line no-await-in-loop
     await db.runTransaction(async (tx) => {
       const [deleted, user, current] = await Promise.all([
@@ -292,6 +291,8 @@ async function markCampaignUnavailableCore({ db, nowMs = Date.now() }) {
       if (deleted.exists) return;
       if (current.exists && current.get('purgeLeaseId')) return;
       if (current.exists && valueMillis(current.get('lastVerifiedAt')) > nowMs) return;
+      const prior = current.exists ? current.data() || {} : doc.data() || {};
+      const entitlement = preferEntitlement(prior, errorTransition(prior, nowMs), nowMs);
       tx.set(doc.ref, entitlement, { merge: true });
       if (user.exists) tx.set(user.ref, { entitlement }, { merge: true });
     });

@@ -1,6 +1,10 @@
 'use strict';
 
-const { ENTITLEMENTS_COLLECTION, LINKS_COLLECTION } = require('./entitlement');
+const {
+  ENTITLEMENTS_COLLECTION,
+  LINKS_COLLECTION,
+  OPERATOR_GRANTS_COLLECTION,
+} = require('./entitlement');
 const {
   SUBJECT_INDEX_COLLECTION,
   MEMBER_INDEX_COLLECTION,
@@ -19,6 +23,7 @@ async function deletePatreonAccountData({ db, uid }) {
     const memberSnap = memberRef ? await tx.get(memberRef) : null;
 
     tx.delete(db.doc(`${ENTITLEMENTS_COLLECTION}/${uid}`));
+    tx.delete(db.doc(`${OPERATOR_GRANTS_COLLECTION}/${uid}`));
     tx.delete(linkRef);
     tx.delete(db.doc(`${OAUTH_STARTS_COLLECTION}/${uid}`));
     if (subjectSnap && subjectSnap.exists && subjectSnap.get('uid') === uid) tx.delete(subjectRef);

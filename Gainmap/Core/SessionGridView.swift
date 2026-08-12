@@ -503,6 +503,12 @@ public struct CloudSyncDisplayState: Equatable, Sendable {
                     title: "Patreon connected",
                     detail: "Cloud Sync is on.",
                     action: .none)
+            case .operatorAccess:
+                return .init(
+                    kind: .enabled,
+                    title: "Cloud Sync is on",
+                    detail: "Creator access verified.",
+                    action: .none)
             case .none:
                 return .init(
                     kind: .enabled,

@@ -13,6 +13,7 @@ const { timestampMillis } = require('./tokenStore');
 const ENTITLEMENTS_COLLECTION = 'patreonEntitlements';
 const LINKS_COLLECTION = 'patreonLinks';
 const EMAIL_INDEX_COLLECTION = 'patreonEmailIndex';
+const OPERATOR_GRANTS_COLLECTION = 'syncOperatorGrants';
 const RUNTIME_PATH = 'patreonPrivate/runtime';
 
 function valueMillis(value) {
@@ -41,7 +42,7 @@ function safeEntitlement(entitlement, nowMs = Date.now(), linked) {
   if (state === 'grace' && !effective) {
     state = source.source === 'patreon_email' ? 'unlinked' : 'inactive';
   }
-  const normalizedSource = ['patreon_email', 'patreon_oauth'].includes(source.source)
+  const normalizedSource = ['patreon_email', 'patreon_oauth', 'operator'].includes(source.source)
     ? source.source
     : 'none';
   let connectionAction = 'none';
@@ -69,9 +70,11 @@ function safeEntitlement(entitlement, nowMs = Date.now(), linked) {
 function messageFor(state, source) {
   switch (state) {
     case 'active':
-      return source === 'patreon_email'
-        ? 'Patreon access is verified with your signed-in email.'
-        : 'Patreon is connected and Cloud Sync is on.';
+      return source === 'operator'
+        ? 'Cloud Sync access is verified.'
+        : source === 'patreon_email'
+          ? 'Patreon access is verified with your signed-in email.'
+          : 'Patreon is connected and Cloud Sync is on.';
     case 'grace':
       return 'Cloud Sync is temporarily available during the Patreon grace period.';
     case 'inactive':
@@ -183,6 +186,42 @@ function verifiedEmailEntitlement(nowMs, snapshotVerifiedMs, emailHash) {
   );
 }
 
+function operatorEntitlement(nowMs, grantExpiresMs) {
+  const verificationExpiresMs = Math.min(grantExpiresMs, nowMs + PATREON_GRACE_MS);
+  return {
+    emailHash: null,
+    state: 'active',
+    effective: true,
+    source: 'operator',
+    lastVerifiedAt: toTimestamp(nowMs),
+    verificationExpiresAt: toTimestamp(verificationExpiresMs),
+    graceExpiresAt: null,
+    provisionalExpiresAt: null,
+    inactiveSince: null,
+    retentionExpiresAt: null,
+    cloudDataPurgedAt: null,
+    updatedAt: toTimestamp(nowMs),
+  };
+}
+
+function expiredOperatorTransition(previous, nowMs) {
+  const prior = previous || {};
+  const inactiveSince = valueMillis(prior.inactiveSince) || nowMs;
+  return {
+    ...prior,
+    emailHash: null,
+    state: 'inactive',
+    effective: false,
+    source: 'operator',
+    verificationExpiresAt: null,
+    graceExpiresAt: null,
+    provisionalExpiresAt: null,
+    inactiveSince: toTimestamp(inactiveSince),
+    retentionExpiresAt: toTimestamp(inactiveSince + PATREON_RETENTION_MS),
+    updatedAt: toTimestamp(nowMs),
+  };
+}
+
 function emailLossTransition(previous, nowMs, emailHash, verifiedAtMs = nowMs) {
   // A completed campaign snapshot with no exact hash match is conclusive. It
   // is not an outage and must not mint a new grace window at client refresh
@@ -218,6 +257,13 @@ function unlinkedEntitlement(previous, nowMs, emailHash, verifiedAtMs = nowMs) {
 function preferEntitlement(current, candidate, nowMs = Date.now()) {
   const prior = current || {};
   const next = candidate || {};
+  // An explicit operator grant is independent of Patreon and must not be
+  // downgraded by a concurrent campaign scan, webhook, or OAuth refresh.
+  // Its absolute deadline still fails closed if the grant is never checked.
+  if (prior.source === 'operator' && isEffectiveAt(prior, nowMs) &&
+      !(next.source === 'operator' && next.state === 'active' && isEffectiveAt(next, nowMs))) {
+    return prior;
+  }
   // Email and OAuth are independent proofs. A failed linked-account refresh
   // must not suppress a still-valid verified-email entitlement.
   if (prior.source === 'patreon_email' && next.source === 'patreon_oauth' &&
@@ -367,6 +413,56 @@ async function currentEntitlement(db, uid) {
   return snap.exists ? snap.data() || {} : {};
 }
 
+function operatorGrantExpiry(grant, nowMs) {
+  const source = grant || {};
+  const reason = typeof source.reason === 'string' ? source.reason.trim() : '';
+  const expiresAt = valueMillis(source.expiresAt);
+  return source.enabled === true && reason && expiresAt > nowMs ? expiresAt : 0;
+}
+
+/**
+ * Re-read the private grant in the same transaction that mints (or revokes)
+ * its rules-facing entitlement. Disabling a grant therefore cannot race a
+ * final seven-day renewal.
+ */
+async function persistOperatorProof({ db, uid, nowMs }) {
+  const grantRef = db.doc(`${OPERATOR_GRANTS_COLLECTION}/${uid}`);
+  const entitlementRef = db.doc(`${ENTITLEMENTS_COLLECTION}/${uid}`);
+  const userRef = db.doc(`users/${uid}`);
+  const linkRef = db.doc(`${LINKS_COLLECTION}/${uid}`);
+  return db.runTransaction(async (tx) => {
+    const [grantSnap, entitlementSnap, userSnap, linkSnap, deletedSnap] = await Promise.all([
+      tx.get(grantRef),
+      tx.get(entitlementRef),
+      tx.get(userRef),
+      tx.get(linkRef),
+      tx.get(db.doc(`deletedAccounts/${uid}`)),
+    ]);
+    const current = entitlementSnap.exists ? entitlementSnap.data() || {} : {};
+    const linked = linkSnap.exists;
+    if (deletedSnap.exists) return { valid: false, entitlement: current, linked };
+
+    const grantExpiry = operatorGrantExpiry(grantSnap.exists ? grantSnap.data() : null, nowMs);
+    if (grantExpiry > 0) {
+      if (entitlementSnap.exists && entitlementSnap.get('purgeLeaseId')) {
+        throw new Error('Cloud library retention purge is in progress.');
+      }
+      const entitlement = operatorEntitlement(nowMs, grantExpiry);
+      tx.set(entitlementRef, entitlement, { merge: true });
+      if (userSnap.exists) tx.set(userRef, { entitlement }, { merge: true });
+      return { valid: true, entitlement, linked };
+    }
+
+    if (current.source === 'operator') {
+      const entitlement = expiredOperatorTransition(current, nowMs);
+      tx.set(entitlementRef, entitlement, { merge: true });
+      if (userSnap.exists) tx.set(userRef, { entitlement }, { merge: true });
+      return { valid: false, entitlement, linked };
+    }
+    return { valid: false, entitlement: current, linked };
+  });
+}
+
 async function resolveEmailProof({ db, authToken, hmacKey, previous, nowMs }) {
   const normalizedEmail = typeof authToken.email === 'string'
     ? authToken.email.trim().toLowerCase()
@@ -455,12 +551,28 @@ async function resolveEntitlement({
   force = false,
   persist = true,
 }) {
-  const [entitlementSnap, linkSnap] = await Promise.all([
+  const [entitlementSnap, linkSnap, grantSnap] = await Promise.all([
     db.doc(`${ENTITLEMENTS_COLLECTION}/${uid}`).get(),
     db.doc(`${LINKS_COLLECTION}/${uid}`).get(),
+    db.doc(`${OPERATOR_GRANTS_COLLECTION}/${uid}`).get(),
   ]);
-  const previous = entitlementSnap.exists ? entitlementSnap.data() || {} : {};
-  const link = linkSnap.exists ? linkSnap.data() || {} : null;
+  let previous = entitlementSnap.exists ? entitlementSnap.data() || {} : {};
+  let link = linkSnap.exists ? linkSnap.data() || {} : null;
+  const grantExpiry = operatorGrantExpiry(grantSnap.exists ? grantSnap.data() : null, nowMs);
+  if (grantExpiry > 0 || previous.source === 'operator') {
+    const stored = persist
+      ? await persistOperatorProof({ db, uid, nowMs })
+      : {
+        valid: grantExpiry > 0,
+        entitlement: grantExpiry > 0
+          ? operatorEntitlement(nowMs, grantExpiry)
+          : expiredOperatorTransition(previous, nowMs),
+        linked: Boolean(link),
+      };
+    if (stored.valid) return safeEntitlement(stored.entitlement, nowMs, stored.linked);
+    previous = stored.entitlement;
+    if (!stored.linked) link = null;
+  }
   const emailProof = await resolveEmailProof({
     db,
     authToken,
@@ -577,6 +689,7 @@ module.exports = {
   ENTITLEMENTS_COLLECTION,
   LINKS_COLLECTION,
   EMAIL_INDEX_COLLECTION,
+  OPERATOR_GRANTS_COLLECTION,
   RUNTIME_PATH,
   valueMillis,
   isEffectiveAt,
@@ -586,6 +699,8 @@ module.exports = {
   inactiveTransition,
   errorTransition,
   verifiedEmailEntitlement,
+  operatorEntitlement,
+  expiredOperatorTransition,
   emailLossTransition,
   unlinkedEntitlement,
   preferEntitlement,
@@ -594,6 +709,8 @@ module.exports = {
   sameLinkIdentity,
   persistLinkedResult,
   currentEntitlement,
+  operatorGrantExpiry,
+  persistOperatorProof,
   resolveEmailProof,
   resolveEntitlement,
 };

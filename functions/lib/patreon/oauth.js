@@ -12,6 +12,7 @@ const {
   ENTITLEMENTS_COLLECTION,
   LINKS_COLLECTION,
   activeEntitlement,
+  preferEntitlement,
 } = require('./entitlement');
 
 const OAUTH_STATES_COLLECTION = 'patreonOAuthStates';
@@ -326,7 +327,11 @@ async function linkPatreonIdentity({ db, uid, identity, member, hmacKey, nowMs =
     const oldSubjectSnap = oldSubjectRef ? await tx.get(oldSubjectRef) : null;
     const oldMemberSnap = oldMemberRef ? await tx.get(oldMemberRef) : null;
 
-    storedEntitlement = activeEntitlement(nowMs);
+    storedEntitlement = preferEntitlement(
+      entitlementSnap.exists ? entitlementSnap.data() || {} : {},
+      activeEntitlement(nowMs),
+      nowMs
+    );
 
     tx.set(subjectRef, { uid, linkedAt: Timestamp.fromMillis(nowMs) }, { merge: true });
     if (nextMemberHash) {

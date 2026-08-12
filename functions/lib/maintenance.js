@@ -12,17 +12,23 @@ const {
   objectName,
   num,
 } = require('./constants');
-const { isEffectiveAt } = require('./patreon/entitlement');
+const {
+  OPERATOR_GRANTS_COLLECTION,
+  isEffectiveAt,
+  operatorGrantExpiry,
+  expiredOperatorTransition,
+} = require('./patreon/entitlement');
 
 /**
- * Scheduled maintenance (every 24 h). Five independent passes; each is written so
+ * Scheduled maintenance (every 24 h). Six independent passes; each is written so
  * a failure in one does not prevent the others from running.
  *
  *  1. releaseExpiredReservations — capacity leases past `expiresAt` + grace
  *  2. purgeTombstones            — sessions/photos deleted > 30 days ago
  *  3. blobGC                     — three-state, two-pass: active -> gcCandidate -> deleting
  *  4. recomputeUsage             — heal bytesUsed/objectCount drift from bucket reality
- *  5. purgeExpiredPatreonData    — remove cloud libraries after 90 inactive days
+ *  5. expireOperatorGrants       — start retention for expired/revoked grants
+ *  6. purgeExpiredPatreonData    — remove cloud libraries after 90 inactive days
  */
 
 // ---------------------------------------------------------------------------
@@ -253,7 +259,49 @@ async function recomputeUsage({ db, bucket, uid, now }) {
 }
 
 // ---------------------------------------------------------------------------
-// 5. Patreon retention purge
+// 5. Operator-grant expiry
+// ---------------------------------------------------------------------------
+async function expireOperatorGrants({ db, now }) {
+  const nowMs = now.toMillis();
+  const snap = await db
+    .collection('patreonEntitlements')
+    .where('source', '==', 'operator')
+    .get();
+  let expired = 0;
+
+  for (const doc of snap.docs) {
+    const uid = doc.id;
+    const grantRef = db.doc(`${OPERATOR_GRANTS_COLLECTION}/${uid}`);
+    const userRef = db.doc(`users/${uid}`);
+    // eslint-disable-next-line no-await-in-loop
+    const changed = await db.runTransaction(async (tx) => {
+      const [current, grant, user, deleted] = await Promise.all([
+        tx.get(doc.ref),
+        tx.get(grantRef),
+        tx.get(userRef),
+        tx.get(db.doc(`deletedAccounts/${uid}`)),
+      ]);
+      if (deleted.exists) {
+        if (grant.exists) tx.delete(grantRef);
+        return false;
+      }
+      if (!current.exists || current.get('source') !== 'operator' ||
+          current.get('purgeLeaseId')) return false;
+      if (operatorGrantExpiry(grant.exists ? grant.data() : null, nowMs) > 0) return false;
+      if (current.get('effective') === false && current.get('retentionExpiresAt')) return false;
+
+      const entitlement = expiredOperatorTransition(current.data() || {}, nowMs);
+      tx.set(doc.ref, entitlement, { merge: true });
+      if (user.exists) tx.set(userRef, { entitlement }, { merge: true });
+      return true;
+    });
+    if (changed) expired += 1;
+  }
+  return { expired };
+}
+
+// ---------------------------------------------------------------------------
+// 6. Patreon retention purge
 // ---------------------------------------------------------------------------
 /**
  * Inactive users keep their private cloud library for 90 days. At the deadline
@@ -413,6 +461,7 @@ async function runMaintenance({
 
   await step('reservations', () => releaseExpiredReservations({ db, now }));
   await step('tombstones', () => purgeTombstones({ db, now, retentionMs }));
+  await step('operatorGrants', () => expireOperatorGrants({ db, now }));
   await step('patreonRetention', () => purgeExpiredPatreonData({ db, bucket, now }));
 
   const users = await db.collection('users').get();
@@ -456,5 +505,6 @@ module.exports = {
   gcPassOne,
   gcPassTwo,
   recomputeUsage,
+  expireOperatorGrants,
   purgeExpiredPatreonData,
 };
