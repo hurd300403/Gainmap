@@ -113,7 +113,7 @@
     }
 
     .status {
-      color: var(--muted);
+      color: #ff907c;
       font-size: 11px;
       font-weight: 700;
       letter-spacing: .06em;
@@ -132,20 +132,47 @@
       padding: 0 15px;
       border: 1px solid rgba(255,255,255,.1);
       border-radius: 11px;
-      background: rgba(255,255,255,.04);
-      color: #c3bcb4;
-      cursor: not-allowed;
+      background: var(--accent);
+      color: #171717;
+      cursor: pointer;
       font: inherit;
       font-size: 14px;
       font-weight: 700;
       text-align: left;
+      text-decoration: none;
     }
+
+    .action:hover { background: #ff806d; }
+    .action:active { transform: translateY(1px); }
 
     .note {
       margin: 22px auto 0;
       color: var(--muted);
       font-size: 13px;
       text-align: center;
+    }
+
+    .patreon-return {
+      display: flex;
+      width: fit-content;
+      min-height: 48px;
+      align-items: center;
+      gap: 10px;
+      margin: 26px auto 0;
+      padding: 0 18px;
+      border: 1px solid var(--line);
+      border-radius: 11px;
+      background: rgba(255,255,255,.035);
+      color: var(--text);
+      font-size: 14px;
+      font-weight: 700;
+      text-decoration: none;
+      transition: border-color .18s ease, background .18s ease;
+    }
+
+    .patreon-return:hover {
+      border-color: rgba(239,114,95,.65);
+      background: rgba(239,114,95,.08);
     }
 
     footer {
@@ -190,35 +217,38 @@
       <section class="download-card" aria-labelledby="iphone-heading">
         <div class="platform">
           <img class="icon" src="/download/gainmap-ios.png" alt="Gainmap for iPhone app icon" width="64" height="64">
-          <span class="status">Coming soon</span>
+          <span class="status">Available now</span>
         </div>
         <h2 id="iphone-heading">iPhone</h2>
-        <p class="requirements">iOS 17 or later · TestFlight</p>
-        <button class="action" type="button" disabled title="The TestFlight build is being prepared">
+        <p class="requirements">iOS 17 or later · TestFlight · Version 1.6</p>
+        <a class="action" href="https://testflight.apple.com/join/NYqq11HH">
           <span>Open in TestFlight</span><span aria-hidden="true">→</span>
-        </button>
+        </a>
       </section>
 
       <section class="download-card" aria-labelledby="mac-heading">
         <div class="platform">
           <img class="icon" src="/download/gainmap-macos.png" alt="Gainmap for Mac app icon" width="64" height="64">
-          <span class="status">Coming soon</span>
+          <span class="status">Available now</span>
         </div>
         <h2 id="mac-heading">Mac</h2>
-        <p class="requirements">macOS 14 or later · Apple silicon</p>
-        <button class="action" type="button" disabled title="The signed Mac build is being prepared">
+        <p class="requirements">macOS 14 or later · Apple silicon · Version 1.6</p>
+        <a class="action" href="https://github.com/hurd300403/Gainmap/releases/latest/download/Gainmap.dmg">
           <span>Download for Mac</span><span aria-hidden="true">↓</span>
-        </button>
+        </a>
       </section>
     </div>
 
     <p class="note">No account is required for local use. Cloud Sync is optional.</p>
 
+    <a class="patreon-return" href="https://www.patreon.com/samhurd/posts/introducing-for-161365308">
+      <span aria-hidden="true">←</span><span>Back to the Patreon post</span>
+    </a>
+
     <footer>
       <span>© 2026 Legacy Lab</span>
       <nav aria-label="Footer navigation">
         <a href="/support/">Help</a>
-        <a href="https://www.patreon.com/samhurd">Patreon</a>
       </nav>
     </footer>
   </main>

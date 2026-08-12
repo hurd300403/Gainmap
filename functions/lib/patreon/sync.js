@@ -109,9 +109,9 @@ async function syncCampaignWithLease({ db, api, hmacKey, nowMs, id, priorRuntime
       const hash = subjectIndex(hmacKey, member.subjectId);
       bySubjectHash.set(hash, preferMember(bySubjectHash.get(hash), member));
     }
-    // Verified-email bootstrap is only a recovery convenience for currently
-    // eligible patrons. Do not retain campaign-wide hashes for free/former
-    // members; linked inactive users are reconciled through their link.
+    // Verified email is a complete proof only for currently eligible patrons.
+    // Do not retain campaign-wide hashes for free/former members; linked
+    // inactive users are reconciled through their link.
     if (member.isActiveEligible && member.email) {
       const hash = emailIndex(hmacKey, member.email);
       byEmailHash.set(hash, preferMember(byEmailHash.get(hash), member));
