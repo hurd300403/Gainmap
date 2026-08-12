@@ -235,6 +235,28 @@ final class ConflictPolicyTests: XCTestCase {
         XCTAssertEqual(j.conflicts.count, 1)
     }
 
+    func testConflictPreservesDisabledLookAndItsHiddenSettings() throws {
+        var off = look(1.35)
+        off.headroom = 2.1
+        off.bakeGlowIntoSDR = true
+        off.hdrLookEnabled = false
+        var journal = ChangeJournal()
+        journal.record(target: target, value: .look(off), baseRev: 3,
+                       deviceID: "mac-1")
+
+        let restored = try JSONDecoder().decode(
+            ChangeJournal.self,
+            from: JSONEncoder().encode(journal))
+        let pending = try XCTUnwrap(restored.entry(target: target, group: .photoLook))
+        XCTAssertEqual(pending.value, .look(off))
+
+        var mutable = restored
+        let record = try XCTUnwrap(mutable.resolveConflict(
+            target: target, group: .photoLook, supersededBy: "ios-2"))
+        XCTAssertEqual(record.localValue, .look(off),
+                       "conflict recovery must not lose disabled look settings")
+    }
+
     func testRestoreAsNewMutationOnCurrentRev() {
         var j = ChangeJournal()
         j.record(target: target, value: .look(look(0.7)), baseRev: 3, deviceID: "mac-1")

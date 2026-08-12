@@ -277,9 +277,6 @@ struct ContentView: View {
                         .foregroundStyle(Theme.gold)
                         .lineLimit(1)
                 }
-                Text("Turn your SDR JPEG into an UltraHDR that glows on HDR screens — clean fallback everywhere else.")
-                    .font(Theme.ui(12.5))
-                    .foregroundStyle(Theme.stoneDim)
             }
             ZStack {
                 GainmapEmblem()
@@ -496,15 +493,13 @@ struct ContentView: View {
         HStack(spacing: 11) {
             Image(systemName: "checkmark.seal.fill")
                 .font(.system(size: 17)).foregroundStyle(Theme.gold)
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
-                Text("Saved beside the original · Re-save replaces it")
+                Text("Saved")
                     .font(Theme.ui(11.5, .medium)).foregroundStyle(.white)
                 Text(item.outputURL?.lastPathComponent ?? "—")
                     .font(Theme.mono(9.5)).foregroundStyle(Theme.stoneDim)
                     .lineLimit(1).truncationMode(.middle)
-                Text("Glows on HDR screens & apps (Photos, iOS, Android 14+); everywhere else shows the clean SDR.")
-                    .font(Theme.ui(9.5)).foregroundStyle(Theme.stoneDim)
-                    .fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 8)
             if let r = item.readout {
@@ -520,6 +515,19 @@ struct ContentView: View {
         .padding(13)
         .background(Theme.gold.opacity(0.08), in: RoundedRectangle(cornerRadius: 11))
         .overlay(RoundedRectangle(cornerRadius: 11).stroke(Theme.gold.opacity(0.3), lineWidth: 1))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(savedStripAccessibilityLabel(item))
+    }
+
+    private func savedStripAccessibilityLabel(_ item: MergeModel.BatchItem) -> String {
+        let filename = item.outputURL?.lastPathComponent ?? "output file"
+        guard let readout = item.readout else { return "Saved \(filename)." }
+        return String(
+            format: "Saved %@. Peak boost %.2f times. Target %d nits. %.2f stops headroom.",
+            filename,
+            readout.peakBoost,
+            readout.targetNits,
+            readout.stops)
     }
 
     private func revealSelected() {

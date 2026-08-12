@@ -13,6 +13,7 @@ import SwiftUI
 import Photos
 import UniformTypeIdentifiers
 import UIKit
+import GainmapCore
 
 struct PhotoExportShareSheet: UIViewControllerRepresentable {
     typealias Completion = (
@@ -41,9 +42,17 @@ struct PhotoExportShareSheet: UIViewControllerRepresentable {
                 onPhotoLibraryFailure?(error)
             }
         }
+        // A raw URL can be exposed to extensions as a generic `public.file-url`.
+        // Instagram's Story/message routes tolerate that, but its Feed importer
+        // can fall back to an empty picker. Give every receiving extension a
+        // file-backed `public.jpeg` instead. The registered representation is
+        // still the original file, so no UltraHDR bytes are re-encoded.
+        let providers = JPEGShareItemProviderFactory.make(urls: urls)
+        let configuration = UIActivityItemsConfiguration(
+            itemProviders: providers)
+        configuration.applicationActivitiesProvider = { [saveActivity] }
         let controller = UIActivityViewController(
-            activityItems: urls,
-            applicationActivities: [saveActivity])
+            activityItemsConfiguration: configuration)
         controller.completionWithItemsHandler = {
             activityType, completed, _, error in
             onCompletion?(activityType, completed, error)

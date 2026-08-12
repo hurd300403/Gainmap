@@ -229,6 +229,39 @@ final class UHDRRunnerTests: XCTestCase {
         XCTAssertFalse(json.contains("autoAdapt"))
     }
 
+    func testDisabledLookRoundTripsPreservedDialsButLegacyFieldsAreNeutral() throws {
+        var p = AutoHDR.signatureLook
+        p.glow = 1.37
+        p.headroom = 2.4
+        p.bakeGlowIntoSDR = true
+        p.hdrLookEnabled = false
+
+        let data = try JSONEncoder().encode(p)
+        let raw = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(raw["hdrLookEnabled"] as? Bool, false)
+        XCTAssertEqual(try XCTUnwrap(raw["glow"] as? Double), 0, accuracy: 1e-9)
+        XCTAssertEqual(try XCTUnwrap(raw["headroom"] as? Double), 1, accuracy: 1e-9)
+        XCTAssertEqual(raw["bakeGlowIntoSDR"] as? Bool, false,
+                       "an older client must not bake the hidden look")
+        let saved = try XCTUnwrap(raw["preservedLook"] as? [String: Any])
+        XCTAssertEqual(try XCTUnwrap(saved["glow"] as? Double), 1.37, accuracy: 1e-9)
+        XCTAssertEqual(try XCTUnwrap(saved["headroom"] as? Double), 2.4, accuracy: 1e-9)
+        XCTAssertEqual(saved["bakeGlowIntoSDR"] as? Bool, true)
+
+        let back = try JSONDecoder().decode(AutoHDR.BloomParams.self, from: data)
+        XCTAssertEqual(back, p, "a current client restores every hidden dial")
+    }
+
+    func testMissingHDRLookFlagDefaultsToOn() throws {
+        let legacy = """
+        {"glow":0.9,"headroom":1.6,"bakeGlowIntoSDR":true}
+        """.data(using: .utf8)!
+        let p = try JSONDecoder().decode(AutoHDR.BloomParams.self, from: legacy)
+        XCTAssertTrue(p.hdrLookEnabled)
+        XCTAssertEqual(p.glow, 0.9, accuracy: 1e-9)
+        XCTAssertTrue(p.bakeGlowIntoSDR)
+    }
+
     // MARK: Live preview responds to the slider
 
     /// The proxy preview IS AutoHDR.bloomCIImage (the exact graph the export
@@ -251,6 +284,19 @@ final class UHDRRunnerTests: XCTestCase {
         let low = mean(try XCTUnwrap(AutoHDR.bloomCIImage(base: base, params: subtle)))
         let high = mean(try XCTUnwrap(AutoHDR.bloomCIImage(base: base, params: visible)))
         XCTAssertGreaterThan(high, low + 0.01, "look params must visibly affect the live preview")
+    }
+
+    func testDisabledLookPreviewIsExactBaseBypass() throws {
+        let base = CIImage(color: CIColor(red: 0.72, green: 0.4, blue: 0.18))
+            .cropped(to: CGRect(x: 0, y: 0, width: 32, height: 32))
+        var p = AutoHDR.signatureLook
+        p.glow = 1.5
+        p.headroom = 3
+        p.bakeGlowIntoSDR = true
+        p.hdrLookEnabled = false
+
+        let out = try XCTUnwrap(AutoHDR.bloomCIImage(base: base, params: p))
+        XCTAssertTrue(out === base, "OFF should return the untouched preview image")
     }
 
     /// Mean brightness of a CIImage via CIAreaAverage → 1×1 readback.

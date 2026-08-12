@@ -144,7 +144,9 @@ final class PreviewRenderer: ObservableObject {
                  sourceRevision: Int = 0) {
         // Stash the latest inputs so a base-load that finishes later renders with
         // CURRENT params, not whatever they were when the load kicked off.
-        curParams = params; curBake = bake
+        curParams = params
+        // The master bypass also suppresses an otherwise remembered SDR bake.
+        curBake = params.hdrLookEnabled && bake
         generation &+= 1
         guard let sdr else {
             loadTask?.cancel(); accurateTask?.cancel()

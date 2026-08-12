@@ -25,6 +25,7 @@ public struct LookControlsPanel: View {
     @ObservedObject var model: MergeModel
     let advancedStyle: AdvancedStyle
     @State private var selectedGroup = "glow"
+    @State private var confirmSameLook = false
     /// Turning GLOW IN SDR on opens an explainer first (so the brighter/blown
     /// SDR fallback doesn't surprise anyone) — the host app owns that modal.
     var onGlowInSDRInfo: () -> Void
@@ -55,43 +56,81 @@ public struct LookControlsPanel: View {
         Binding(get: { model.intensity }, set: { model.setIntensity($0) })
     }
 
+    private var sameLookBinding: Binding<Bool> {
+        Binding(get: { model.sameLookForAll }, set: { on in
+            if on && model.needsSameLookForAllConfirmation {
+                confirmSameLook = true
+            } else {
+                model.setSameLookForAll(on)
+            }
+        })
+    }
+
     public var body: some View {
         VStack(spacing: 13) {
             HStack(spacing: 12) {
-                Text("HDR LOOK").font(Theme.mono(11, .semibold)).tracking(2).foregroundStyle(Theme.gold)
-                Spacer()
-                if !model.sameLookForAll {
-                    Button("Copy") { model.copyLook() }
-                        .buttonStyle(.plain)
-                        .font(Theme.mono(10, .semibold)).foregroundStyle(Theme.stoneDim)
-                        .help("Copy this photo's look")
-                    Button("Paste") { model.pasteLook() }
-                        .buttonStyle(.plain)
-                        .font(Theme.mono(10, .semibold))
-                        .foregroundStyle(model.canPaste ? Theme.stone : Theme.stoneFaint)
-                        .disabled(!model.canPaste)
-                        .help("Paste the copied look onto this photo")
+                Text("HDR LOOK").font(Theme.mono(11, .semibold)).tracking(2)
+                    .foregroundStyle(model.bloom.hdrLookEnabled ? Theme.gold : Theme.stoneDim)
+                Button {
+                    model.setHDRLookEnabled(!model.bloom.hdrLookEnabled)
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "power")
+                            .font(.system(size: 9, weight: .bold))
+                        Text(model.bloom.hdrLookEnabled ? "ON" : "OFF")
+                            .font(Theme.mono(9.5, .bold)).tracking(0.7)
+                    }
+                    .foregroundStyle(model.bloom.hdrLookEnabled ? Theme.gold : Theme.stone)
+                    .padding(.horizontal, 9).padding(.vertical, 5)
+                    .background(model.bloom.hdrLookEnabled
+                                ? Theme.gold.opacity(0.10) : Theme.inset,
+                                in: Capsule())
+                    .overlay(Capsule().stroke(model.bloom.hdrLookEnabled
+                                              ? Theme.gold.opacity(0.5) : Theme.line,
+                                              lineWidth: 1))
+                    .contentShape(Capsule())
                 }
-                Button("Reset") { model.resetToDefault() }
-                    .buttonStyle(.plain)
-                    .font(Theme.mono(10, .semibold)).foregroundStyle(Theme.stone)
-                    .help("Snap this photo back to your default look (set it under Advanced controls ▸ Save as default).")
+                .buttonStyle(.plain)
+                .help(model.bloom.hdrLookEnabled
+                      ? "Turn off the HDR look. Your settings stay saved."
+                      : "Restore the saved HDR look.")
+                .accessibilityLabel(model.bloom.hdrLookEnabled
+                                    ? "HDR Look on" : "HDR Look off")
+                Spacer()
+                HStack(spacing: 12) {
+                    if !model.sameLookForAll {
+                        Button("Copy") { model.copyLook() }
+                            .buttonStyle(.plain)
+                            .font(Theme.mono(10, .semibold)).foregroundStyle(Theme.stoneDim)
+                            .help("Copy this photo's look")
+                        Button("Paste") { model.pasteLook() }
+                            .buttonStyle(.plain)
+                            .font(Theme.mono(10, .semibold))
+                            .foregroundStyle(model.canPaste ? Theme.stone : Theme.stoneFaint)
+                            .disabled(!model.canPaste)
+                            .help("Paste the copied look onto this photo")
+                    }
+                    Button("Reset") { model.resetToDefault() }
+                        .buttonStyle(.plain)
+                        .font(Theme.mono(10, .semibold)).foregroundStyle(Theme.stone)
+                        .help("Snap this photo back to your default look (set it under Advanced controls ▸ Save as default).")
+                }
+                .disabled(!model.bloom.hdrLookEnabled)
+                .opacity(model.bloom.hdrLookEnabled ? 1 : 0.38)
             }
 
             // SAME LOOK FOR ALL — reframes the whole slider stack from
-            // this-photo to whole-queue. Per-photo looks are kept and come back
-            // when it's turned off. With one photo there is no "all", so don't
-            // spend scarce editor space on a control that cannot change scope.
+            // this-photo to whole-queue. With one photo there is no "all", so
+            // don't spend scarce editor space on a control that cannot change scope.
             if model.items.count > 1 {
                 HStack(spacing: 10) {
-                    Toggle(isOn: Binding(get: { model.sameLookForAll },
-                                         set: { model.setSameLookForAll($0) })) {
+                    Toggle(isOn: sameLookBinding) {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("SAME LOOK FOR ALL")
                                 .font(Theme.mono(10, .semibold)).tracking(1.5)
                                 .foregroundStyle(model.sameLookForAll ? Theme.gold : Theme.stone)
-                            Text(model.sameLookForAll ? "one look, every photo — the sliders edit the whole queue"
-                                                      : "each photo keeps its own look")
+                            Text(model.sameLookForAll ? "All photos use this look"
+                                                      : "Each photo has its own look")
                                 .font(Theme.mono(9)).foregroundStyle(Theme.stoneDim)
                         }
                     }
@@ -99,7 +138,7 @@ public struct LookControlsPanel: View {
                     .controlSize(.small)
                     .tint(Theme.gold)
                     .disabled(model.isExportingAll)
-                    .help("One look for the whole queue. Per-photo looks are kept and come back when you turn this off; photos you never touched keep inheriting the latest look.")
+                    .help("Use the current look on every photo. Turn it off to edit photos independently from that shared starting point.")
                     Spacer(minLength: 0)
                 }
                 .padding(.vertical, 9).padding(.horizontal, 12)
@@ -109,99 +148,103 @@ public struct LookControlsPanel: View {
                     .stroke(model.sameLookForAll ? Theme.gold.opacity(0.35) : Theme.line, lineWidth: 1))
             }
 
-            // The one slider most people ever touch: blend the signature look from
-            // subtle to full.
-            sliderRow("INTENSITY", intensityBinding, 0...1, fmt: "%.0f%%", "subtle", "full", scale: 100,
-                      resetTo: 1.0,
-                      help: "Overall strength of the HDR pop. Slide down for a subtle effect, up for full punch — it blends all the Advanced settings at once.")
+            VStack(spacing: 13) {
+                // The one slider most people ever touch: blend the signature look from
+                // subtle to full.
+                sliderRow("INTENSITY", intensityBinding, 0...1, fmt: "%.0f%%", "subtle", "full", scale: 100,
+                          resetTo: 1.0,
+                          help: "Overall strength of the HDR pop. Slide down for a subtle effect, up for full punch — it blends all the Advanced settings at once.")
 
-            // Teaser for the headline per-photo option, otherwise buried three
-            // levels deep (Advanced ▸ HDR & Screens ▸ toggle).
-            Button {
-                withAnimation(.easeOut(duration: 0.22)) {
-                    showAdvancedLook = true
-                    expandedGroups.insert("hdr")
-                }
-            } label: {
-                HStack(spacing: 5) {
-                    Image(systemName: model.bloom.bakeGlowIntoSDR ? "sun.max.fill" : "sun.max")
-                        .font(.system(size: 9))
-                    Text(model.bloom.bakeGlowIntoSDR
-                         ? (model.sameLookForAll ? "Glow in SDR is ON for all photos"
-                                                 : "Glow in SDR is ON for this photo")
-                         : "Want the glow on non-HDR screens too?")
-                        .font(Theme.mono(9.5))
-                }
-                .foregroundStyle(model.bloom.bakeGlowIntoSDR ? Theme.gold : Theme.stoneDim)
-            }
-            .buttonStyle(.plain)
-            .help("Opens Advanced controls ▸ HDR & Screens, where GLOW IN SDR lives")
-            .frame(maxWidth: .infinity, alignment: .leading)
-
-            Divider().overlay(Theme.line)
-            Button(action: { withAnimation(.easeOut(duration: 0.22)) { showAdvancedLook.toggle() } }) {
-                HStack(spacing: 8) {
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 9, weight: .bold))
-                        .rotationEffect(.degrees(showAdvancedLook ? 90 : 0))
-                    Text("Advanced controls")
-                        .font(Theme.mono(10, .semibold)).tracking(1.5)
-                    Spacer()
-                }
-                .foregroundStyle(Theme.stoneDim)
-            }
-            .buttonStyle(.plain)
-
-            if showAdvancedLook {
-                // The saved "default look" the top "Reset" (and double-click) snap back
-                // to. Real boxed buttons so it's obviously clickable; left-justified
-                // with an inline caption so it doesn't waste the row's width.
-                HStack(spacing: 9) {
-                    boxedButton(model.hasCustomDefault ? "Update default" : "Save as default",
-                                tint: Theme.gold) {
-                        model.setSignatureFromCurrent()
+                // Teaser for the headline per-photo option, otherwise buried three
+                // levels deep (Advanced ▸ HDR & Screens ▸ toggle).
+                Button {
+                    withAnimation(.easeOut(duration: 0.22)) {
+                        showAdvancedLook = true
+                        expandedGroups.insert("hdr")
                     }
-                    .help("Make the current look your default — the 100% Intensity preset and what “Reset” (and double-clicking a slider) snaps back to. Kept across launches.")
-                    if model.hasCustomDefault {
-                        boxedButton("Restore app default", tint: Theme.stoneDim) {
-                            model.restoreBuiltInDefault()
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: model.bloom.bakeGlowIntoSDR ? "sun.max.fill" : "sun.max")
+                            .font(.system(size: 9))
+                        Text(model.bloom.bakeGlowIntoSDR
+                             ? (model.sameLookForAll ? "Glow in SDR is ON for all photos"
+                                                     : "Glow in SDR is ON for this photo")
+                             : "Want the glow on non-HDR screens too?")
+                            .font(Theme.mono(9.5))
+                    }
+                    .foregroundStyle(model.bloom.bakeGlowIntoSDR ? Theme.gold : Theme.stoneDim)
+                }
+                .buttonStyle(.plain)
+                .help("Opens Advanced controls ▸ HDR & Screens, where GLOW IN SDR lives")
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                Divider().overlay(Theme.line)
+                Button(action: { withAnimation(.easeOut(duration: 0.22)) { showAdvancedLook.toggle() } }) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 9, weight: .bold))
+                            .rotationEffect(.degrees(showAdvancedLook ? 90 : 0))
+                        Text("Advanced controls")
+                            .font(Theme.mono(10, .semibold)).tracking(1.5)
+                        Spacer()
+                    }
+                    .foregroundStyle(Theme.stoneDim)
+                }
+                .buttonStyle(.plain)
+
+                if showAdvancedLook {
+                    // The saved "default look" the top "Reset" (and double-click) snap back
+                    // to. Real boxed buttons so it's obviously clickable; left-justified
+                    // with an inline caption so it doesn't waste the row's width.
+                    HStack(spacing: 9) {
+                        boxedButton(model.hasCustomDefault ? "Update default" : "Save as default",
+                                    tint: Theme.gold) {
+                            model.setSignatureFromCurrent()
                         }
-                        .help("Replace your saved default with the look Gainmap originally shipped with. “Reset” will then snap to that.")
-                    } else {
-                        // "Reset" tinted to match the actual Reset button (accentHot).
-                        (Text("what ").foregroundStyle(Theme.stoneDim)
-                         + Text("“Reset”").foregroundStyle(Theme.accentHot)
-                         + Text(" snaps to").foregroundStyle(Theme.stoneDim))
-                            .font(Theme.mono(8.5))
-                    }
-                    Spacer(minLength: 0)
-                }
-
-                switch advancedStyle {
-                case .accordion:
-                    lookGroup("glow", "THE GLOW", "how the highlights bloom") { glowControls }
-                    lookGroup("color", "COLOR", "the color of that light") { colorControls }
-                    lookGroup("hdr", "HDR & SCREENS", "how it shows across displays") { hdrControls }
-                case .tabbed:
-                    Picker("", selection: $selectedGroup) {
-                        Text("THE GLOW").tag("glow")
-                        Text("COLOR").tag("color")
-                        Text("HDR").tag("hdr")
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                    VStack(spacing: 4) {
-                        switch selectedGroup {
-                        case "color": colorControls
-                        case "hdr": hdrControls
-                        default: glowControls
+                        .help("Make the current look your default — the 100% Intensity preset and what “Reset” (and double-clicking a slider) snaps back to. Kept across launches.")
+                        if model.hasCustomDefault {
+                            boxedButton("Restore app default", tint: Theme.stoneDim) {
+                                model.restoreBuiltInDefault()
+                            }
+                            .help("Replace your saved default with the look Gainmap originally shipped with. “Reset” will then snap to that.")
+                        } else {
+                            // "Reset" tinted to match the actual Reset button (accentHot).
+                            (Text("what ").foregroundStyle(Theme.stoneDim)
+                             + Text("“Reset”").foregroundStyle(Theme.accentHot)
+                             + Text(" snaps to").foregroundStyle(Theme.stoneDim))
+                                .font(Theme.mono(8.5))
                         }
+                        Spacer(minLength: 0)
                     }
-                    .padding(12)
-                    .background(Theme.inset, in: RoundedRectangle(cornerRadius: 10))
-                    .overlay(RoundedRectangle(cornerRadius: 10).stroke(Theme.line, lineWidth: 1))
+
+                    switch advancedStyle {
+                    case .accordion:
+                        lookGroup("glow", "THE GLOW", "how the highlights bloom") { glowControls }
+                        lookGroup("color", "COLOR", "the color of that light") { colorControls }
+                        lookGroup("hdr", "HDR & SCREENS", "how it shows across displays") { hdrControls }
+                    case .tabbed:
+                        Picker("", selection: $selectedGroup) {
+                            Text("THE GLOW").tag("glow")
+                            Text("COLOR").tag("color")
+                            Text("HDR").tag("hdr")
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        VStack(spacing: 4) {
+                            switch selectedGroup {
+                            case "color": colorControls
+                            case "hdr": hdrControls
+                            default: glowControls
+                            }
+                        }
+                        .padding(12)
+                        .background(Theme.inset, in: RoundedRectangle(cornerRadius: 10))
+                        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Theme.line, lineWidth: 1))
+                    }
                 }
             }
+            .disabled(!model.bloom.hdrLookEnabled)
+            .opacity(model.bloom.hdrLookEnabled ? 1 : 0.38)
         }
         .padding(16)
         .background(Theme.surface.opacity(0.5), in: RoundedRectangle(cornerRadius: 12))
@@ -209,6 +252,12 @@ public struct LookControlsPanel: View {
         .onChange(of: expandedGroups) { _, groups in
             // The GLOW-IN-SDR teaser inserts "hdr" — mirror it onto the tab.
             if advancedStyle == .tabbed, groups.contains("hdr") { selectedGroup = "hdr" }
+        }
+        .alert("Use this look for every photo?", isPresented: $confirmSameLook) {
+            Button("Cancel", role: .cancel) {}
+            Button("Apply to All") { model.setSameLookForAll(true) }
+        } message: {
+            Text("Photos have different looks. This replaces them with the current look.")
         }
     }
 

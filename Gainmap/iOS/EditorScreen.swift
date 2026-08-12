@@ -642,7 +642,10 @@ struct EditorScreen: View {
                 onCancel: {
                     finishInstagramShareGuide(continueSharing: false)
                 })
-                .presentationDetents([.medium, .large])
+                // Open at full height. The guide still scrolls on smaller
+                // phones, but its illustration no longer appears to disappear
+                // underneath the fixed action footer at the medium detent.
+                .presentationDetents([.large])
                 .presentationDragIndicator(.visible)
                 .presentationBackground(Theme.bgDeep)
         }
@@ -871,7 +874,7 @@ struct EditorScreen: View {
                 notice = EditorNotice(
                     title: "Session changed",
                     message: "The filmstrip changed while the Instagram guide "
-                        + "was open. Tap Share Session again so Gainmap can "
+                        + "was open. Tap Share Session to Instagram again to "
                         + "recheck the photo shapes.")
                 return
             }
@@ -893,13 +896,10 @@ struct EditorScreen: View {
                         Image(systemName: "square.stack.3d.up")
                             .font(.system(size: 12, weight: .semibold))
                     }
-                    Text("SHARE SESSION")
-                        .font(Theme.mono(10, .bold))
-                        .tracking(1.2)
+                    Text("SHARE SESSION TO INSTAGRAM")
+                        .font(Theme.mono(9, .bold))
+                        .tracking(0.85)
                     Spacer()
-                    Text("\(model.items.count) PHOTOS")
-                        .font(Theme.mono(8, .semibold))
-                        .foregroundStyle(Theme.stoneDim)
                 }
                 .foregroundStyle(Theme.accent)
                 .padding(.horizontal, 12)
@@ -915,26 +915,29 @@ struct EditorScreen: View {
             .buttonStyle(.plain)
             .disabled(sessionShareBusy)
             .opacity(sessionShareBusy ? 0.48 : 1)
+            .accessibilityLabel(
+                "Share session to Instagram, \(model.items.count) photos")
 
-            Text(sessionShareHelpCopy)
-                .font(Theme.mono(8))
-                .foregroundStyle(Theme.stoneDim)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            if let sessionShareProgressCopy {
+                Text(sessionShareProgressCopy)
+                    .font(Theme.mono(8))
+                    .foregroundStyle(Theme.stoneDim)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
         }
         .padding(.top, 2)
     }
 
-    private var sessionShareHelpCopy: String {
+    private var sessionShareProgressCopy: String? {
         if instagramAspectAssessmentRunning {
-            return "Checking photo shapes before Instagram opens…"
+            return "Checking photo shapes…"
         }
         if sessionShareBusy {
             return sessionShareRunning
-                ? "Hydrating and exporting every photo in filmstrip order…"
-                : "Wait for the current import, download, or export to finish."
+                ? "Preparing \(model.items.count) photos…"
+                : "Finish the current task first."
         }
-        return "Exports every photo in filmstrip order. Gainmap flags mixed "
-            + "photo shapes before Instagram opens."
+        return nil
     }
 
     // ------------------------------------------------------------- preview data
@@ -1715,6 +1718,7 @@ private struct InstagramShareGuide: View {
     let mixedAspectAssessment: InstagramAspectAssessment?
     @Binding var suppressPinningTip: Bool
     @Binding var suppressMixedAspectTip: Bool
+    @State private var showsScrollHint = true
     let onContinue: () -> Void
     let onCancel: () -> Void
 
@@ -1725,27 +1729,24 @@ private struct InstagramShareGuide: View {
     private var title: String {
         switch (showsPinningTip, showsMixedAspectTip) {
         case (true, true):
-            return "Share without surprises"
+            return "Before Instagram opens"
         case (true, false):
-            return "Keep Instagram within reach"
+            return "Keep Instagram handy"
         case (false, true):
-            return "Keep every photo’s shape"
+            return "Keep each photo’s shape"
         case (false, false):
-            return "Share Session"
+            return "Share to Instagram"
         }
     }
 
     private var introduction: String {
         switch (showsPinningTip, showsMixedAspectTip) {
         case (true, true):
-            return "Two quick Instagram choices keep the app easy to find "
-                + "and this mixed-shape carousel framed correctly."
+            return "Favorite Instagram once. Then choose Mixed for this carousel."
         case (true, false):
-            return "iOS chooses the app row. If Instagram isn’t already "
-                + "visible, favorite it once so it stays easy to find."
+            return "If it isn’t in the share row, favorite it once."
         case (false, true):
-            return "Gainmap found different photo shapes in this session. "
-                + "Choose Mixed in Instagram to preserve them."
+            return "Different shapes found. Choose Mixed in Instagram."
         case (false, false):
             return ""
         }
@@ -1786,9 +1787,38 @@ private struct InstagramShareGuide: View {
                 }
                 .padding(.horizontal, 20)
                 .padding(.top, 22)
-                .padding(.bottom, 18)
+                .padding(.bottom, 34)
             }
-            .scrollIndicators(.hidden)
+            .scrollIndicators(.visible)
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 4)
+                    .onChanged { _ in
+                        guard showsScrollHint else { return }
+                        withAnimation(.easeOut(duration: 0.18)) {
+                            showsScrollHint = false
+                        }
+                    }
+            )
+            .overlay(alignment: .bottom) {
+                if showsScrollHint {
+                    // The initial edge fade and chevron make the remaining
+                    // content discoverable, then disappear after the first swipe.
+                    LinearGradient(
+                        colors: [Theme.bgDeep.opacity(0), Theme.bgDeep],
+                        startPoint: .top,
+                        endPoint: .bottom)
+                        .frame(height: 28)
+                        .overlay(alignment: .bottom) {
+                            Image(systemName: "chevron.down")
+                                .font(.caption2.weight(.bold))
+                                .foregroundStyle(Theme.gold.opacity(0.8))
+                                .padding(.bottom, 2)
+                        }
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
+                        .transition(.opacity)
+                }
+            }
 
             Divider()
                 .overlay(Theme.line)
@@ -1796,7 +1826,7 @@ private struct InstagramShareGuide: View {
             VStack(spacing: 10) {
                 if showsPinningTip {
                     Toggle(
-                        "Don’t show the Instagram shortcut tip again",
+                        "Hide this shortcut tip next time",
                         isOn: $suppressPinningTip)
                         .font(.subheadline)
                         .foregroundStyle(Theme.stone)
@@ -1805,7 +1835,7 @@ private struct InstagramShareGuide: View {
 
                 if showsMixedAspectTip {
                     Toggle(
-                        "Don’t warn me about mixed photo shapes again",
+                        "Hide mixed-shape warnings",
                         isOn: $suppressMixedAspectTip)
                         .font(.subheadline)
                         .foregroundStyle(Theme.stone)
@@ -1813,7 +1843,7 @@ private struct InstagramShareGuide: View {
                 }
 
                 Button(action: onContinue) {
-                    Label("CONTINUE TO SHARE", systemImage: "arrow.up.forward.app")
+                    Label("CONTINUE", systemImage: "arrow.up.forward.app")
                         .font(.headline)
                         .frame(maxWidth: .infinity, minHeight: 48)
                         .foregroundStyle(Color.white)
@@ -1827,7 +1857,7 @@ private struct InstagramShareGuide: View {
                                 style: .continuous))
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("Continue to share session")
+                .accessibilityLabel("Continue to share session to Instagram")
 
                 Button("Not Now", action: onCancel)
                     .font(.body.weight(.semibold))
@@ -1846,32 +1876,16 @@ private struct InstagramShareGuide: View {
 
     @ViewBuilder
     private var instagramPinningSection: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            sectionLabel("KEEP INSTAGRAM CLOSE", symbol: "star")
+        VStack(alignment: .leading, spacing: 12) {
+            sectionLabel("FAVORITE INSTAGRAM", symbol: "star")
 
             InstagramPinningIllustration()
 
-            VStack(alignment: .leading, spacing: 13) {
-                InstagramGuideStep(
-                    number: 1,
-                    title: "Open More",
-                    detail: "Swipe the share app row left and tap More.")
-                InstagramGuideStep(
-                    number: 2,
-                    title: "Choose Edit",
-                    detail: "Tap Edit at the top of the activity list.")
-                InstagramGuideStep(
-                    number: 3,
-                    title: "Favorite Instagram",
-                    detail: "Tap + beside Instagram, then drag it near "
-                        + "the top of Favorites.")
-            }
-
-            Text(
-                "If Instagram is already in the app row, there’s nothing "
-                    + "to change—just continue.")
-                .font(.footnote)
-                .foregroundStyle(Theme.stone.opacity(0.64))
+            Label(
+                "Swipe left → More → Edit → + Instagram",
+                systemImage: "hand.draw")
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(Theme.stone.opacity(0.78))
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -1880,52 +1894,27 @@ private struct InstagramShareGuide: View {
     private func instagramMixedAspectSection(
         _ assessment: InstagramAspectAssessment
     ) -> some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: 12) {
             sectionLabel("MIXED SHAPES DETECTED", symbol: "aspectratio")
-
-            Text(
-                "This \(assessment.totalPhotoCount)-photo session contains "
-                    + "different aspect ratios. In Instagram’s carousel "
-                    + "preview, use the control at the lower left.")
-                .font(.body)
-                .foregroundStyle(Theme.stone.opacity(0.78))
-                .fixedSize(horizontal: false, vertical: true)
 
             InstagramMixedAspectIllustration()
 
-            VStack(alignment: .leading, spacing: 13) {
-                InstagramGuideStep(
-                    number: 1,
-                    title: "Open the aspect menu",
-                    detail: "Tap the resize button at the lower left of "
-                        + "Instagram’s carousel preview.")
-                InstagramGuideStep(
-                    number: 2,
-                    title: "Choose Mixed",
-                    detail: "Mixed lets each slide keep its own shape.")
-                InstagramGuideStep(
-                    number: 3,
-                    title: "Check every slide",
-                    detail: "Swipe through the carousel and verify framing "
-                        + "and filmstrip order before posting.")
-            }
+            Label(
+                "Tap the lower-left resize button, then Mixed.",
+                systemImage: "aspectratio")
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(Theme.stone.opacity(0.78))
+                .fixedSize(horizontal: false, vertical: true)
 
             if assessment.hasPhotoOutsideDocumentedRange {
                 Label(
-                    "At least one photo is outside Instagram’s documented "
-                        + "3:4–1.91:1 feed range, so it may still be cropped.",
+                    "Some photos fall outside Instagram’s 3:4–1.91:1 range.",
                     systemImage: "exclamationmark.triangle")
                     .font(.footnote)
                     .foregroundStyle(Theme.gold.opacity(0.9))
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            Text(
-                "If Mixed is missing or any slide still looks cropped, "
-                    + "cancel instead of publishing.")
-                .font(.footnote)
-                .foregroundStyle(Theme.stone.opacity(0.64))
-                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -2201,34 +2190,6 @@ private struct InstagramMixedAspectIllustration: View {
         }
         .padding(.horizontal, 12)
         .frame(height: 38)
-    }
-}
-
-private struct InstagramGuideStep: View {
-    let number: Int
-    let title: String
-    let detail: String
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            Text("\(number)")
-                .font(.subheadline.weight(.bold))
-                .foregroundStyle(Theme.bgDeep)
-                .frame(width: 28, height: 28)
-                .background(Theme.gold, in: Circle())
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(Theme.stone)
-                Text(detail)
-                    .font(.subheadline)
-                    .foregroundStyle(Theme.stone.opacity(0.72))
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Step \(number). \(title). \(detail)")
     }
 }
 

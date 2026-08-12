@@ -67,6 +67,24 @@ final class SessionPersistenceTests: XCTestCase {
         XCTAssertEqual(back.photos[0].readout?.targetNits, 507)
     }
 
+    func testDisabledHDRLookSurvivesSessionStoreWithHiddenDials() async throws {
+        let store = FileSessionStore(root: root)
+        var look = AutoHDR.signatureLook
+        look.glow = 1.31
+        look.headroom = 2.2
+        look.bakeGlowIntoSDR = true
+        look.hdrLookEnabled = false
+        let session = Session(
+            runningLook: look,
+            photos: [PhotoRecord(origin: .linked(path: "/x/off.jpg"), look: look)])
+
+        try await store.save(session)
+        let loaded = await store.load(id: session.id)
+        let back = try XCTUnwrap(loaded)
+        XCTAssertEqual(back.runningLook, look)
+        XCTAssertEqual(back.photos.first?.look, look)
+    }
+
     func testLegacyWholeSecondSessionDatesStillLoad() async throws {
         let store = FileSessionStore(root: root)
         let legacy = Session(title: "Legacy Date")

@@ -80,6 +80,9 @@ public enum AutoHDR {
     /// The full set of dials for the bloom-as-HDR look.
     public struct BloomParams: Equatable, Codable, Sendable {
         public init() {}
+        /// Master creative-look switch. Dial values remain intact while off so
+        /// turning the look back on restores it exactly.
+        public var hdrLookEnabled: Bool = true
         public var glow: Double = 0.40        // bloom intensity (0…1.5)
         public var threshold: Double = 0.58   // highlight cutoff, gamma 0…1 (lower = more glows)
         public var spread: Double = 0.006     // blur radius as fraction of width (halo size)
@@ -247,6 +250,9 @@ public enum AutoHDR {
     /// so the two are guaranteed identical. `base` is the sRGB source; spread scales
     /// with its width.
     public static func bloomCIImage(base: CIImage, params p: BloomParams) -> CIImage? {
+        // OFF is an exact visual bypass. The export can still carry a neutral
+        // gain map without applying any of the creative HDR treatment.
+        guard p.hdrLookEnabled else { return base }
         guard let pieces = bloomPieces(base: base, params: p) else { return nil }
         return combineKernel.apply(
             extent: base.extent,
@@ -260,6 +266,7 @@ public enum AutoHDR {
     /// sharp component brightens the highlights themselves, which is exactly the
     /// overexposed look the bake must avoid) and minus headroom/peak.
     static func sdrWithBakedGlow(base: CIImage, params p: BloomParams) -> CIImage? {
+        guard p.hdrLookEnabled else { return base }
         guard let pieces = bloomPieces(base: base, params: p) else { return nil }
         return sdrGlowBakeKernel.apply(
             extent: base.extent,
@@ -339,31 +346,94 @@ public enum AutoHDR {
 }
 
 extension AutoHDR.BloomParams {
-    // Tolerant decoder: read every field with a default so older saved looks —
-    // one missing the newer `bakeGlowIntoSDR`, or still carrying the removed AUTO
-    // keys (autoAdapt / adaptAmount / highlightGuard) — decode cleanly instead of
-    // throwing. Swift's synthesized Decodable does NOT fall back to a property's
-    // default value for a missing key (it throws keyNotFound), and
-    // `SignatureStore.load()` swallows that with `try?` → nil → a user's saved
-    // default look would be silently wiped. Encoding stays synthesized (uses these
-    // same keys), so a re-saved look no longer carries the dead AUTO fields.
+    // Tolerant local wire format. When HDR Look is OFF, the legacy top-level
+    // values are neutral and the dialed values live in `preservedLook`. Thus a
+    // build that predates the switch safely renders no look instead of ignoring
+    // the new flag and applying the hidden full-strength settings.
     private enum CodingKeys: String, CodingKey {
+        case hdrLookEnabled, preservedLook
         case glow, threshold, spread, punch, peak, falloff, saturation, tint, headroom, bakeGlowIntoSDR
+    }
+
+    private enum PreservedCodingKeys: String, CodingKey {
+        case glow, threshold, spread, punch, peak, falloff, saturation, tint, headroom, bakeGlowIntoSDR
+    }
+
+    /// Values an older client may safely render while the switch is OFF.
+    private var legacyNeutralLook: AutoHDR.BloomParams {
+        var p = AutoHDR.BloomParams()
+        p.glow = 0
+        p.punch = 0
+        p.headroom = 1
+        p.bakeGlowIntoSDR = false
+        return p
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(hdrLookEnabled, forKey: .hdrLookEnabled)
+
+        let wire = hdrLookEnabled ? self : legacyNeutralLook
+        try c.encode(wire.glow, forKey: .glow)
+        try c.encode(wire.threshold, forKey: .threshold)
+        try c.encode(wire.spread, forKey: .spread)
+        try c.encode(wire.punch, forKey: .punch)
+        try c.encode(wire.peak, forKey: .peak)
+        try c.encode(wire.falloff, forKey: .falloff)
+        try c.encode(wire.saturation, forKey: .saturation)
+        try c.encode(wire.tint, forKey: .tint)
+        try c.encode(wire.headroom, forKey: .headroom)
+        try c.encode(wire.bakeGlowIntoSDR, forKey: .bakeGlowIntoSDR)
+
+        if !hdrLookEnabled {
+            var saved = c.nestedContainer(keyedBy: PreservedCodingKeys.self,
+                                          forKey: .preservedLook)
+            try saved.encode(glow, forKey: .glow)
+            try saved.encode(threshold, forKey: .threshold)
+            try saved.encode(spread, forKey: .spread)
+            try saved.encode(punch, forKey: .punch)
+            try saved.encode(peak, forKey: .peak)
+            try saved.encode(falloff, forKey: .falloff)
+            try saved.encode(saturation, forKey: .saturation)
+            try saved.encode(tint, forKey: .tint)
+            try saved.encode(headroom, forKey: .headroom)
+            try saved.encode(bakeGlowIntoSDR, forKey: .bakeGlowIntoSDR)
+        }
     }
 
     public init(from decoder: Decoder) throws {
         var p = AutoHDR.BloomParams()
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        p.glow           = try c.decodeIfPresent(Double.self, forKey: .glow)           ?? p.glow
-        p.threshold      = try c.decodeIfPresent(Double.self, forKey: .threshold)      ?? p.threshold
-        p.spread         = try c.decodeIfPresent(Double.self, forKey: .spread)         ?? p.spread
-        p.punch          = try c.decodeIfPresent(Double.self, forKey: .punch)          ?? p.punch
-        p.peak           = try c.decodeIfPresent(Double.self, forKey: .peak)           ?? p.peak
-        p.falloff        = try c.decodeIfPresent(Double.self, forKey: .falloff)        ?? p.falloff
-        p.saturation     = try c.decodeIfPresent(Double.self, forKey: .saturation)     ?? p.saturation
-        p.tint           = try c.decodeIfPresent(Double.self, forKey: .tint)           ?? p.tint
-        p.headroom       = try c.decodeIfPresent(Double.self, forKey: .headroom)       ?? p.headroom
-        p.bakeGlowIntoSDR = try c.decodeIfPresent(Bool.self, forKey: .bakeGlowIntoSDR) ?? p.bakeGlowIntoSDR
+        let enabled = try c.decodeIfPresent(Bool.self, forKey: .hdrLookEnabled) ?? true
+
+        if !enabled, c.contains(.preservedLook) {
+            let saved = try c.nestedContainer(keyedBy: PreservedCodingKeys.self,
+                                              forKey: .preservedLook)
+            p.glow = try saved.decodeIfPresent(Double.self, forKey: .glow) ?? p.glow
+            p.threshold = try saved.decodeIfPresent(Double.self, forKey: .threshold) ?? p.threshold
+            p.spread = try saved.decodeIfPresent(Double.self, forKey: .spread) ?? p.spread
+            p.punch = try saved.decodeIfPresent(Double.self, forKey: .punch) ?? p.punch
+            p.peak = try saved.decodeIfPresent(Double.self, forKey: .peak) ?? p.peak
+            p.falloff = try saved.decodeIfPresent(Double.self, forKey: .falloff) ?? p.falloff
+            p.saturation = try saved.decodeIfPresent(Double.self, forKey: .saturation) ?? p.saturation
+            p.tint = try saved.decodeIfPresent(Double.self, forKey: .tint) ?? p.tint
+            p.headroom = try saved.decodeIfPresent(Double.self, forKey: .headroom) ?? p.headroom
+            p.bakeGlowIntoSDR = try saved.decodeIfPresent(Bool.self, forKey: .bakeGlowIntoSDR)
+                ?? p.bakeGlowIntoSDR
+        } else {
+            p.glow = try c.decodeIfPresent(Double.self, forKey: .glow) ?? p.glow
+            p.threshold = try c.decodeIfPresent(Double.self, forKey: .threshold) ?? p.threshold
+            p.spread = try c.decodeIfPresent(Double.self, forKey: .spread) ?? p.spread
+            p.punch = try c.decodeIfPresent(Double.self, forKey: .punch) ?? p.punch
+            p.peak = try c.decodeIfPresent(Double.self, forKey: .peak) ?? p.peak
+            p.falloff = try c.decodeIfPresent(Double.self, forKey: .falloff) ?? p.falloff
+            p.saturation = try c.decodeIfPresent(Double.self, forKey: .saturation) ?? p.saturation
+            p.tint = try c.decodeIfPresent(Double.self, forKey: .tint) ?? p.tint
+            p.headroom = try c.decodeIfPresent(Double.self, forKey: .headroom) ?? p.headroom
+            p.bakeGlowIntoSDR = try c.decodeIfPresent(Bool.self, forKey: .bakeGlowIntoSDR)
+                ?? p.bakeGlowIntoSDR
+        }
+        p.hdrLookEnabled = enabled
         self = p
     }
 }

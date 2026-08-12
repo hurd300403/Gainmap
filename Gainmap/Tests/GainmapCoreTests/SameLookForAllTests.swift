@@ -5,8 +5,8 @@
 //  The SAME LOOK FOR ALL contract: while ON, one shared look drives every
 //  photo (navigation neither loads nor commits per-photo looks; merges use the
 //  shared look for every item; Export All re-targets done items so the promise
-//  holds); per-photo looks are preserved and restored when turned OFF —
-//  including the selected photo's (a Codex-flagged transition bug). Plus the
+//  holds); enabling and disabling establish the visible shared look as every
+//  photo's independent baseline. Plus the
 //  atomic-replace guarantee: stopping a re-export never destroys the previous
 //  good export.
 //
@@ -68,6 +68,8 @@ final class SameLookForAllTests: XCTestCase {
         m.addFiles([url("a"), url("b")])
         m.bloom.glow = 0.9          // A's would-be look (uncommitted, look == nil)
         m.setSameLookForAll(true)
+        XCTAssertEqual(m.items[0].look?.glow, 0.9,
+                       "enabling immediately makes the visible look durable")
         m.bloom.glow = 1.2          // the shared look
         m.setIntensity(0.5)
         let shared = m.bloom
@@ -77,7 +79,8 @@ final class SameLookForAllTests: XCTestCase {
         XCTAssertEqual(m.sdrURL?.lastPathComponent, "b.jpg", "preview mirror still updates")
         XCTAssertEqual(m.bloom, shared, "the shared look survives navigation")
         XCTAssertEqual(m.intensity, 0.5, accuracy: 1e-9, "intensity is not reset per photo")
-        XCTAssertNil(m.items[0].look, "leaving a photo must not pin the shared look onto it")
+        XCTAssertEqual(m.items[0].look?.glow, 0.9,
+                       "navigation must not rewrite the shared baseline on every step")
     }
 
     // MARK: Merging while ON
@@ -126,9 +129,9 @@ final class SameLookForAllTests: XCTestCase {
         XCTAssertTrue(m.canExportAll, "re-export stays available while ON")
     }
 
-    // MARK: OFF transition (Codex High #1)
+    // MARK: Shared-mode transitions
 
-    func testDisableRestoresSelectedPhotosOwnLook() {
+    func testDisableFreezesSharedLookOntoEveryPhoto() {
         let m = stubbedModel()
         m.addFiles([url("a"), url("b")])
         m.bloom.glow = 0.3
@@ -140,21 +143,97 @@ final class SameLookForAllTests: XCTestCase {
         m.bloom.glow = 1.5                        // shared look
 
         m.setSameLookForAll(false)
-        XCTAssertEqual(m.bloom.glow, 0.3, accuracy: 1e-9,
-                       "disable reloads the SELECTED photo's own look immediately")
+        XCTAssertEqual(m.bloom.glow, 1.5, accuracy: 1e-9,
+                       "disable keeps exactly what was visible")
+        XCTAssertEqual(m.items[0].look?.glow ?? 0, 1.5, accuracy: 1e-9)
+        XCTAssertEqual(m.items[1].look?.glow ?? 0, 1.5, accuracy: 1e-9,
+                       "every photo starts from the shared look")
         m.selectNext()
-        XCTAssertEqual(m.bloom.glow, 0.6, accuracy: 1e-9, "other stored looks return too")
-        XCTAssertEqual(m.items[0].look?.glow ?? 0, 0.3, accuracy: 1e-9,
-                       "navigation after disable must not stamp the shared look")
+        XCTAssertEqual(m.bloom.glow, 1.5, accuracy: 1e-9)
+        m.bloom.glow = 0.8
+        m.selectPrevious()
+        XCTAssertEqual(m.bloom.glow, 1.5, accuracy: 1e-9,
+                       "photos can diverge independently after disabling")
     }
 
-    func testEnableCommitsOnlyPhotosThatOwnALook() {
+    func testEnableAppliesCurrentLookToEveryPhotoImmediately() {
         let m = stubbedModel()
-        m.addFiles([url("a")])
+        m.addFiles([url("a"), url("b")])
         m.bloom.glow = 0.7                        // live edit, never committed (look == nil)
         m.setSameLookForAll(true)
-        XCTAssertNil(m.items[0].look, "a never-committed photo stays inheriting")
+        XCTAssertEqual(m.items[0].look?.glow, 0.7)
+        XCTAssertEqual(m.items[1].look?.glow, 0.7,
+                       "the selected/current look becomes the durable unified baseline")
         XCTAssertEqual(m.intensity, 1.0, accuracy: 1e-9, "the shared look re-anchors to 100%")
+    }
+
+    func testDifferentEffectiveLooksRequireConfirmation() {
+        let m = stubbedModel()
+        m.addFiles([url("a"), url("b")])
+        XCTAssertFalse(m.needsSameLookForAllConfirmation)
+        m.bloom.glow = 0.3
+        m.selectNext()
+        m.bloom.glow = 1.1
+        m.selectPrevious()
+        XCTAssertTrue(m.needsSameLookForAllConfirmation)
+    }
+
+    func testDifferentHiddenDialsStillRequireConfirmationWhileLookIsOff() {
+        let m = stubbedModel()
+        m.addFiles([url("a"), url("b")])
+        m.setHDRLookEnabled(false)
+        m.bloom.glow = 0.3
+        m.selectNext()
+        m.bloom.glow = 1.1
+        m.selectPrevious()
+        XCTAssertTrue(m.needsSameLookForAllConfirmation,
+                      "enabling shared mode will replace those unique saved settings")
+    }
+
+    func testHDRLookTogglePreservesDialsIntensityAndBakeChoice() {
+        let m = stubbedModel()
+        m.addFiles([url("a")])
+        m.setIntensity(0.42)
+        m.bloom.bakeGlowIntoSDR = true
+        let dialed = m.bloom
+
+        m.setHDRLookEnabled(false)
+        XCTAssertFalse(m.bloom.hdrLookEnabled)
+        XCTAssertEqual(m.intensity, 0.42, accuracy: 1e-9)
+        XCTAssertEqual(m.bloom.glow, dialed.glow, accuracy: 1e-9)
+        XCTAssertTrue(m.bloom.bakeGlowIntoSDR, "OFF remembers the bake preference")
+
+        m.setHDRLookEnabled(true)
+        XCTAssertEqual(m.bloom, dialed, "ON restores the exact dialed look")
+        XCTAssertEqual(m.intensity, 0.42, accuracy: 1e-9)
+    }
+
+    func testDisabledHDRLookSuppressesSDRBakeDuringExport() async {
+        var plainCalls = 0
+        var bakeCalls = 0
+        var seen: AutoHDR.BloomParams?
+        let m = stubbedModel()
+        m.synthesizeBuffer = { _, look, _ in
+            plainCalls += 1
+            seen = look
+            return AutoHDR.RawBuffer(data: Data(), width: 4, height: 4)
+        }
+        m.synthesizeBakeInputs = { sdr, _, _ in
+            bakeCalls += 1
+            return AutoHDR.UltraHDRInputs(
+                hdr: AutoHDR.RawBuffer(data: Data(), width: 4, height: 4),
+                sdrJPEG: sdr)
+        }
+        m.addFiles([url("a")])
+        m.bloom.bakeGlowIntoSDR = true
+        m.setHDRLookEnabled(false)
+        await m.mergeItem(m.items[0].id)
+
+        XCTAssertEqual(plainCalls, 1)
+        XCTAssertEqual(bakeCalls, 0, "OFF must suppress Glow in SDR")
+        XCTAssertFalse(seen?.hdrLookEnabled ?? true)
+        XCTAssertTrue(seen?.bakeGlowIntoSDR ?? false,
+                      "the export bypass must not discard the remembered preference")
     }
 
     // MARK: Stopping a re-export can't destroy the previous export (Codex High #2)

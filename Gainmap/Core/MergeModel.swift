@@ -48,12 +48,13 @@ public final class MergeModel: ObservableObject {
             // A manual (advanced-slider) edit redefines the 100% anchor the
             // Intensity slider scales from — so Intensity is always RELATIVE to
             // wherever you've currently set things, not a fixed preset. But flipping
-            // ONLY the GLOW-IN-SDR toggle isn't a look-strength change, so it must
-            // NOT re-anchor / snap Intensity to 100%; just keep the anchor's bake in
-            // sync (so a later Intensity move preserves, not reverts, the toggle).
+            // The GLOW-IN-SDR and master HDR-LOOK toggles aren't strength changes,
+            // so neither should re-anchor / snap Intensity to 100%. Keep both flags
+            // in the anchor so a later Intensity move preserves them.
             if !applyingIntensity {
-                if onlyBakeChanged(from: oldValue) {
+                if onlyModeFlagsChanged(from: oldValue) {
                     anchorLook.bakeGlowIntoSDR = bloom.bakeGlowIntoSDR
+                    anchorLook.hdrLookEnabled = bloom.hdrLookEnabled
                 } else {
                     anchorLook = bloom
                     intensity = 1.0
@@ -63,11 +64,14 @@ public final class MergeModel: ObservableObject {
         }
     }
 
-    /// True when `bloom` differs from `old` only in the GLOW-IN-SDR flag.
-    private func onlyBakeChanged(from old: AutoHDR.BloomParams) -> Bool {
-        guard bloom.bakeGlowIntoSDR != old.bakeGlowIntoSDR else { return false }
+    /// True when only the two non-strength mode switches changed. Neither one
+    /// should snap the Intensity dial or discard its 100% anchor.
+    private func onlyModeFlagsChanged(from old: AutoHDR.BloomParams) -> Bool {
+        guard bloom.bakeGlowIntoSDR != old.bakeGlowIntoSDR
+                || bloom.hdrLookEnabled != old.hdrLookEnabled else { return false }
         var a = bloom, b = old
         a.bakeGlowIntoSDR = false; b.bakeGlowIntoSDR = false
+        a.hdrLookEnabled = true; b.hdrLookEnabled = true
         return a == b
     }
     /// The most-recently dialed look, inherited by the next photo you arrive at.
@@ -90,42 +94,49 @@ public final class MergeModel: ObservableObject {
 
     // MARK: Same look for all (batch mode)
 
-    /// ONE shared look for every photo in the queue. While ON, the sliders edit
-    /// the shared look, navigation neither loads nor commits per-photo looks
-    /// (they're KEPT and come back when turned off), and merges use the shared
-    /// look for every item. Persisted across launches. private(set): all changes
-    /// go through setSameLookForAll so the transition rules can't be bypassed.
+    /// ONE shared look for every photo in the queue. Entering shared mode applies
+    /// the current photo's look to every stored photo; leaving freezes the latest
+    /// shared look onto every photo, after which they can diverge independently.
+    /// Persisted across launches. private(set): all changes go through
+    /// setSameLookForAll so the transition rules can't be bypassed.
     @Published public private(set) var sameLookForAll: Bool {
         didSet { UserDefaults.standard.set(sameLookForAll, forKey: Self.sameLookKey) }
     }
     static let sameLookKey = "gainmap.sameLookForAll"
 
+    /// Whether enabling shared mode would replace at least one photo's settings,
+    /// including hidden dial differences while the HDR look is disabled.
+    public var needsSameLookForAllConfirmation: Bool {
+        guard !sameLookForAll, items.count > 1 else { return false }
+        let looks = items.map { item -> AutoHDR.BloomParams in
+            item.id == selectedID ? bloom : (item.look ?? runningLook)
+        }
+        guard let first = looks.first else { return false }
+        return looks.dropFirst().contains { $0 != first }
+    }
+
     /// Flip batch mode, running the transition rules. No-ops while a batch
     /// export is running (flipping mid-run would split the batch's semantics).
     public func setSameLookForAll(_ on: Bool) {
         guard on != sameLookForAll, !isExportingAll else { return }
-        if on {
-            // A photo that already OWNS a look keeps its uncommitted live edits.
-            // (A never-committed photo's live edits simply BECOME the shared
-            // look — nothing is visually lost, and on later disable it reloads
-            // runningLook, which equals that same look.)
-            if selectedItem?.look != nil { commitLiveLook() }
-            sameLookForAll = true
-            // The shared look you're seeing reads as 100% on the Intensity dial.
-            anchorLook = bloom
-            intensity = 1.0
-        } else {
-            sameLookForAll = false
-            // Restore the selected photo's OWN look, as if freshly selected —
-            // otherwise the still-live shared look would commit onto it at the
-            // next navigation, silently destroying its preserved look. (Can't
-            // reuse select() here: its leading commitLiveLook would do exactly
-            // that stamping, since the mode is already OFF.)
-            if let item = selectedItem {
-                loadAsAnchor(item.look ?? runningLook)
-            }
-        }
+        let shared = bloom
+        // Both transitions establish the visible shared look as every photo's
+        // durable baseline. This also prevents an older peer from resurrecting
+        // the unique looks that were explicitly unified.
+        for i in items.indices { items[i].look = shared }
+        runningLook = shared
+        sameLookForAll = on
+        // The visible result does not change, but each photo now starts from an
+        // explicit identical baseline and Intensity reads that baseline as 100%.
+        loadAsAnchor(shared)
         schedulePersist()
+    }
+
+    /// Toggle the creative HDR treatment without changing any dialed values.
+    /// Preview/export code treats OFF as a neutral gain map.
+    public func setHDRLookEnabled(_ enabled: Bool) {
+        guard bloom.hdrLookEnabled != enabled else { return }
+        bloom.hdrLookEnabled = enabled
     }
 
     /// Adopt a STORED look onto the live bench as-is: suppress the didSet
@@ -618,9 +629,13 @@ public final class MergeModel: ObservableObject {
 
     /// Reset to the saved default look (the shared signature / screenshot preset).
     public func resetToDefault() {
-        anchorLook = signature
+        // Reset the hidden dials while respecting the explicit master switch.
+        // A user who reset while OFF should remain OFF until they turn it on.
+        var target = signature
+        target.hdrLookEnabled = bloom.hdrLookEnabled
+        anchorLook = target
         applyingIntensity = true
-        bloom = signature
+        bloom = target
         applyingIntensity = false
         intensity = 1.0
     }
@@ -631,6 +646,7 @@ public final class MergeModel: ObservableObject {
     /// left untouched — only the stored default is normalized off).
     public func setSignatureFromCurrent() {
         var sig = bloom
+        sig.hdrLookEnabled = true
         sig.bakeGlowIntoSDR = false
         signature = sig
         anchorLook = bloom
@@ -727,7 +743,8 @@ public final class MergeModel: ObservableObject {
 
     /// Write the live bloom onto the selected item — called when LEAVING a photo
     /// (navigation, merge, export-all), not on every slider tick. No-op while
-    /// SAME-LOOK is on: the shared look must never stamp preserved per-photo looks.
+    /// SAME-LOOK is on: transitions stamp the shared baseline deliberately, while
+    /// ordinary navigation leaves that baseline alone.
     /// NOTE: deliberately does NOT schedulePersist — the flush paths call
     /// this, and scheduling from here re-armed the debounce from inside the
     /// flush it triggered (a self-sustaining 2 Hz write loop, P3 review).
@@ -1062,7 +1079,9 @@ public final class MergeModel: ObservableObject {
     /// hard-fails on a --sgamut/profile mismatch, so a fixed sRGB flag would
     /// refuse to merge Display P3 exports at all.
     private func runMerge(sdr: URL, look: AutoHDR.BloomParams, out: URL) async -> RunOutcome {
-        let bake = look.bakeGlowIntoSDR
+        // OFF suppresses the SDR bake too, while the remembered bake switch
+        // remains part of the preserved look restored when HDR Look returns.
+        let bake = look.hdrLookEnabled && look.bakeGlowIntoSDR
         let synthBuffer = synthesizeBuffer
         let synthInputs = synthesizeBakeInputs
         do {

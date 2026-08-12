@@ -218,36 +218,66 @@ public enum GroupValue: Equatable, Codable, Sendable {
 // MARK: - BloomParams <-> FSValue
 
 extension AutoHDR.BloomParams {
-    /// Key names frozen with schemaVersion 1 (same spelling as local Codable).
+    /// Legacy dial names stay frozen; optional new keys are tolerant schema-v1
+    /// additions that older clients ignore.
     public func fsMap() -> FSValue {
-        .map([
-            "glow": .double(glow),
-            "threshold": .double(threshold),
-            "spread": .double(spread),
-            "punch": .double(punch),
-            "peak": .double(peak),
-            "falloff": .double(falloff),
-            "saturation": .double(saturation),
-            "tint": .double(tint),
-            "headroom": .double(headroom),
-            "bakeGlowIntoSDR": .bool(bakeGlowIntoSDR),
-        ])
+        // As with local Codable, OFF keeps the legacy fields neutral so clients
+        // predating the switch cannot accidentally apply the preserved look.
+        var wire = self
+        if !hdrLookEnabled {
+            wire = AutoHDR.BloomParams()
+            wire.glow = 0
+            wire.punch = 0
+            wire.headroom = 1
+            wire.bakeGlowIntoSDR = false
+        }
+        var map: [String: FSValue] = [
+            "hdrLookEnabled": .bool(hdrLookEnabled),
+            "glow": .double(wire.glow),
+            "threshold": .double(wire.threshold),
+            "spread": .double(wire.spread),
+            "punch": .double(wire.punch),
+            "peak": .double(wire.peak),
+            "falloff": .double(wire.falloff),
+            "saturation": .double(wire.saturation),
+            "tint": .double(wire.tint),
+            "headroom": .double(wire.headroom),
+            "bakeGlowIntoSDR": .bool(wire.bakeGlowIntoSDR),
+        ]
+        if !hdrLookEnabled {
+            map["preservedLook"] = .map([
+                "glow": .double(glow),
+                "threshold": .double(threshold),
+                "spread": .double(spread),
+                "punch": .double(punch),
+                "peak": .double(peak),
+                "falloff": .double(falloff),
+                "saturation": .double(saturation),
+                "tint": .double(tint),
+                "headroom": .double(headroom),
+                "bakeGlowIntoSDR": .bool(bakeGlowIntoSDR),
+            ])
+        }
+        return .map(map)
     }
 
     /// Tolerant: missing keys keep defaults, unknown keys ignored.
     public init?(fsValue: FSValue) {
         guard let m = fsValue.mapValue else { return nil }
         self.init()
-        if let v = m["glow"]?.doubleValue { glow = v }
-        if let v = m["threshold"]?.doubleValue { threshold = v }
-        if let v = m["spread"]?.doubleValue { spread = v }
-        if let v = m["punch"]?.doubleValue { punch = v }
-        if let v = m["peak"]?.doubleValue { peak = v }
-        if let v = m["falloff"]?.doubleValue { falloff = v }
-        if let v = m["saturation"]?.doubleValue { saturation = v }
-        if let v = m["tint"]?.doubleValue { tint = v }
-        if let v = m["headroom"]?.doubleValue { headroom = v }
-        if let v = m["bakeGlowIntoSDR"]?.boolValue { bakeGlowIntoSDR = v }
+        let enabled = m["hdrLookEnabled"]?.boolValue ?? true
+        let values = (!enabled ? m["preservedLook"]?.mapValue : nil) ?? m
+        if let v = values["glow"]?.doubleValue { glow = v }
+        if let v = values["threshold"]?.doubleValue { threshold = v }
+        if let v = values["spread"]?.doubleValue { spread = v }
+        if let v = values["punch"]?.doubleValue { punch = v }
+        if let v = values["peak"]?.doubleValue { peak = v }
+        if let v = values["falloff"]?.doubleValue { falloff = v }
+        if let v = values["saturation"]?.doubleValue { saturation = v }
+        if let v = values["tint"]?.doubleValue { tint = v }
+        if let v = values["headroom"]?.doubleValue { headroom = v }
+        if let v = values["bakeGlowIntoSDR"]?.boolValue { bakeGlowIntoSDR = v }
+        hdrLookEnabled = enabled
     }
 }
 

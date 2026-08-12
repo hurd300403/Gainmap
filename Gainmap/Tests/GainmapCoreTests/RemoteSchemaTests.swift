@@ -77,6 +77,27 @@ final class RemoteSchemaTests: XCTestCase {
         XCTAssertNil(AutoHDR.BloomParams(fsValue: .string("not a map")))
     }
 
+    func testDisabledBloomWireKeepsLegacyFieldsNeutralAndRestoresDials() throws {
+        var p = customLook()
+        p.hdrLookEnabled = false
+        let map = try XCTUnwrap(p.fsMap().mapValue)
+        XCTAssertEqual(map["hdrLookEnabled"], .bool(false))
+        XCTAssertEqual(map["glow"], .double(0))
+        XCTAssertEqual(map["headroom"], .double(1))
+        XCTAssertEqual(map["bakeGlowIntoSDR"], .bool(false))
+        let preserved = try XCTUnwrap(map["preservedLook"]?.mapValue)
+        XCTAssertEqual(preserved["glow"], .double(1.23))
+        XCTAssertEqual(preserved["headroom"], .double(1.7))
+        XCTAssertEqual(preserved["bakeGlowIntoSDR"], .bool(true))
+        XCTAssertEqual(AutoHDR.BloomParams(fsValue: .map(map)), p)
+    }
+
+    func testLegacyBloomWireWithoutEnabledFlagDefaultsOn() {
+        let value = FSValue.map(["glow": .double(0), "headroom": .double(1)])
+        let p = AutoHDR.BloomParams(fsValue: value)
+        XCTAssertTrue(p?.hdrLookEnabled ?? false)
+    }
+
     // MARK: photo doc
 
     func testPhotoDocRoundTrip() {
