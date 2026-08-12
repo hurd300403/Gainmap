@@ -530,7 +530,7 @@ fi
 # ---------------------------------------------------------------------------
 # 4. Publish exactly once. A reused build/tag is an error, never a clobber.
 # ---------------------------------------------------------------------------
-echo "▸ publishing GitHub Release $TAG…"
+echo "▸ publishing GitHub Release ${TAG}…"
 RELEASE_ASSETS=("$DMG" "$APPCAST")
 for delta_asset in "${DELTA_ASSETS[@]}"; do
     RELEASE_ASSETS+=("$delta_asset")
