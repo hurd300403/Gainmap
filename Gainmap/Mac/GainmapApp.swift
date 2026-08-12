@@ -170,6 +170,7 @@ struct SettingsView: View {
     @State private var deleteAccountConfirmationPresented = false
     @State private var deletingAccount = false
     @State private var deletionError: String?
+    @State private var privacyDetailsExpanded = false
 
     var body: some View {
         Form {
@@ -183,9 +184,7 @@ struct SettingsView: View {
                         Button("Sign in with Apple…") { auth.appleWebSignIn() }
                         Button("Sign in with Google…") { auth.googleWebSignIn() }
                     }
-                    Text("Patreon member? Use the same email if you can. If it’s different, connect Patreon after signing in.")
-                        .font(.caption).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                    PatreonSignInHint()
                     if case .failed(let message) = auth.state {
                         Text(message).font(.caption).foregroundStyle(.red)
                             .fixedSize(horizontal: false, vertical: true)
@@ -263,14 +262,20 @@ struct SettingsView: View {
             }
             Section {
                 Toggle("Send anonymous crash reports", isOn: $crashReporting)
-                // Scoped to crash reports on purpose (P4): sync — when you
-                // sign in — uploads your photos to your private library, so a
-                // blanket "no photos are ever sent" would be untrue. Crash
-                // reports never include them.
-                Text("Helps fix bugs. Crash reports never include your photos, "
-                     + "file names, or IP address. Takes effect on next launch.")
-                    .font(.caption).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                DisclosureGroup(isExpanded: $privacyDetailsExpanded) {
+                    // Scoped to crash reports on purpose (P4): sync — when you
+                    // sign in — uploads your photos to your private library, so a
+                    // blanket "no photos are ever sent" would be untrue. Crash
+                    // reports never include them.
+                    Text("Helps fix bugs. Crash reports never include your photos, "
+                         + "file names, or IP address. Takes effect on next launch.")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, 4)
+                } label: {
+                    Text("Privacy details")
+                        .font(.caption.weight(.medium))
+                }
             } header: {
                 Text("Privacy")
             }

@@ -124,10 +124,7 @@ struct SignInScreen: View {
                 inlineMessage(message, color: Theme.accentHot)
             }
 
-            Text("Patreon member? Use the same email if you can. If it’s different, connect Patreon after signing in.")
-                .font(Theme.mono(9.5))
-                .foregroundStyle(Theme.stoneFaint)
-                .fixedSize(horizontal: false, vertical: true)
+            PatreonSignInHint()
         }
     }
 

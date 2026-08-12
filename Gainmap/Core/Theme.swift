@@ -67,6 +67,44 @@ public enum Theme {
     }
 }
 
+/// A compact, shared reminder for people whose Patreon and sign-in accounts
+/// may use different email addresses. Keeping this in GainmapCore ensures the
+/// iPhone setup sheet and Mac settings use the same wording and emphasis.
+public struct PatreonSignInHint: View {
+    public init() {}
+
+    public var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "heart.fill")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(Theme.gold)
+                .padding(.top, 2)
+                .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Patreon member?")
+                    .font(Theme.ui(12.5, .semibold))
+                    .foregroundStyle(Theme.gold)
+                Text("Use the same email if you can. If it’s different, connect Patreon after signing in.")
+                    .font(Theme.ui(12.5, .medium))
+                    .foregroundStyle(Theme.stone)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            Theme.inset,
+            in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(Theme.gold.opacity(0.32), lineWidth: 1)
+        }
+        .accessibilityElement(children: .combine)
+    }
+}
+
 extension Color {
     public init(hex: UInt32) {
         self.init(.sRGB,
