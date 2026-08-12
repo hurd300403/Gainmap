@@ -47,7 +47,7 @@ const {
   consumeOAuthState,
   exchangeAuthorizationCode,
   fetchIdentity,
-  identityMembership,
+  verifyOAuthMembership,
   linkPatreonIdentity,
 } = require('./lib/patreon/oauth');
 const {
@@ -133,8 +133,6 @@ exports.admitSyncUser = onCall({
     response.message = 'Cloud Sync is currently full. Gainmap remains fully available offline.';
   } else if (result.admitted === false && result.reason === 'patreon_required') {
     response.message = publicEntitlement.message;
-  } else if (result.admitted === true) {
-    response.message = 'Cloud Sync is enabled.';
   }
   logger.info('admitSyncUser', {
     uid: request.auth.uid,
@@ -160,6 +158,7 @@ exports.startPatreonOAuth = onCall({
       uid: request.auth.uid,
       clientId: patreonClientId.value(),
       redirectURI: patreonRedirectURI(),
+      attemptKind: request.data && request.data.attemptKind || 'reuse_session',
     });
   } catch (error) {
     logger.error('startPatreonOAuth failed', { code: safeOAuthErrorCode(error && error.code) });
@@ -199,7 +198,11 @@ exports.patreonOAuthCallback = onRequest(
         redirectURI: patreonRedirectURI(),
       });
       const identity = await fetchIdentity({ accessToken });
-      const member = identityMembership(identity, patreonCampaignId.value());
+      const member = await verifyOAuthMembership({
+        identity,
+        campaignId: patreonCampaignId.value(),
+        api: patreonAPI(),
+      });
       await linkPatreonIdentity({
         db,
         uid,

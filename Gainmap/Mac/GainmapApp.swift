@@ -176,13 +176,14 @@ struct SettingsView: View {
             Section {
                 switch auth.state {
                 case .signedOut, .failed:
+                    Text(displayState.detail)
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                     HStack(spacing: 10) {
                         Button("Sign in with Apple…") { auth.appleWebSignIn() }
                         Button("Sign in with Google…") { auth.googleWebSignIn() }
                     }
-                    Text("Gainmap works without an account. An arbitrary email address cannot unlock "
-                         + "Cloud Sync. A verified email matching an active patron may receive "
-                         + "temporary access; connecting Patreon confirms membership.")
+                    Text("Patreon member? Use the same email if you can. If it’s different, connect Patreon after signing in.")
                         .font(.caption).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                     if case .failed(let message) = auth.state {
@@ -190,31 +191,47 @@ struct SettingsView: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 case .checking:
+                    signedInEmail
                     HStack(spacing: 8) {
                         ProgressView().controlSize(.small)
-                        Text("Checking Cloud Sync access…").foregroundStyle(.secondary)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(displayState.title).fontWeight(.medium)
+                            Text(displayState.detail)
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
                     }
                 case .ready, .localOnly:
+                    signedInEmail
                     VStack(alignment: .leading, spacing: 3) {
-                        Text(auth.email ?? "Signed in")
-                            .fontWeight(.medium)
-                        Text(cloudAccessMessage)
+                        Text(displayState.title).fontWeight(.medium)
+                        Text(displayState.detail)
                             .font(.caption).foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
-                        if let expiry = auth.cloudAccess?.entitlement.graceExpiresAt {
+                        if let expiry = displayState.graceExpiresAt {
                             Text("Grace access ends \(expiry.formatted(date: .abbreviated, time: .shortened)).")
                                 .font(.caption2).foregroundStyle(.orange)
                         }
                     }
-                    if shouldOfferPatreonConnection {
-                        Button("Connect Patreon…") {
-                            auth.connectPatreon()
+                    if displayState.action == .connectPatreon
+                        || displayState.action == .switchPatreon {
+                        Text("You’ll sign in securely on Patreon.")
+                            .font(.caption).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Button(displayState.action.label ?? "Connect Patreon") {
+                            performPatreonAction()
                         }
                         .disabled(auth.isConnectingPatreon)
                     }
                     HStack(spacing: 10) {
-                        Button("Check Access Again") { auth.refreshCloudAccess() }
-                            .disabled(auth.isRefreshingCloudAccess || auth.isConnectingPatreon)
+                        if displayState.action == .retry
+                            || displayState.kind == .inactive {
+                            Button("Refresh Status") {
+                                auth.refreshCloudAccess()
+                            }
+                            .disabled(
+                                auth.isRefreshingCloudAccess
+                                    || auth.isConnectingPatreon)
+                        }
                         Button("Sign out of Cloud Sync", role: .destructive) { auth.signOut() }
                     }
                     Button("Delete Account…", role: .destructive) {
@@ -228,7 +245,8 @@ struct SettingsView: View {
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                     }
-                    if let error = auth.cloudActionError {
+                    if let error = auth.cloudActionError,
+                       displayState.kind != .unavailable {
                         Text(error).font(.caption).foregroundStyle(.red)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -276,26 +294,37 @@ struct SettingsView: View {
         }
     }
 
-    private var cloudAccessMessage: String {
-        guard let access = auth.cloudAccess else {
-            return "Cloud Sync access has not been checked yet."
-        }
-        if let message = access.admissionBlockMessage {
-            return message + " The local app remains fully available."
-        }
-        if access.canSync {
-            return access.entitlement.status == .grace
-                ? access.entitlement.message
-                : (sync.syncing
-                   ? "Patreon active — sessions follow you to your iPhone."
-                   : "Patreon active — Cloud Sync is starting…")
-        }
-        return access.entitlement.message
+    private var displayState: CloudSyncDisplayState {
+        .resolve(
+            authState: auth.state,
+            access: auth.cloudAccess,
+            signedInEmail: auth.email,
+            preferPatreonAccountSwitch: auth.shouldOfferPatreonAccountSwitch)
     }
 
-    private var shouldOfferPatreonConnection: Bool {
-        guard let entitlement = auth.cloudAccess?.entitlement else { return true }
-        return entitlement.linkRequired
+    @ViewBuilder
+    private var signedInEmail: some View {
+        if let email = auth.email, auth.uid != nil {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("SIGNED IN AS")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Text(email)
+                    .fontWeight(.medium)
+                    .textSelection(.enabled)
+            }
+        }
+    }
+
+    private func performPatreonAction() {
+        switch displayState.action {
+        case .connectPatreon:
+            auth.connectPatreon(mode: .reuseSession)
+        case .switchPatreon:
+            auth.connectPatreon(mode: .switchAccount)
+        case .none, .signIn, .retry:
+            break
+        }
     }
 
     @MainActor

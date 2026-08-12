@@ -37,8 +37,8 @@
             <string>rectangle.stack.badge.plus</string>
         </dict>
     </array>
-    <!-- FirebaseAuth's OAuth web flow (Google sign-in) round-trips through
-         the encoded-app-ID scheme; the reversed client ID stays for safety. -->
+    <!-- Google OAuth returns through the reversed client-ID scheme. The
+         encoded app-ID scheme remains registered for Firebase compatibility. -->
     <key>CFBundleURLTypes</key>
     <array>
         <dict>

@@ -34,7 +34,9 @@ public enum FirebaseBootstrap {
         if FirebaseApp.app() == nil { FirebaseApp.configure() }
     }
 
-    /// FirebaseAuth's OAuth web flow round-trips land here (onOpenURL).
+    /// Retained for Firebase-managed callback compatibility. Gainmap's direct
+    /// Google/Patreon ASWebAuthenticationSession callbacks are consumed by
+    /// their active sessions before reaching the app lifecycle.
     @discardableResult
     public static func handleOpenURL(_ url: URL) -> Bool {
         #if canImport(UIKit)
@@ -55,27 +57,68 @@ public enum PatreonEntitlementStatus: String, Equatable, Sendable {
     case error
 }
 
+public enum PatreonEntitlementSource: String, Equatable, Sendable {
+    case none
+    case patreonEmail = "patreon_email"
+    case patreonOAuth = "patreon_oauth"
+}
+
+public enum PatreonConnectionAction: String, Equatable, Sendable {
+    case none
+    case connect
+    case switchAccount = "switch"
+}
+
+public enum PatreonConnectionMode: Sendable {
+    case reuseSession
+    case switchAccount
+
+    var attemptKind: String {
+        switch self {
+        case .reuseSession: return "reuse_session"
+        case .switchAccount: return "switch_account"
+        }
+    }
+
+    var prefersEphemeralBrowserSession: Bool {
+        switch self {
+        case .reuseSession: return false
+        case .switchAccount: return true
+        }
+    }
+}
+
 /// Safe, displayable entitlement data returned by Gainmap's trusted backend.
 /// Patreon tokens and membership payloads never enter the app.
 public struct PatreonEntitlement: Equatable, Sendable {
     public let status: PatreonEntitlementStatus
     public let effective: Bool
-    /// True when this access came from a verified Patreon-email match or no
-    /// Patreon identity is linked yet. Linked grace/inactive states are false.
+    public let source: PatreonEntitlementSource
+    public let connectionAction: PatreonConnectionAction
+    /// Build-11 compatibility. New UI uses the explicit connectionAction.
     public let linkRequired: Bool
     public let graceExpiresAt: Date?
     public let lastVerifiedAt: Date?
+    public let verificationExpiresAt: Date?
     public let message: String
 
     public init(status: PatreonEntitlementStatus, effective: Bool,
+                source: PatreonEntitlementSource = .none,
+                connectionAction: PatreonConnectionAction? = nil,
                 linkRequired: Bool? = nil,
                 graceExpiresAt: Date? = nil, lastVerifiedAt: Date? = nil,
+                verificationExpiresAt: Date? = nil,
                 message: String) {
         self.status = status
         self.effective = effective
-        self.linkRequired = linkRequired ?? (status == .unlinked)
+        self.source = source
+        let legacyLinkRequired = linkRequired ?? (status == .unlinked)
+        self.connectionAction = connectionAction
+            ?? (legacyLinkRequired ? .connect : .none)
+        self.linkRequired = legacyLinkRequired
         self.graceExpiresAt = graceExpiresAt
         self.lastVerifiedAt = lastVerifiedAt
+        self.verificationExpiresAt = verificationExpiresAt
         self.message = message
     }
 
@@ -89,10 +132,17 @@ public struct PatreonEntitlement: Equatable, Sendable {
               let message = payload["message"] as? String else { return nil }
         self.status = status
         self.effective = effective
-        self.linkRequired = Self.bool(payload["linkRequired"])
+        self.source = (payload["source"] as? String)
+            .flatMap(PatreonEntitlementSource.init(rawValue:)) ?? .none
+        let legacyLinkRequired = Self.bool(payload["linkRequired"])
             ?? (status == .unlinked)
+        self.connectionAction = (payload["connectionAction"] as? String)
+            .flatMap(PatreonConnectionAction.init(rawValue:))
+            ?? (legacyLinkRequired ? .connect : .none)
+        self.linkRequired = legacyLinkRequired
         self.graceExpiresAt = Self.date(payload["graceExpiresAt"])
         self.lastVerifiedAt = Self.date(payload["lastVerifiedAt"])
+        self.verificationExpiresAt = Self.date(payload["verificationExpiresAt"])
         self.message = message
     }
 
@@ -183,6 +233,195 @@ public enum AccountDeletionError: LocalizedError, Sendable {
     }
 }
 
+// MARK: - Google OAuth + PKCE
+
+/// Failures produced by Gainmap's installed-app Google OAuth flow. Provider
+/// payloads are deliberately collapsed to a small, safe set before display.
+enum GoogleOAuthError: Error, Equatable, LocalizedError, Sendable {
+    case invalidConfiguration
+    case cancelled
+    case superseded
+    case browserUnavailable
+    case invalidCallback
+    case stateMismatch
+    case provider(String)
+    case tokenExchangeFailed
+    case transport
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidConfiguration:
+            return "Google sign-in is not configured."
+        case .cancelled, .superseded:
+            return "Google sign-in was cancelled."
+        case .browserUnavailable:
+            return "Google sign-in couldn't open. Try again."
+        case .invalidCallback, .stateMismatch:
+            return "Google sign-in returned an invalid response. Try again."
+        case .provider:
+            return "Google couldn't complete sign-in. Try again."
+        case .tokenExchangeFailed:
+            return "Google sign-in token exchange failed. Try again."
+        case .transport:
+            return "Google sign-in couldn't finish. Check your connection and try again."
+        }
+    }
+}
+
+/// Immutable values for one Google browser round-trip. Keeping state, PKCE
+/// verifier, redirect URI, and generation together prevents a later attempt
+/// from mutating the values an earlier callback must validate against.
+struct GoogleOAuthAttempt: Equatable, Sendable {
+    let generation: UInt
+    let clientID: String
+    let callbackScheme: String
+    let redirectURI: String
+    let state: String
+    let verifier: String
+    let authorizationURL: URL
+}
+
+struct GoogleOAuthTokens: Equatable, Sendable {
+    let idToken: String
+    let accessToken: String
+}
+
+private struct GoogleFirebaseCredentialResult {
+    let credential: AuthCredential
+    let generation: UInt
+}
+
+/// Pure construction and validation for Google's installed-app authorization
+/// code flow. The browser/session and Firebase handoff remain in AuthController.
+enum GoogleOAuthPKCE {
+    static let callbackPath = "/oauth2redirect"
+    private static let authorizationEndpoint =
+        URL(string: "https://accounts.google.com/o/oauth2/v2/auth")!
+    private static let tokenEndpoint =
+        URL(string: "https://oauth2.googleapis.com/token")!
+
+    static func makeAttempt(clientID: String, state: String, verifier: String,
+                            generation: UInt) throws -> GoogleOAuthAttempt {
+        let callbackScheme = try callbackScheme(for: clientID)
+        guard state.count >= 16,
+              (43...128).contains(verifier.count),
+              verifier.unicodeScalars.allSatisfy({
+                  CharacterSet(charactersIn:
+                    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+                    .contains($0)
+              }) else {
+            throw GoogleOAuthError.invalidConfiguration
+        }
+        let redirectURI = "\(callbackScheme):\(callbackPath)"
+        var components = URLComponents(
+            url: authorizationEndpoint, resolvingAgainstBaseURL: false)!
+        components.queryItems = [
+            .init(name: "client_id", value: clientID),
+            .init(name: "redirect_uri", value: redirectURI),
+            .init(name: "response_type", value: "code"),
+            .init(name: "scope", value: "openid email profile"),
+            .init(name: "state", value: state),
+            .init(name: "code_challenge", value: codeChallenge(for: verifier)),
+            .init(name: "code_challenge_method", value: "S256"),
+            .init(name: "prompt", value: "select_account"),
+        ]
+        guard let authorizationURL = components.url else {
+            throw GoogleOAuthError.invalidConfiguration
+        }
+        return GoogleOAuthAttempt(
+            generation: generation,
+            clientID: clientID,
+            callbackScheme: callbackScheme,
+            redirectURI: redirectURI,
+            state: state,
+            verifier: verifier,
+            authorizationURL: authorizationURL)
+    }
+
+    static func callbackScheme(for clientID: String) throws -> String {
+        let suffix = ".apps.googleusercontent.com"
+        guard clientID.lowercased().hasSuffix(suffix),
+              clientID.count > suffix.count else {
+            throw GoogleOAuthError.invalidConfiguration
+        }
+        let prefix = String(clientID.dropLast(suffix.count))
+        guard !prefix.isEmpty,
+              prefix.unicodeScalars.allSatisfy({
+                  CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_"))
+                    .contains($0)
+              }) else {
+            throw GoogleOAuthError.invalidConfiguration
+        }
+        return "com.googleusercontent.apps.\(prefix)"
+    }
+
+    static func codeChallenge(for verifier: String) -> String {
+        Data(SHA256.hash(data: Data(verifier.utf8)))
+            .base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
+
+    static func authorizationCode(from callback: URL,
+                                  for attempt: GoogleOAuthAttempt) throws -> String {
+        guard callback.scheme?.lowercased() == attempt.callbackScheme.lowercased(),
+              callback.host == nil,
+              callback.user == nil,
+              callback.password == nil,
+              callback.port == nil,
+              callback.path == callbackPath,
+              let items = URLComponents(
+                url: callback, resolvingAgainstBaseURL: false)?.queryItems else {
+            throw GoogleOAuthError.invalidCallback
+        }
+        let states = items.filter { $0.name == "state" }.compactMap(\.value)
+        guard states.count == 1, states[0] == attempt.state else {
+            throw GoogleOAuthError.stateMismatch
+        }
+        let providerErrors = items.filter { $0.name == "error" }.compactMap(\.value)
+        if let providerError = providerErrors.first {
+            if providerError == "access_denied" { throw GoogleOAuthError.cancelled }
+            throw GoogleOAuthError.provider(providerError)
+        }
+        let codes = items.filter { $0.name == "code" }.compactMap(\.value)
+        guard codes.count == 1, !codes[0].isEmpty else {
+            throw GoogleOAuthError.invalidCallback
+        }
+        return codes[0]
+    }
+
+    static func tokenRequest(code: String, for attempt: GoogleOAuthAttempt) -> URLRequest {
+        var request = URLRequest(url: tokenEndpoint)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 30
+        request.setValue("application/x-www-form-urlencoded",
+                         forHTTPHeaderField: "Content-Type")
+        var form = URLComponents()
+        form.queryItems = [
+            .init(name: "code", value: code),
+            .init(name: "client_id", value: attempt.clientID),
+            .init(name: "redirect_uri", value: attempt.redirectURI),
+            .init(name: "code_verifier", value: attempt.verifier),
+            .init(name: "grant_type", value: "authorization_code"),
+        ]
+        request.httpBody = form.percentEncodedQuery?.data(using: .utf8)
+        return request
+    }
+
+    static func tokens(data: Data, statusCode: Int) throws -> GoogleOAuthTokens {
+        guard (200..<300).contains(statusCode),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let idToken = json["id_token"] as? String,
+              !idToken.isEmpty else {
+            throw GoogleOAuthError.tokenExchangeFailed
+        }
+        return GoogleOAuthTokens(
+            idToken: idToken,
+            accessToken: json["access_token"] as? String ?? "")
+    }
+}
+
 // MARK: - Controller
 
 @MainActor
@@ -198,6 +437,11 @@ public final class AuthController: ObservableObject {
     @Published public private(set) var cloudActionError: String?
     @Published public private(set) var isRefreshingCloudAccess = false
     @Published public private(set) var isConnectingPatreon = false
+    @Published public private(set) var shouldOfferPatreonAccountSwitch = false
+    /// True only after Firebase's persisted user has been inspected at launch.
+    /// Empty-library onboarding must not count the controller's initial
+    /// placeholder `.signedOut` value as a real signed-out launch.
+    @Published public private(set) var hasRestoredAuthState = false
 
     private var pendingCredential: AuthCredential?
     private var currentNonce: String?
@@ -212,6 +456,11 @@ public final class AuthController: ObservableObject {
         "gainmap.pending-account-local-cleanup-uids"
     private let patreonWebPresenter = WebAuthPresenter()
     private var patreonWebSession: ASWebAuthenticationSession?
+    private let googleWebPresenter = WebAuthPresenter()
+    private var googleWebSession: ASWebAuthenticationSession?
+    private var googleWebContinuation: CheckedContinuation<URL, any Error>?
+    private var googleOAuthGeneration: UInt = 0
+    private var activeGoogleOAuthGeneration: UInt?
     #if os(macOS)
     private static let servicesID = "com.legacylab.gainmap.auth"
     private static let returnHost = "gainmap-production.firebaseapp.com"
@@ -231,6 +480,7 @@ public final class AuthController: ObservableObject {
         } else {
             state = .signedOut
         }
+        hasRestoredAuthState = true
     }
 
     public var uid: String? {
@@ -302,34 +552,225 @@ public final class AuthController: ObservableObject {
     }
 
     // ------------------------------------------------- Google
-    // Via FirebaseAuth's generic OAuth web flow — deliberately NOT the
-    // GoogleSignIn SDK, whose fetcher pin is incompatible with Firebase 12
-    // (see project.yml). Same one-uid outcome; web-sheet UX.
-
-    #if canImport(UIKit)
-    private var googleProvider: OAuthProvider?
+    // Both platforms use Google's installed-app authorization-code + PKCE
+    // flow. Firebase's hosted iOS OAuthProvider flow depends on browser
+    // sessionStorage and can fail under Safari storage partitioning.
 
     public func googleSignIn() {
-        let provider = OAuthProvider(providerID: "google.com")
-        provider.scopes = ["email", "profile"]
-        googleProvider = provider   // keep alive for the flow's duration
-        provider.getCredentialWith(nil) { [weak self] credential, error in
-            Task { @MainActor in
-                guard let self else { return }
-                self.googleProvider = nil
-                if let error {
-                    let ns = error as NSError
-                    // User-cancelled web sheet is not an error state.
-                    if ns.code == AuthErrorCode.webContextCancelled.rawValue { return }
-                    self.state = .failed(error.localizedDescription)
+        startGoogleSignIn()
+    }
+
+    #if os(macOS)
+    /// Retains the existing Mac-facing API while sharing the implementation
+    /// with iOS.
+    public func googleWebSignIn() {
+        startGoogleSignIn()
+    }
+    #endif
+
+    private func startGoogleSignIn() {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let attempt: GoogleOAuthAttempt
+            do {
+                attempt = try self.beginGoogleOAuthAttempt()
+            } catch GoogleOAuthError.superseded {
+                return
+            } catch let error as GoogleOAuthError {
+                self.state = .failed(error.localizedDescription)
+                return
+            } catch {
+                self.state = .failed(
+                    GoogleOAuthError.invalidConfiguration.localizedDescription)
+                return
+            }
+            do {
+                let result = try await self.googleFirebaseCredential(for: attempt)
+                guard self.googleOAuthGeneration == result.generation else {
+                    self.completeGoogleOAuthAttempt(generation: attempt.generation)
                     return
                 }
-                guard let credential else { return }
-                self.signIn(with: credential)
+                self.signIn(
+                    with: result.credential,
+                    googleGeneration: result.generation)
+            } catch GoogleOAuthError.cancelled {
+                // Closing the browser is not an app error and must not replace
+                // the current local/auth state.
+                self.completeGoogleOAuthAttempt(generation: attempt.generation)
+            } catch GoogleOAuthError.superseded {
+                // Closing the browser or starting a newer attempt is not an app
+                // error and must not replace the current local/auth state.
+                self.completeGoogleOAuthAttempt(generation: attempt.generation)
+            } catch let error as GoogleOAuthError {
+                self.completeGoogleOAuthAttempt(generation: attempt.generation)
+                self.state = .failed(error.localizedDescription)
+            } catch {
+                self.completeGoogleOAuthAttempt(generation: attempt.generation)
+                self.state = .failed(
+                    GoogleOAuthError.transport.localizedDescription)
             }
         }
     }
-    #endif
+
+    private func googleFirebaseCredential(for attempt: GoogleOAuthAttempt) async throws
+        -> GoogleFirebaseCredentialResult {
+        let callback = try await runGoogleWebSession(for: attempt)
+        try requireCurrentGoogleAttempt(attempt)
+        let code = try GoogleOAuthPKCE.authorizationCode(
+            from: callback, for: attempt)
+        try requireCurrentGoogleAttempt(attempt)
+
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await URLSession.shared.data(
+                for: GoogleOAuthPKCE.tokenRequest(code: code, for: attempt))
+        } catch {
+            if googleOAuthGeneration != attempt.generation {
+                throw GoogleOAuthError.superseded
+            }
+            throw GoogleOAuthError.transport
+        }
+        try requireCurrentGoogleAttempt(attempt)
+        guard let http = response as? HTTPURLResponse else {
+            throw GoogleOAuthError.tokenExchangeFailed
+        }
+        let tokens = try GoogleOAuthPKCE.tokens(
+            data: data, statusCode: http.statusCode)
+        try requireCurrentGoogleAttempt(attempt)
+        return GoogleFirebaseCredentialResult(
+            credential: GoogleAuthProvider.credential(
+                withIDToken: tokens.idToken,
+                accessToken: tokens.accessToken),
+            generation: attempt.generation)
+    }
+
+    private func beginGoogleOAuthAttempt() throws -> GoogleOAuthAttempt {
+        guard activeGoogleOAuthGeneration == nil else {
+            throw GoogleOAuthError.superseded
+        }
+        guard let clientID = FirebaseApp.app()?.options.clientID else {
+            throw GoogleOAuthError.invalidConfiguration
+        }
+        let nextGeneration = googleOAuthGeneration &+ 1
+        let attempt = try GoogleOAuthPKCE.makeAttempt(
+            clientID: clientID,
+            state: Self.randomNonce(),
+            verifier: Self.randomNonce(length: 64),
+            generation: nextGeneration)
+
+        googleOAuthGeneration = nextGeneration
+        activeGoogleOAuthGeneration = nextGeneration
+        return attempt
+    }
+
+    private func runGoogleWebSession(for attempt: GoogleOAuthAttempt) async throws -> URL {
+        try requireCurrentGoogleAttempt(attempt)
+        return try await withCheckedThrowingContinuation { continuation in
+            guard googleOAuthGeneration == attempt.generation else {
+                continuation.resume(throwing: GoogleOAuthError.superseded)
+                return
+            }
+            googleWebContinuation = continuation
+            let session = ASWebAuthenticationSession(
+                url: attempt.authorizationURL,
+                callbackURLScheme: attempt.callbackScheme
+            ) { [weak self] callback, error in
+                Task { @MainActor in
+                    self?.finishGoogleWebSession(
+                        callback: callback,
+                        error: error,
+                        generation: attempt.generation)
+                }
+            }
+            session.presentationContextProvider = googleWebPresenter
+            // Keep browser accounts so `prompt=select_account` can show the
+            // user's existing Google identities instead of forcing re-entry.
+            session.prefersEphemeralWebBrowserSession = false
+            googleWebSession = session
+            guard session.start() else {
+                googleWebContinuation = nil
+                googleWebSession = nil
+                continuation.resume(throwing: GoogleOAuthError.browserUnavailable)
+                return
+            }
+        }
+    }
+
+    private func finishGoogleWebSession(callback: URL?, error: Error?,
+                                        generation: UInt) {
+        guard googleOAuthGeneration == generation,
+              let continuation = googleWebContinuation else { return }
+        googleWebContinuation = nil
+        googleWebSession = nil
+        if let error {
+            let ns = error as NSError
+            if ns.domain == ASWebAuthenticationSessionError.errorDomain,
+               ns.code == ASWebAuthenticationSessionError.canceledLogin.rawValue {
+                continuation.resume(throwing: GoogleOAuthError.cancelled)
+            } else {
+                continuation.resume(throwing: GoogleOAuthError.transport)
+            }
+        } else if let callback {
+            continuation.resume(returning: callback)
+        } else {
+            continuation.resume(throwing: GoogleOAuthError.invalidCallback)
+        }
+    }
+
+    private func requireCurrentGoogleAttempt(_ attempt: GoogleOAuthAttempt) throws {
+        guard googleOAuthGeneration == attempt.generation else {
+            throw GoogleOAuthError.superseded
+        }
+    }
+
+    private func cancelActiveGoogleWebSession(throwing error: GoogleOAuthError) {
+        let continuation = googleWebContinuation
+        let session = googleWebSession
+        googleWebContinuation = nil
+        googleWebSession = nil
+        session?.cancel()
+        continuation?.resume(throwing: error)
+    }
+
+    private func invalidateGoogleOAuth() {
+        googleOAuthGeneration &+= 1
+        cancelActiveGoogleWebSession(throwing: GoogleOAuthError.superseded)
+    }
+
+    private func completeGoogleOAuthAttempt(generation: UInt) {
+        guard activeGoogleOAuthGeneration == generation else { return }
+        activeGoogleOAuthGeneration = nil
+        googleWebContinuation = nil
+        googleWebSession = nil
+    }
+
+    private func reauthenticateGoogle(user: User) async throws {
+        let expectedUID = user.uid
+        let attempt: GoogleOAuthAttempt
+        do {
+            attempt = try beginGoogleOAuthAttempt()
+        } catch GoogleOAuthError.superseded {
+            throw AccountDeletionError.cancelled
+        }
+        defer { completeGoogleOAuthAttempt(generation: attempt.generation) }
+        do {
+            let result = try await googleFirebaseCredential(for: attempt)
+            guard googleOAuthGeneration == result.generation,
+                  Auth.auth().currentUser?.uid == expectedUID else {
+                throw GoogleOAuthError.superseded
+            }
+            _ = try await user.reauthenticate(with: result.credential)
+            guard googleOAuthGeneration == result.generation,
+                  Auth.auth().currentUser?.uid == expectedUID else {
+                throw GoogleOAuthError.superseded
+            }
+        } catch GoogleOAuthError.cancelled {
+            throw AccountDeletionError.cancelled
+        } catch GoogleOAuthError.superseded {
+            throw AccountDeletionError.cancelled
+        }
+    }
 
     // ------------------------------------------------- account deletion (Mac)
 
@@ -345,7 +786,7 @@ public final class AuthController: ObservableObject {
         if providers.contains("apple.com") {
             try await reauthenticateAppleOnMac(user: user)
         } else if providers.contains("google.com") {
-            try await reauthenticateGoogleOnMac(user: user)
+            try await reauthenticateGoogle(user: user)
         } else {
             throw AccountDeletionError.notSignedIn
         }
@@ -397,71 +838,6 @@ public final class AuthController: ObservableObject {
         _ = try await user.reauthenticate(with: credential)
         try await Auth.auth().revokeToken(
             withAuthorizationCode: authorizationCode)
-    }
-
-    private func reauthenticateGoogleOnMac(user: User) async throws {
-        guard let clientID = FirebaseApp.app()?.options.clientID else {
-            throw AccountDeletionError.notSignedIn
-        }
-        let reversed = clientID.split(separator: ".").reversed().joined(separator: ".")
-        let redirectURI = "\(reversed):/oauth2redirect"
-        let verifier = Self.randomNonce(length: 64)
-        let challenge = Data(SHA256.hash(data: Data(verifier.utf8)))
-            .base64EncodedString()
-            .replacingOccurrences(of: "+", with: "-")
-            .replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: "=", with: "")
-        let state = Self.randomNonce(length: 16)
-
-        var components = URLComponents(
-            string: "https://accounts.google.com/o/oauth2/v2/auth")!
-        components.queryItems = [
-            .init(name: "client_id", value: clientID),
-            .init(name: "redirect_uri", value: redirectURI),
-            .init(name: "response_type", value: "code"),
-            .init(name: "scope", value: "openid email profile"),
-            .init(name: "state", value: state),
-            .init(name: "code_challenge", value: challenge),
-            .init(name: "code_challenge_method", value: "S256"),
-            .init(name: "prompt", value: "select_account"),
-        ]
-        let callback = try await runAccountDeletionWebSession(
-            url: components.url!, callbackScheme: String(reversed))
-        guard callback.scheme?.lowercased() == reversed.lowercased(),
-              callback.path == "/oauth2redirect",
-              let items = URLComponents(
-                url: callback, resolvingAgainstBaseURL: false)?.queryItems,
-              items.first(where: { $0.name == "state" })?.value == state,
-              let code = items.first(where: { $0.name == "code" })?.value
-        else { throw AccountDeletionError.notSignedIn }
-
-        var request = URLRequest(
-            url: URL(string: "https://oauth2.googleapis.com/token")!)
-        request.httpMethod = "POST"
-        request.setValue("application/x-www-form-urlencoded",
-                         forHTTPHeaderField: "Content-Type")
-        let form = [
-            "code": code,
-            "client_id": clientID,
-            "redirect_uri": redirectURI,
-            "code_verifier": verifier,
-            "grant_type": "authorization_code",
-        ]
-        request.httpBody = form
-            .map { "\($0.key)=\($0.value.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? $0.value)" }
-            .joined(separator: "&")
-            .data(using: .utf8)
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse,
-              (200..<300).contains(http.statusCode),
-              let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let idToken = json["id_token"] as? String else {
-            throw AccountDeletionError.notSignedIn
-        }
-        let accessToken = json["access_token"] as? String ?? ""
-        let credential = GoogleAuthProvider.credential(
-            withIDToken: idToken, accessToken: accessToken)
-        _ = try await user.reauthenticate(with: credential)
     }
 
     private func runAccountDeletionWebSession(
@@ -558,23 +934,13 @@ public final class AuthController: ObservableObject {
         return try await deleteAccountFromServer()
     }
 
-    /// Firebase's provider flow presents the Google sheet, then refreshes the
-    /// Firebase auth_time that the deletion endpoint verifies server-side.
+    /// The shared PKCE flow obtains a fresh Google credential, then refreshes
+    /// Firebase auth_time for the server-owned deletion endpoint.
     public func deleteAccountWithGoogle() async throws -> String {
         guard let user = Auth.auth().currentUser else {
             throw AccountDeletionError.notSignedIn
         }
-        let provider = OAuthProvider(providerID: "google.com")
-        provider.scopes = ["email", "profile"]
-        do {
-            _ = try await user.reauthenticate(with: provider, uiDelegate: nil)
-        } catch {
-            let ns = error as NSError
-            if ns.code == AuthErrorCode.webContextCancelled.rawValue {
-                throw AccountDeletionError.cancelled
-            }
-            throw error
-        }
+        try await reauthenticateGoogle(user: user)
         return try await deleteAccountFromServer()
     }
     #endif
@@ -597,6 +963,7 @@ public final class AuthController: ObservableObject {
     /// failed. Callers retain that uid in `pendingLocalCleanupUIDs` so cleanup
     /// can be retried without stranding an authenticated, already-deleted user.
     public func finishAccountDeletion(uid: String) {
+        invalidateGoogleOAuth()
         cloudAccessGeneration &+= 1
         invalidatePatreonConnection()
         UserDefaults.standard.removeObject(forKey: Self.admittedKey(uid))
@@ -622,10 +989,23 @@ public final class AuthController: ObservableObject {
 
     // ------------------------------------------------- Firebase + catch-and-link
 
-    private func signIn(with credential: AuthCredential) {
+    private func signIn(with credential: AuthCredential,
+                        googleGeneration: UInt? = nil) {
         Auth.auth().signIn(with: credential) { [weak self] result, error in
             Task { @MainActor in
                 guard let self else { return }
+                if let googleGeneration,
+                   self.googleOAuthGeneration != googleGeneration {
+                    self.completeGoogleOAuthAttempt(generation: googleGeneration)
+                    // A sign-out can invalidate an in-flight Firebase request,
+                    // but Firebase may still publish its result. Restore the
+                    // requested signed-out state when no newer auth succeeded.
+                    if case .signedOut = self.state,
+                       Auth.auth().currentUser?.uid == result?.user.uid {
+                        try? Auth.auth().signOut()
+                    }
+                    return
+                }
                 if let error = error as NSError? {
                     if error.code == AuthErrorCode.accountExistsWithDifferentCredential.rawValue {
                         // One-account-per-email: stash this credential, ask
@@ -636,21 +1016,46 @@ public final class AuthController: ObservableObject {
                         self.linkHint =
                             "\(mail) already has a Gainmap account with a different sign-in method. "
                             + "Sign in with the one you used before — I'll connect this one to it."
+                        if let googleGeneration {
+                            self.completeGoogleOAuthAttempt(generation: googleGeneration)
+                        }
                         return
                     }
                     self.state = .failed(error.localizedDescription)
+                    if let googleGeneration {
+                        self.completeGoogleOAuthAttempt(generation: googleGeneration)
+                    }
                     return
                 }
-                guard let user = result?.user else { return }
+                guard let user = result?.user else {
+                    if let googleGeneration {
+                        self.completeGoogleOAuthAttempt(generation: googleGeneration)
+                    }
+                    return
+                }
                 if let pending = self.pendingCredential {
                     self.pendingCredential = nil
                     self.linkHint = nil
                     user.link(with: pending) { _, _ in
                         // Link failure is non-fatal (the account works; the
                         // second provider just isn't attached).
-                        Task { @MainActor in self.adoptSignedIn(user) }
+                        Task { @MainActor in
+                            if let googleGeneration {
+                                guard self.googleOAuthGeneration == googleGeneration else {
+                                    self.completeGoogleOAuthAttempt(
+                                        generation: googleGeneration)
+                                    return
+                                }
+                                self.completeGoogleOAuthAttempt(
+                                    generation: googleGeneration)
+                            }
+                            self.adoptSignedIn(user)
+                        }
                     }
                 } else {
+                    if let googleGeneration {
+                        self.completeGoogleOAuthAttempt(generation: googleGeneration)
+                    }
                     self.adoptSignedIn(user)
                 }
             }
@@ -658,6 +1063,7 @@ public final class AuthController: ObservableObject {
     }
 
     private func adoptSignedIn(_ user: User) {
+        invalidateGoogleOAuth()
         cloudAccessGeneration &+= 1
         invalidatePatreonConnection()
         let generation = cloudAccessGeneration
@@ -667,6 +1073,7 @@ public final class AuthController: ObservableObject {
         cloudAccess = nil
         cloudActionError = nil
         isRefreshingCloudAccess = false
+        shouldOfferPatreonAccountSwitch = false
         state = .checking(uid: user.uid)
         Task {
             await requestCloudAccess(
@@ -734,6 +1141,7 @@ public final class AuthController: ObservableObject {
             cloudAccess = access
             cloudActionError = nil
             if access.canSync {
+                shouldOfferPatreonAccountSwitch = false
                 UserDefaults.standard.set(true, forKey: Self.admittedKey(uid))
                 state = .ready(uid: uid)
             } else {
@@ -786,6 +1194,10 @@ public final class AuthController: ObservableObject {
     /// Starts a backend-issued Patreon OAuth flow. The app receives only a
     /// safe success/error callback; Patreon tokens remain server-side.
     public func connectPatreon() {
+        connectPatreon(mode: .reuseSession)
+    }
+
+    public func connectPatreon(mode: PatreonConnectionMode) {
         guard let expectedUID = Auth.auth().currentUser?.uid,
               !isConnectingPatreon else { return }
         patreonConnectionGeneration &+= 1
@@ -795,7 +1207,9 @@ public final class AuthController: ObservableObject {
         Task {
             do {
                 let result = try await Functions.functions(region: "us-central1")
-                    .httpsCallable("startPatreonOAuth").call([:])
+                    .httpsCallable("startPatreonOAuth").call([
+                        "attemptKind": mode.attemptKind,
+                    ])
                 guard let data = result.data as? [String: Any],
                       let rawURL = data["authorizationURL"] as? String,
                       let url = URL(string: rawURL),
@@ -814,7 +1228,8 @@ public final class AuthController: ObservableObject {
                 startPatreonWebSession(
                     url: url,
                     expectedUID: expectedUID,
-                    connectionGeneration: connectionGeneration)
+                    connectionGeneration: connectionGeneration,
+                    mode: mode)
             } catch {
                 guard connectionGeneration == patreonConnectionGeneration,
                       Auth.auth().currentUser?.uid == expectedUID else { return }
@@ -827,7 +1242,8 @@ public final class AuthController: ObservableObject {
     private func startPatreonWebSession(
         url: URL,
         expectedUID: String,
-        connectionGeneration: UInt
+        connectionGeneration: UInt,
+        mode: PatreonConnectionMode
     ) {
         guard connectionGeneration == patreonConnectionGeneration,
               Auth.auth().currentUser?.uid == expectedUID else { return }
@@ -844,7 +1260,8 @@ public final class AuthController: ObservableObject {
             }
         }
         session.presentationContextProvider = patreonWebPresenter
-        session.prefersEphemeralWebBrowserSession = false
+        session.prefersEphemeralWebBrowserSession =
+            mode.prefersEphemeralBrowserSession
         patreonWebSession = session
         if !session.start() {
             guard connectionGeneration == patreonConnectionGeneration else { return }
@@ -882,11 +1299,17 @@ public final class AuthController: ObservableObject {
             return
         }
         if status == "success" {
+            shouldOfferPatreonAccountSwitch = false
             refreshCloudAccess()
         } else {
-            cloudActionError = Self.patreonCallbackMessage(
-                code: components.queryItems?.first(where: { $0.name == "code" })?.value)
+            let code = components.queryItems?.first(where: { $0.name == "code" })?.value
+            shouldOfferPatreonAccountSwitch = Self.patreonErrorSuggestsAccountSwitch(code)
+            cloudActionError = Self.patreonCallbackMessage(code: code)
         }
+    }
+
+    private static func patreonErrorSuggestsAccountSwitch(_ code: String?) -> Bool {
+        ["membership_not_found", "membership_inactive", "already_linked"].contains(code)
     }
 
     private static func patreonCallbackMessage(code: String?) -> String {
@@ -896,7 +1319,11 @@ public final class AuthController: ObservableObject {
         case "invalid_state", "expired_state":
             return "The Patreon connection expired. Start it again."
         case "already_linked":
-            return "That Patreon membership is already connected to another Gainmap account."
+            return "That Patreon membership is already connected to another Gainmap account. Try another account."
+        case "membership_not_found":
+            return "No active Gainmap membership was found for that Patreon account. Try another account."
+        case "membership_inactive":
+            return "That Patreon membership isn’t active. Try another account or refresh after reactivating."
         case "campaign_not_configured":
             return "Patreon isn't configured for Gainmap yet. Try again later."
         case "token_exchange_failed", "identity_failed":
@@ -986,108 +1413,12 @@ public final class AuthController: ObservableObject {
         signIn(with: credential)
     }
 
-    // ------------------------------------------------- Google (Mac)
-    // FirebaseAuth's OAuthProvider web flow is iOS-only (S3 finding), so the
-    // Mac hand-rolls Google's authorization-code + PKCE flow: ASWebAuth ->
-    // accounts.google.com -> custom-scheme redirect (the plist's reversed
-    // client ID) -> token exchange -> GoogleAuthProvider credential. No
-    // client secret — Google's iOS-type OAuth clients use PKCE alone.
-    public func googleWebSignIn() {
-        guard let clientID = FirebaseApp.app()?.options.clientID else {
-            state = .failed("Google sign-in is not configured.")
-            return
-        }
-        // "NNN-xxx.apps.googleusercontent.com" -> "com.googleusercontent.apps.NNN-xxx"
-        let reversed = clientID.split(separator: ".").reversed().joined(separator: ".")
-        let redirectURI = "\(reversed):/oauth2redirect"
-
-        let verifier = Self.randomNonce(length: 64)
-        let challenge = Data(SHA256.hash(data: Data(verifier.utf8)))
-            .base64EncodedString()
-            .replacingOccurrences(of: "+", with: "-")
-            .replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: "=", with: "")
-        let state = Self.randomNonce(length: 16)
-        webState = state
-
-        var c = URLComponents(string: "https://accounts.google.com/o/oauth2/v2/auth")!
-        c.queryItems = [
-            .init(name: "client_id", value: clientID),
-            .init(name: "redirect_uri", value: redirectURI),
-            .init(name: "response_type", value: "code"),
-            .init(name: "scope", value: "openid email profile"),
-            .init(name: "state", value: state),
-            .init(name: "code_challenge", value: challenge),
-            .init(name: "code_challenge_method", value: "S256"),
-        ]
-        let session = ASWebAuthenticationSession(
-            url: c.url!,
-            callbackURLScheme: String(reversed)
-        ) { [weak self] url, error in
-            Task { @MainActor in
-                await self?.handleGoogleWebCallback(url: url, error: error,
-                                                    clientID: clientID,
-                                                    redirectURI: redirectURI,
-                                                    verifier: verifier)
-            }
-        }
-        session.presentationContextProvider = webPresenter
-        webSession = session
-        session.start()
-    }
-
-    private func handleGoogleWebCallback(url: URL?, error: Error?, clientID: String,
-                                         redirectURI: String, verifier: String) async {
-        webSession = nil
-        if let error {
-            let ns = error as NSError
-            if ns.domain == ASWebAuthenticationSessionError.errorDomain,
-               ns.code == ASWebAuthenticationSessionError.canceledLogin.rawValue { return }
-            state = .failed(error.localizedDescription)
-            return
-        }
-        guard let url,
-              let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems,
-              items.first(where: { $0.name == "state" })?.value == webState,
-              let code = items.first(where: { $0.name == "code" })?.value else {
-            state = .failed("Google sign-in returned no authorization code.")
-            return
-        }
-        // Exchange the code for tokens (PKCE — no secret).
-        var request = URLRequest(url: URL(string: "https://oauth2.googleapis.com/token")!)
-        request.httpMethod = "POST"
-        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-        let form = [
-            "code": code,
-            "client_id": clientID,
-            "redirect_uri": redirectURI,
-            "code_verifier": verifier,
-            "grant_type": "authorization_code",
-        ]
-        request.httpBody = form
-            .map { "\($0.key)=\($0.value.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? $0.value)" }
-            .joined(separator: "&")
-            .data(using: .utf8)
-        do {
-            let (data, _) = try await URLSession.shared.data(for: request)
-            guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let idToken = json["id_token"] as? String else {
-                state = .failed("Google sign-in token exchange failed.")
-                return
-            }
-            let accessToken = json["access_token"] as? String ?? ""
-            let credential = GoogleAuthProvider.credential(withIDToken: idToken,
-                                                           accessToken: accessToken)
-            signIn(with: credential)
-        } catch {
-            state = .failed(error.localizedDescription)
-        }
-    }
     #endif
 
     // ------------------------------------------------- sign-out
 
     public func signOut() {
+        invalidateGoogleOAuth()
         cloudAccessGeneration &+= 1
         invalidatePatreonConnection()
         #if os(macOS)
@@ -1104,6 +1435,7 @@ public final class AuthController: ObservableObject {
         cloudAccess = nil
         cloudActionError = nil
         isRefreshingCloudAccess = false
+        shouldOfferPatreonAccountSwitch = false
         state = .signedOut
     }
 

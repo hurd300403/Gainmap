@@ -54,12 +54,22 @@ both the app's `Resources/Helpers/` and the plugin's `bin/mac/`.
 ## Release (notarized)
 
 ```bash
-# one-time: store an app-specific password as a notarytool profile
-xcrun notarytool store-credentials "gainmap-notary" \
-    --apple-id "samhurd@gmail.com" --team-id S8HQ5TEYDE --password <app-specific-pw>
+# One-time: install the portal-created "Gainmap Developer ID" provisioning
+# profile, then store an app-specific password in the canonical Keychain profile.
+xcrun notarytool store-credentials "legacylab-notary" \
+    --apple-id "samhurd+apple2@gmail.com" --team-id S8HQ5TEYDE \
+    --password <app-specific-pw>
 
-Gainmap/scripts/release.sh gainmap-notary
+# Read-only release preflight (identity/profile/notary/Sparkle/GitHub):
+Gainmap/scripts/release.sh --preflight-only
+
+# Archive, sign, notarize, generate an isolated Sparkle feed, and publish:
+Gainmap/scripts/release.sh
 ```
+
+Release artifacts are written to `dist/releases/v<marketing>-b<build>/`. The
+script never feeds stale top-level `dist/` files to Sparkle and refuses to
+overwrite an existing release directory or GitHub tag.
 
 ## CLI contract (`uhdrtool`)
 

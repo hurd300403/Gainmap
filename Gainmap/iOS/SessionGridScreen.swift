@@ -36,6 +36,7 @@ struct SessionGridScreen: View {
     @State private var appleDeletionSheetPresented = false
     @State private var deletingAccount = false
     @State private var cloudSettingsPresented = false
+    @State private var showsEmptyLibraryCloudCoachmark = false
 
     var body: some View {
         NavigationStack {
@@ -68,7 +69,12 @@ struct SessionGridScreen: View {
                             onDelete: { id in
                                 deleting = model.cards.first(where: { $0.id == id })
                             },
-                            syncState: cardSyncState)
+                            syncState: cardSyncState,
+                            showsCloudSyncCoachmark:
+                                showsEmptyLibraryCloudCoachmark,
+                            onSetUpCloudSync: {
+                                cloudSettingsPresented = true
+                            })
                     }
                 }
 
@@ -95,12 +101,16 @@ struct SessionGridScreen: View {
                     }
                     .accessibilityLabel("Sync status: \(syncVisualState.title)")
 
-                    Menu {
-                        if auth.uid == nil {
-                            Button("Set Up Cloud Sync…") {
-                                cloudSettingsPresented = true
-                            }
-                        } else {
+                    if auth.uid == nil {
+                        Button {
+                            cloudSettingsPresented = true
+                        } label: {
+                            Image(systemName: "person.circle")
+                                .foregroundStyle(Theme.stoneDim)
+                        }
+                        .accessibilityLabel("Set Up Cloud Sync")
+                    } else {
+                        Menu {
                             if let email = auth.email {
                                 Text(email)
                             }
@@ -114,10 +124,10 @@ struct SessionGridScreen: View {
                                 deleteAccountConfirmationPresented = true
                             }
                             .disabled(deletingAccount)
+                        } label: {
+                            Image(systemName: "person.circle")
+                                .foregroundStyle(Theme.stoneDim)
                         }
-                    } label: {
-                        Image(systemName: "person.circle")
-                            .foregroundStyle(Theme.stoneDim)
                     }
                 }
             }
@@ -171,6 +181,7 @@ struct SessionGridScreen: View {
             .sheet(isPresented: $cloudSettingsPresented) {
                 SignInScreen()
                     .environmentObject(auth)
+                    .presentationBackground(Theme.bg)
             }
             .alert("Rename Session", isPresented: renameAlertPresented) {
                 TextField("Session name", text: $renameText)
@@ -229,14 +240,23 @@ struct SessionGridScreen: View {
             }
             .onChange(of: model.cards.count) { _, count in
                 quickActions.updateContinueLatestShortcut(hasSessions: count > 0)
+                refreshEmptyLibraryCloudCoachmark()
             }
             .onChange(of: model.initialLoadDone) { _, loaded in
                 guard loaded else { return }
+                refreshEmptyLibraryCloudCoachmark()
                 Task { await handleQuickAction(quickActions.requestedQuickAction) }
+            }
+            .onChange(of: auth.state) {
+                refreshEmptyLibraryCloudCoachmark()
+            }
+            .onChange(of: auth.hasRestoredAuthState) {
+                refreshEmptyLibraryCloudCoachmark()
             }
             .task {
                 await model.refresh()
                 quickActions.updateContinueLatestShortcut(hasSessions: !model.cards.isEmpty)
+                refreshEmptyLibraryCloudCoachmark()
                 await handleQuickAction(quickActions.requestedQuickAction)
             }
             .refreshable { await model.refresh() }
@@ -444,31 +464,32 @@ struct SessionGridScreen: View {
     }
 
     private var shouldShowCloudBanner: Bool {
-        if auth.cloudAccess?.entitlement.status == .grace { return true }
-        if case .localOnly = auth.state { return true }
-        return false
+        switch cloudDisplayState.kind {
+        case .needsPatreon, .inactive, .grace, .waitlist,
+             .setupPending, .unavailable:
+            return auth.uid != nil
+        case .signedOut, .signInFailed, .checking, .enabled:
+            return false
+        }
     }
 
     private var cloudAccessBanner: some View {
-        let entitlement = auth.cloudAccess?.entitlement
         return HStack(spacing: 10) {
-            Image(systemName: entitlement?.status == .grace
-                  ? "clock" : "icloud.slash")
+            Image(systemName: cloudBannerIcon)
                 .font(.system(size: 12))
             VStack(alignment: .leading, spacing: 2) {
-                Text(auth.cloudAccess?.admissionBlockMessage
-                     ?? entitlement?.message
-                     ?? auth.cloudActionError
-                     ?? "Cloud Sync is off. Your sessions remain on this iPhone.")
+                Text(cloudDisplayState.title)
                     .font(Theme.ui(12, .medium)).foregroundStyle(Theme.stone)
-                Text(entitlement?.status == .grace
-                     ? "Local editing stays available even if the grace period ends."
-                     : "Gainmap's standard features do not require an account.")
+                Text(cloudDisplayState.detail)
                     .font(Theme.mono(9)).foregroundStyle(Theme.stoneDim)
             }
             Spacer()
-            Button(entitlement?.status == .unlinked ? "Connect" : "Details") {
-                cloudSettingsPresented = true
+            Button(cloudBannerActionLabel) {
+                if cloudDisplayState.action == .retry {
+                    auth.refreshCloudAccess()
+                } else {
+                    cloudSettingsPresented = true
+                }
             }
                 .font(Theme.mono(10, .semibold)).foregroundStyle(Theme.gold)
                 .buttonStyle(.plain)
@@ -477,6 +498,52 @@ struct SessionGridScreen: View {
         .background(Theme.surface.opacity(0.6))
         .overlay(Rectangle().frame(height: 1).foregroundStyle(Theme.line),
                  alignment: .bottom)
+    }
+
+    private var cloudDisplayState: CloudSyncDisplayState {
+        .resolve(
+            authState: auth.state,
+            access: auth.cloudAccess,
+            signedInEmail: auth.email,
+            preferPatreonAccountSwitch: auth.shouldOfferPatreonAccountSwitch)
+    }
+
+    private var cloudBannerActionLabel: String {
+        switch cloudDisplayState.action {
+        case .connectPatreon: return "Connect"
+        case .switchPatreon: return "Try Another"
+        case .retry: return "Try Again"
+        case .none, .signIn: return "Details"
+        }
+    }
+
+    private var cloudBannerIcon: String {
+        switch cloudDisplayState.kind {
+        case .grace: return "clock"
+        case .needsPatreon: return "link.badge.plus"
+        case .waitlist: return "hourglass"
+        case .setupPending, .unavailable: return "exclamationmark.icloud"
+        case .inactive: return "pause.circle"
+        case .signedOut, .signInFailed, .checking, .enabled: return "icloud"
+        }
+    }
+
+    private func refreshEmptyLibraryCloudCoachmark() {
+        guard model.initialLoadDone, auth.hasRestoredAuthState else {
+            showsEmptyLibraryCloudCoachmark = false
+            return
+        }
+        let signedOut: Bool
+        if case .signedOut = auth.state {
+            signedOut = true
+        } else {
+            signedOut = false
+        }
+        showsEmptyLibraryCloudCoachmark =
+            EmptyLibraryCloudCoachmarkGate.visibility(
+                libraryIsEmpty: model.cards.isEmpty,
+                signedOut: signedOut,
+                authStateRestored: auth.hasRestoredAuthState)
     }
 
 }

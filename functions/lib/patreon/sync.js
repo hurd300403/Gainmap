@@ -19,6 +19,7 @@ const {
   activeEntitlement,
   inactiveTransition,
   errorTransition,
+  preferEntitlement,
   valueMillis,
 } = require('./entitlement');
 const {
@@ -74,6 +75,7 @@ async function commitSets(db, writes, chunkSize = 400) {
 
 function preferMember(existing, candidate) {
   if (!existing) return candidate;
+  if (!candidate) return existing;
   if (candidate.isActiveEligible && !existing.isActiveEligible) return candidate;
   return existing;
 }
@@ -102,8 +104,11 @@ async function syncCampaignWithLease({ db, api, hmacKey, nowMs, id, priorRuntime
   const bySubjectHash = new Map();
 
   for (const member of members) {
-    byMemberId.set(member.memberId, member);
-    if (member.subjectId) bySubjectHash.set(subjectIndex(hmacKey, member.subjectId), member);
+    byMemberId.set(member.memberId, preferMember(byMemberId.get(member.memberId), member));
+    if (member.subjectId) {
+      const hash = subjectIndex(hmacKey, member.subjectId);
+      bySubjectHash.set(hash, preferMember(bySubjectHash.get(hash), member));
+    }
     // Verified-email bootstrap is only a recovery convenience for currently
     // eligible patrons. Do not retain campaign-wide hashes for free/former
     // members; linked inactive users are reconciled through their link.
@@ -182,21 +187,31 @@ async function syncCampaignWithLease({ db, api, hmacKey, nowMs, id, priorRuntime
     // eslint-disable-next-line no-await-in-loop
     const deletedSnap = await db.doc(`deletedAccounts/${uid}`).get();
     if (deletedSnap.exists) continue;
-    const member = byMemberId.get(link.memberId) || bySubjectHash.get(link.subjectHash) || null;
+    // Patreon can issue a new member resource when the same patron leaves and
+    // later rejoins. Prefer the active record for the linked subject instead
+    // of letting an older inactive member ID force an unnecessary downgrade.
+    const member = preferMember(
+      byMemberId.get(link.memberId),
+      bySubjectHash.get(link.subjectHash)
+    ) || null;
     // The outer entitlement and rules-facing mirror are one atomic unit. A
     // partial batch failure must never let callable state disagree with rules.
     // Link freshness and the member uniqueness index are committed with that
     // same unit, so an older full scan cannot follow a newer webhook.
     const mHash = member ? memberIndex(hmacKey, member.memberId) : '';
     const memberRef = mHash ? db.doc(`${MEMBER_INDEX_COLLECTION}/${mHash}`) : null;
+    const oldMemberRef = mHash && link.memberHash && link.memberHash !== mHash
+      ? db.doc(`${MEMBER_INDEX_COLLECTION}/${link.memberHash}`)
+      : null;
     // eslint-disable-next-line no-await-in-loop
     const entitlement = await db.runTransaction(async (tx) => {
-      const [deleted, user, current, currentLink, indexedMember] = await Promise.all([
+      const [deleted, user, current, currentLink, indexedMember, oldIndexedMember] = await Promise.all([
         tx.get(db.doc(`deletedAccounts/${uid}`)),
         tx.get(db.doc(`users/${uid}`)),
         tx.get(db.doc(`${ENTITLEMENTS_COLLECTION}/${uid}`)),
         tx.get(db.doc(`${LINKS_COLLECTION}/${uid}`)),
         memberRef ? tx.get(memberRef) : Promise.resolve(null),
+        oldMemberRef ? tx.get(oldMemberRef) : Promise.resolve(null),
       ]);
       if (deleted.exists || !currentLink.exists) return null;
       if (current.exists && current.get('purgeLeaseId')) return null;
@@ -213,9 +228,10 @@ async function syncCampaignWithLease({ db, api, hmacKey, nowMs, id, priorRuntime
       }
       if (indexedMember && indexedMember.exists && indexedMember.get('uid') !== uid) return null;
       const prior = current.exists ? current.data() || {} : entitlements.get(uid) || {};
-      const next = member && member.isActiveEligible
+      const linkedCandidate = member && member.isActiveEligible
         ? activeEntitlement(nowMs)
         : inactiveTransition(prior, nowMs);
+      const next = preferEntitlement(prior, linkedCandidate, nowMs);
       tx.set(db.doc(`${ENTITLEMENTS_COLLECTION}/${uid}`), next, { merge: true });
       if (user.exists) tx.set(db.doc(`users/${uid}`), { entitlement: next }, { merge: true });
       tx.set(db.doc(`${LINKS_COLLECTION}/${uid}`), {
@@ -228,6 +244,9 @@ async function syncCampaignWithLease({ db, api, hmacKey, nowMs, id, priorRuntime
         } : {}),
       }, { merge: true });
       if (memberRef) tx.set(memberRef, { uid, updatedAt: verifiedAt }, { merge: true });
+      if (oldIndexedMember && oldIndexedMember.exists && oldIndexedMember.get('uid') === uid) {
+        tx.delete(oldMemberRef);
+      }
       return next;
     });
     if (!entitlement) continue;
@@ -286,6 +305,11 @@ async function reconcileMemberCore({ db, api, hmacKey, memberId, nowMs = Date.no
     api.getMember(memberId),
     db.doc(`${MEMBER_INDEX_COLLECTION}/${mHash}`).get(),
   ]);
+  if (member && member.memberId !== String(memberId)) {
+    const error = new Error('Patreon returned a different member than requested.');
+    error.code = 'invalid_member_schema';
+    throw error;
+  }
   let uid = memberIndexSnap.exists ? memberIndexSnap.get('uid') : '';
   let resolvedBySubject = false;
   let resolvedSubjectHash = '';
@@ -295,6 +319,45 @@ async function reconcileMemberCore({ db, api, hmacKey, memberId, nowMs = Date.no
     const subjectSnap = await db.doc(`${SUBJECT_INDEX_COLLECTION}/${resolvedSubjectHash}`).get();
     uid = subjectSnap.exists ? subjectSnap.get('uid') : '';
     resolvedBySubject = Boolean(uid);
+  }
+
+  // A subject can legitimately acquire a new Patreon member ID after
+  // leaving/rejoining. Before allowing that fallback to migrate the link,
+  // compare both records with the creator credential. Keeping the current
+  // record on an eligibility tie prevents a delayed webhook for an old member
+  // from stealing the link back; an active replacement can still supersede an
+  // inactive or deleted record.
+  let expectedSubjectLink = null;
+  let oldMemberRef = null;
+  if (resolvedBySubject) {
+    const expectedLinkSnap = await db.doc(`${LINKS_COLLECTION}/${uid}`).get();
+    if (!expectedLinkSnap.exists ||
+        expectedLinkSnap.get('subjectHash') !== resolvedSubjectHash) {
+      return { reconciled: false, linked: false, active: false };
+    }
+    expectedSubjectLink = {
+      memberId: expectedLinkSnap.get('memberId') || '',
+      memberHash: expectedLinkSnap.get('memberHash') || '',
+      subjectHash: expectedLinkSnap.get('subjectHash') || '',
+    };
+    if (expectedSubjectLink.memberHash && expectedSubjectLink.memberHash !== mHash) {
+      const currentMember = expectedSubjectLink.memberId
+        ? await api.getMember(expectedSubjectLink.memberId)
+        : null;
+      if (currentMember &&
+          (currentMember.memberId !== expectedSubjectLink.memberId ||
+           currentMember.subjectId !== member.subjectId)) {
+        return { reconciled: false, linked: true, active: false };
+      }
+      if (preferMember(currentMember, member) !== member) {
+        return {
+          reconciled: false,
+          linked: true,
+          active: Boolean(currentMember && currentMember.isActiveEligible),
+        };
+      }
+      oldMemberRef = db.doc(`${MEMBER_INDEX_COLLECTION}/${expectedSubjectLink.memberHash}`);
+    }
   }
 
   const verifiedAt = Timestamp.fromMillis(nowMs);
@@ -369,13 +432,14 @@ async function reconcileMemberCore({ db, api, hmacKey, memberId, nowMs = Date.no
     const userRef = db.doc(`users/${uid}`);
     const linkRef = db.doc(`${LINKS_COLLECTION}/${uid}`);
     const memberRef = db.doc(`${MEMBER_INDEX_COLLECTION}/${mHash}`);
-    const [deleted, user, current, currentLink, memberIndexCurrent, runtimeSnap] =
+    const [deleted, user, current, currentLink, memberIndexCurrent, oldMemberIndex, runtimeSnap] =
       await Promise.all([
         tx.get(db.doc(`deletedAccounts/${uid}`)),
         tx.get(userRef),
         tx.get(entitlementRef),
         tx.get(linkRef),
         tx.get(memberRef),
+        oldMemberRef ? tx.get(oldMemberRef) : Promise.resolve(null),
         tx.get(runtimeRef),
       ]);
     if (deleted.exists || !currentLink.exists) return { applied: false, deleted: deleted.exists };
@@ -386,7 +450,13 @@ async function reconcileMemberCore({ db, api, hmacKey, memberId, nowMs = Date.no
     // is in flight (OAuth relink or member recreation). Require the current
     // identity to still be the one that authorized this reconciliation.
     if (resolvedBySubject) {
-      if (currentLink.get('subjectHash') !== resolvedSubjectHash) return { applied: false };
+      if (currentLink.get('subjectHash') !== expectedSubjectLink.subjectHash ||
+          currentLink.get('memberId') !== expectedSubjectLink.memberId ||
+          currentLink.get('memberHash') !== expectedSubjectLink.memberHash ||
+          (memberIndexCurrent.exists && memberIndexCurrent.get('uid') !== uid) ||
+          (oldMemberIndex && oldMemberIndex.exists && oldMemberIndex.get('uid') !== uid)) {
+        return { applied: false };
+      }
     } else if (!memberIndexCurrent.exists ||
                memberIndexCurrent.get('uid') !== uid ||
                currentLink.get('memberHash') !== mHash) {
@@ -429,9 +499,10 @@ async function reconcileMemberCore({ db, api, hmacKey, memberId, nowMs = Date.no
     }
 
     const prior = current.exists ? current.data() || {} : {};
-    const entitlement = member && member.isActiveEligible
+    const linkedCandidate = member && member.isActiveEligible
       ? activeEntitlement(nowMs)
       : inactiveTransition(prior, nowMs);
+    const entitlement = preferEntitlement(prior, linkedCandidate, nowMs);
     tx.set(entitlementRef, entitlement, { merge: true });
     if (user.exists) tx.set(userRef, { entitlement }, { merge: true });
     tx.set(linkRef, {
@@ -442,6 +513,9 @@ async function reconcileMemberCore({ db, api, hmacKey, memberId, nowMs = Date.no
       updatedAt: verifiedAt,
     }, { merge: true });
     tx.set(memberRef, { uid, updatedAt: verifiedAt }, { merge: true });
+    if (oldMemberIndex && oldMemberIndex.exists && oldMemberIndex.get('uid') === uid) {
+      tx.delete(oldMemberRef);
+    }
 
     if (currentSyncId) {
       if (priorEmailRef && priorEmailHash !== nextEmailHash) {

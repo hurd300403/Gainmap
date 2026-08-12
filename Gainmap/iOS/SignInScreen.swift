@@ -2,9 +2,8 @@
 //  SignInScreen.swift
 //  Gainmap for iPhone
 //
-//  Optional Cloud Sync setup. Gainmap's editor and local library never depend
-//  on this screen; Firebase identifies a private library and Patreon grants
-//  access only to the cloud service.
+//  Optional Cloud Sync setup. Local sessions and editing never depend on
+//  signing in; this sheet stages identity first and Patreon only when needed.
 //
 
 import SwiftUI
@@ -17,48 +16,76 @@ struct SignInScreen: View {
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 22) {
-                    VStack(alignment: .leading, spacing: 7) {
-                        Image(systemName: "icloud")
-                            .font(.system(size: 34, weight: .light))
-                            .foregroundStyle(Theme.accent)
-                        Text("Cloud Sync")
-                            .font(Theme.display(32, .semibold))
-                            .foregroundStyle(Theme.stone)
-                        Text("Gainmap is free to use without an account. Sign in only if you want your private sessions and photos to sync between iPhone and Mac.")
-                            .font(Theme.ui(14))
-                            .foregroundStyle(Theme.stoneDim)
-                            .fixedSize(horizontal: false, vertical: true)
+            ZStack {
+                Theme.bg.ignoresSafeArea()
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 18) {
+                        header
+                        switch auth.state {
+                        case .signedOut, .failed:
+                            signInControls
+                        case .checking:
+                            checkingView
+                        case .ready, .localOnly:
+                            signedInControls
+                        }
                     }
-
-                    switch auth.state {
-                    case .signedOut, .failed:
-                        signInControls
-                    case .checking:
-                        checkingView
-                    case .ready, .localOnly:
-                        signedInControls
+                    .padding(20)
+                    .frame(maxWidth: 560, alignment: .leading)
+                    .background(
+                        Theme.surface,
+                        in: RoundedRectangle(
+                            cornerRadius: 20,
+                            style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 20, style: .continuous)
+                            .stroke(Theme.line, lineWidth: 1)
                     }
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 24)
+                    .frame(maxWidth: .infinity)
                 }
-                .padding(24)
-                .frame(maxWidth: 560, alignment: .leading)
-                .frame(maxWidth: .infinity)
             }
-            .background(Theme.bg.ignoresSafeArea())
+            .toolbarBackground(Theme.bg, for: .navigationBar)
+            .toolbarBackground(.visible, for: .navigationBar)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") { dismiss() }
                 }
             }
         }
+        .preferredColorScheme(.dark)
+    }
+
+    private var header: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "icloud")
+                .font(.system(size: 24, weight: .light))
+                .foregroundStyle(Theme.accent)
+                .frame(width: 38, height: 38)
+                .background(Theme.accent.opacity(0.12), in: Circle())
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Cloud Sync")
+                    .font(Theme.display(27, .semibold))
+                    .foregroundStyle(Theme.stone)
+                Text("Optional · iPhone + Mac")
+                    .font(Theme.mono(9.5, .medium))
+                    .tracking(0.7)
+                    .foregroundStyle(Theme.stoneDim)
+            }
+        }
     }
 
     private var signInControls: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("1 · Create your private sync account")
-                .font(Theme.mono(10, .bold))
-                .tracking(1.2)
+            Text(displayState.detail)
+                .font(Theme.ui(13.5))
+                .foregroundStyle(Theme.stoneDim)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Text("SIGN IN")
+                .font(Theme.mono(9.5, .bold))
+                .tracking(1.15)
                 .foregroundStyle(Theme.gold)
 
             SignInWithAppleButton(.signIn) { request in
@@ -67,20 +94,25 @@ struct SignInScreen: View {
                 auth.handleAppleCompletion(result)
             }
             .signInWithAppleButtonStyle(.white)
-            .frame(height: 48)
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .frame(height: 47)
+            .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
 
             Button { auth.googleSignIn() } label: {
                 HStack(spacing: 8) {
-                    Image(systemName: "g.circle.fill").font(.system(size: 17))
-                    Text("Sign in with Google").font(Theme.ui(16, .medium))
+                    Image(systemName: "g.circle.fill")
+                        .font(.system(size: 17))
+                    Text("Sign in with Google")
+                        .font(Theme.ui(15, .medium))
                 }
                 .frame(maxWidth: .infinity)
-                .frame(height: 48)
-                .background(Theme.surface,
-                            in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .stroke(Theme.line, lineWidth: 1))
+                .frame(height: 47)
+                .background(
+                    Theme.inset,
+                    in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 11, style: .continuous)
+                        .stroke(Theme.line, lineWidth: 1)
+                }
                 .foregroundStyle(Theme.stone)
             }
             .buttonStyle(.plain)
@@ -92,26 +124,30 @@ struct SignInScreen: View {
                 inlineMessage(message, color: Theme.accentHot)
             }
 
-            Text("An arbitrary email address cannot unlock Cloud Sync. A verified email that matches an active patron may receive temporary access; connecting Patreon confirms your membership.")
+            Text("Patreon member? Use the same email if you can. If it’s different, connect Patreon after signing in.")
                 .font(Theme.mono(9.5))
                 .foregroundStyle(Theme.stoneFaint)
                 .fixedSize(horizontal: false, vertical: true)
-                .padding(.top, 2)
         }
     }
 
     private var checkingView: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 14) {
             accountLabel
             HStack(spacing: 10) {
                 ProgressView().tint(Theme.gold)
-                Text("Checking Cloud Sync access…")
-                    .font(Theme.ui(14, .medium))
-                    .foregroundStyle(Theme.stoneDim)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(displayState.title)
+                        .font(Theme.ui(14, .semibold))
+                        .foregroundStyle(Theme.stone)
+                    Text(displayState.detail)
+                        .font(Theme.ui(12.5))
+                        .foregroundStyle(Theme.stoneDim)
+                }
             }
-            .padding(16)
+            .padding(14)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Theme.surface, in: RoundedRectangle(cornerRadius: 12))
+            .background(Theme.inset, in: RoundedRectangle(cornerRadius: 12))
         }
     }
 
@@ -120,79 +156,91 @@ struct SignInScreen: View {
             accountLabel
             entitlementCard
 
-            if shouldOfferPatreonConnection {
-                Button { auth.connectPatreon() } label: {
+            if displayState.action == .connectPatreon
+                || displayState.action == .switchPatreon {
+                Text("You’ll sign in securely on Patreon.")
+                    .font(Theme.ui(12.5))
+                    .foregroundStyle(Theme.stoneDim)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Button { performPatreonAction() } label: {
                     HStack(spacing: 9) {
                         if auth.isConnectingPatreon {
                             ProgressView().tint(.white)
                         } else {
-                            Image(systemName: "link")
+                            Image(systemName: displayState.action == .switchPatreon
+                                  ? "arrow.triangle.2.circlepath" : "link")
                         }
-                        Text("Connect Patreon")
+                        Text(displayState.action.label ?? "Connect Patreon")
                     }
-                    .font(Theme.ui(15, .semibold))
+                    .font(Theme.ui(14.5, .semibold))
                     .frame(maxWidth: .infinity)
-                    .frame(height: 48)
+                    .frame(height: 47)
                     .foregroundStyle(.white)
-                    .background(Theme.accent,
-                                in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .background(
+                        Theme.accent,
+                        in: RoundedRectangle(cornerRadius: 11, style: .continuous))
                 }
                 .buttonStyle(.plain)
                 .disabled(auth.isConnectingPatreon)
             }
 
-            Button {
-                auth.refreshCloudAccess()
-            } label: {
-                HStack(spacing: 8) {
-                    if auth.isRefreshingCloudAccess {
-                        ProgressView().controlSize(.small)
-                    }
-                    Text("Check Access Again")
+            if displayState.action == .retry {
+                Button(displayState.action.label ?? "Refresh Status") {
+                    auth.refreshCloudAccess()
                 }
+                .disabled(
+                    auth.isRefreshingCloudAccess
+                        || auth.isConnectingPatreon)
+            } else if displayState.kind == .inactive {
+                Button("Refresh Status") { auth.refreshCloudAccess() }
+                    .disabled(
+                        auth.isRefreshingCloudAccess
+                            || auth.isConnectingPatreon)
             }
-            .disabled(auth.isRefreshingCloudAccess || auth.isConnectingPatreon)
 
-            if let error = auth.cloudActionError {
+            if let error = auth.cloudActionError,
+               displayState.kind != .unavailable {
                 inlineMessage(error, color: Theme.accentHot)
             }
 
             Divider().overlay(Theme.line)
-            Button("Sign out of Cloud Sync", role: .destructive) { auth.signOut() }
+            Button("Sign out", role: .destructive) { auth.signOut() }
                 .disabled(auth.isConnectingPatreon)
         }
     }
 
+    @ViewBuilder
     private var accountLabel: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text("SYNC ACCOUNT")
-                .font(Theme.mono(9, .bold))
-                .tracking(1.1)
-                .foregroundStyle(Theme.stoneFaint)
-            Text(auth.email ?? "Signed in")
-                .font(Theme.ui(15, .medium))
-                .foregroundStyle(Theme.stone)
+        if let email = auth.email, auth.uid != nil {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("SIGNED IN AS")
+                    .font(Theme.mono(9, .bold))
+                    .tracking(1.1)
+                    .foregroundStyle(Theme.stoneFaint)
+                Text(email)
+                    .font(Theme.ui(15, .medium))
+                    .foregroundStyle(Theme.stone)
+                    .textSelection(.enabled)
+            }
         }
     }
 
     private var entitlementCard: some View {
-        let entitlement = auth.cloudAccess?.entitlement
-        return HStack(alignment: .top, spacing: 12) {
-            Image(systemName: entitlementIcon(entitlement?.status))
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: statusIcon)
                 .font(.system(size: 17, weight: .semibold))
-                .foregroundStyle(entitlementColor(entitlement?.status))
+                .foregroundStyle(statusColor)
                 .frame(width: 24)
             VStack(alignment: .leading, spacing: 4) {
-                Text(entitlementTitle(entitlement?.status))
+                Text(displayState.title)
                     .font(Theme.ui(15, .semibold))
                     .foregroundStyle(Theme.stone)
-                Text(auth.cloudAccess?.admissionBlockMessage
-                     ?? entitlement?.message
-                     ?? "Cloud Sync access has not been checked yet.")
+                Text(displayState.detail)
                     .font(Theme.ui(12.5))
                     .foregroundStyle(Theme.stoneDim)
                     .fixedSize(horizontal: false, vertical: true)
-                if let expiry = entitlement?.graceExpiresAt {
+                if let expiry = displayState.graceExpiresAt {
                     Text("Grace access ends \(expiry.formatted(date: .abbreviated, time: .shortened)).")
                         .font(Theme.mono(9.5, .medium))
                         .foregroundStyle(Theme.gold)
@@ -200,14 +248,55 @@ struct SignInScreen: View {
             }
             Spacer(minLength: 0)
         }
-        .padding(16)
-        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Theme.line))
+        .padding(14)
+        .background(Theme.inset, in: RoundedRectangle(cornerRadius: 12))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(Theme.line, lineWidth: 1)
+        }
     }
 
-    private var shouldOfferPatreonConnection: Bool {
-        guard let entitlement = auth.cloudAccess?.entitlement else { return true }
-        return entitlement.linkRequired
+    private var displayState: CloudSyncDisplayState {
+        .resolve(
+            authState: auth.state,
+            access: auth.cloudAccess,
+            signedInEmail: auth.email,
+            preferPatreonAccountSwitch: auth.shouldOfferPatreonAccountSwitch)
+    }
+
+    private var statusIcon: String {
+        switch displayState.kind {
+        case .enabled: return "checkmark.circle.fill"
+        case .grace: return "clock.badge.exclamationmark"
+        case .inactive: return "pause.circle.fill"
+        case .needsPatreon: return "link.badge.plus"
+        case .waitlist: return "hourglass"
+        case .setupPending: return "exclamationmark.circle.fill"
+        case .unavailable, .signInFailed:
+            return "exclamationmark.triangle.fill"
+        case .signedOut, .checking: return "ellipsis.circle"
+        }
+    }
+
+    private var statusColor: Color {
+        switch displayState.kind {
+        case .enabled: return Theme.syncGreen
+        case .grace, .waitlist, .setupPending: return Theme.gold
+        case .unavailable, .signInFailed: return Theme.accentHot
+        case .signedOut, .checking, .needsPatreon, .inactive:
+            return Theme.stoneDim
+        }
+    }
+
+    private func performPatreonAction() {
+        switch displayState.action {
+        case .connectPatreon:
+            auth.connectPatreon(mode: .reuseSession)
+        case .switchPatreon:
+            auth.connectPatreon(mode: .switchAccount)
+        case .none, .signIn, .retry:
+            break
+        }
     }
 
     @ViewBuilder
@@ -216,50 +305,8 @@ struct SignInScreen: View {
             .font(Theme.ui(12))
             .foregroundStyle(color)
             .fixedSize(horizontal: false, vertical: true)
-            .padding(12)
+            .padding(11)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(color.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
-    }
-
-    private func entitlementTitle(_ status: PatreonEntitlementStatus?) -> String {
-        if auth.cloudAccess?.isWaitlisted == true {
-            return "Cloud Sync waitlist"
-        }
-        if auth.cloudAccess?.admissionBlockMessage != nil {
-            return "Cloud Sync setup pending"
-        }
-        switch status {
-        case .active: return "Patreon active · Cloud Sync on"
-        case .grace: return "Cloud Sync in grace period"
-        case .inactive: return "Patreon membership inactive"
-        case .unlinked: return "Patreon not connected"
-        case .error: return "Access couldn't be verified"
-        case .none: return "Checking Patreon"
-        }
-    }
-
-    private func entitlementIcon(_ status: PatreonEntitlementStatus?) -> String {
-        if auth.cloudAccess?.admissionBlockMessage != nil {
-            return auth.cloudAccess?.isWaitlisted == true
-                ? "hourglass" : "exclamationmark.circle.fill"
-        }
-        switch status {
-        case .active: return "checkmark.circle.fill"
-        case .grace: return "clock.badge.exclamationmark"
-        case .inactive: return "pause.circle.fill"
-        case .unlinked: return "link.badge.plus"
-        case .error: return "exclamationmark.triangle.fill"
-        case .none: return "ellipsis.circle"
-        }
-    }
-
-    private func entitlementColor(_ status: PatreonEntitlementStatus?) -> Color {
-        if auth.cloudAccess?.admissionBlockMessage != nil { return Theme.gold }
-        switch status {
-        case .active: return Theme.syncGreen
-        case .grace: return Theme.gold
-        case .inactive, .unlinked, .none: return Theme.stoneDim
-        case .error: return Theme.accentHot
-        }
     }
 }

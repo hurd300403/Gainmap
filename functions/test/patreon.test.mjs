@@ -20,13 +20,20 @@ const accountMod = await import('../lib/patreon/account.js');
 
 const { PatreonAPI, PatreonAPIError, parseMember } = apiMod.default || apiMod;
 const { PATREON_USER_AGENT } = httpMod.default || httpMod;
-const { emailIndex, snapshotIndexId, verifyWebhookSignature } = cryptoMod.default || cryptoMod;
+const {
+  emailIndex,
+  subjectIndex,
+  memberIndex,
+  snapshotIndexId,
+  verifyWebhookSignature,
+} = cryptoMod.default || cryptoMod;
 const {
   safeEntitlement,
   activeEntitlement,
   inactiveTransition,
   errorTransition,
-  provisionalEntitlement,
+  verifiedEmailEntitlement,
+  emailLossTransition,
   resolveEntitlement,
 } = entitlementMod.default || entitlementMod;
 const {
@@ -36,6 +43,7 @@ const {
   exchangeAuthorizationCode,
   fetchIdentity,
   identityMembership,
+  verifyOAuthMembership,
   linkPatreonIdentity,
 } = oauthMod.default || oauthMod;
 const { syncCampaignCore, reconcileMemberCore } = syncMod.default || syncMod;
@@ -205,6 +213,91 @@ test('OAuth membership accepts the real identity shape without a nested member u
   assert.equal(member.isActiveEligible, true);
 });
 
+test('OAuth membership requires an exact campaign and prefers its active duplicate record', () => {
+  const ambiguous = memberResource({ id: 'ambiguous', userId: 'identity-subject' });
+  delete ambiguous.relationships.campaign;
+  const otherCampaign = memberResource({
+    id: 'other', userId: 'identity-subject', campaignId: 'another-campaign',
+  });
+  const former = memberResource({
+    id: 'former', userId: 'identity-subject', status: 'former_patron', tierIds: [],
+  });
+  const active = memberResource({ id: 'active', userId: 'identity-subject' });
+  const identity = {
+    data: {
+      type: 'user',
+      id: 'identity-subject',
+      relationships: {
+        memberships: {
+          data: [ambiguous, otherCampaign, former, active]
+            .map((resource) => ({ type: 'member', id: resource.id })),
+        },
+      },
+    },
+    included: [ambiguous, otherCampaign, former, active],
+  };
+
+  const member = identityMembership(identity, 'campaign');
+  assert.equal(member.memberId, 'active');
+  assert.equal(member.subjectId, 'identity-subject');
+
+  identity.included = [ambiguous, otherCampaign];
+  assert.equal(identityMembership(identity, 'campaign'), null);
+});
+
+test('OAuth membership is reverified with configured-campaign creator credentials', async () => {
+  const resource = memberResource({ id: 'member', userId: 'identity-subject' });
+  const identity = {
+    data: {
+      type: 'user', id: 'identity-subject',
+      relationships: { memberships: { data: [{ type: 'member', id: resource.id }] } },
+    },
+    included: [resource],
+  };
+  const verified = parseMember(resource);
+  const member = await verifyOAuthMembership({
+    identity,
+    campaignId: 'campaign',
+    api: { campaignId: 'campaign', getMember: async () => verified },
+  });
+  assert.equal(member.memberId, 'member');
+
+  await assert.rejects(
+    verifyOAuthMembership({
+      identity,
+      campaignId: 'campaign',
+      api: {
+        campaignId: 'campaign',
+        getMember: async () => parseMember(memberResource({
+          id: 'member', userId: 'another-subject',
+        })),
+      },
+    }),
+    (error) => error instanceof OAuthFlowError && error.code === 'membership_not_found'
+  );
+  await assert.rejects(
+    verifyOAuthMembership({
+      identity,
+      campaignId: 'campaign',
+      api: { campaignId: 'another-campaign', getMember: async () => verified },
+    }),
+    (error) => error instanceof OAuthFlowError && error.code === 'campaign_not_configured'
+  );
+  await assert.rejects(
+    verifyOAuthMembership({
+      identity,
+      campaignId: 'campaign',
+      api: {
+        campaignId: 'campaign',
+        getMember: async () => parseMember(memberResource({
+          id: 'member', userId: 'identity-subject', status: 'former_patron', tierIds: [],
+        })),
+      },
+    }),
+    (error) => error instanceof OAuthFlowError && error.code === 'membership_inactive'
+  );
+});
+
 test('OAuth identity asks only for own-campaign entitlement fields and no email scope', async () => {
   let requested;
   const body = { data: { type: 'user', id: 'subject' }, included: [] };
@@ -215,7 +308,10 @@ test('OAuth identity asks only for own-campaign entitlement fields and no email 
       return jsonResponse(body);
     },
   });
-  assert.equal(requested.searchParams.get('include'), 'memberships,memberships.currently_entitled_tiers');
+  assert.equal(
+    requested.searchParams.get('include'),
+    'memberships,memberships.currently_entitled_tiers,memberships.campaign'
+  );
   assert.equal(requested.searchParams.get('fields[member]'), 'patron_status');
   assert.equal(requested.searchParams.has('fields[user]'), false);
 });
@@ -276,16 +372,24 @@ test('entitlement transitions active to grace to inactive without extending grac
   assert.equal(safeEntitlement(expired, NOW + 8 * DAY).effective, false);
 });
 
-test('provisional email access has one fixed seven-day deadline', () => {
-  const first = provisionalEntitlement({}, NOW, NOW);
-  const second = provisionalEntitlement(first, NOW + 6 * DAY, NOW + 6 * DAY);
-  assert.equal(second.graceExpiresAt.toMillis(), NOW + 7 * DAY);
-  assert.equal(safeEntitlement(second, NOW + 8 * DAY).state, 'unlinked');
-  assert.equal(safeEntitlement(second, NOW + 8 * DAY).effective, false);
-  const persistedExpired = provisionalEntitlement(second, NOW + 8 * DAY, NOW + 8 * DAY);
-  const retry = provisionalEntitlement(persistedExpired, NOW + 8 * DAY + 1000, NOW + 8 * DAY);
-  assert.equal(safeEntitlement(retry, NOW + 8 * DAY + 1000).state, 'unlinked');
-  assert.equal(retry.provisionalExpiresAt.toMillis(), NOW + 7 * DAY);
+test('verified email is full active access anchored to the campaign snapshot', () => {
+  const first = verifiedEmailEntitlement(NOW, NOW - DAY, 'email-hash');
+  const safe = safeEntitlement(first, NOW, false);
+  assert.equal(safe.state, 'active');
+  assert.equal(safe.effective, true);
+  assert.equal(safe.source, 'patreon_email');
+  assert.equal(safe.connectionAction, 'none');
+  assert.equal(safe.linkRequired, false);
+  assert.equal(first.verificationExpiresAt.toMillis(), NOW + 6 * DAY);
+  assert.equal(first.provisionalExpiresAt, null);
+
+  const loss = emailLossTransition(first, NOW, 'email-hash');
+  const repeated = emailLossTransition(loss, NOW + 6 * DAY, 'email-hash');
+  assert.equal(loss.state, 'unlinked');
+  assert.equal(loss.effective, false);
+  assert.equal(loss.graceExpiresAt, null);
+  assert.equal(repeated.state, 'unlinked');
+  assert.equal(emailLossTransition(first, NOW, 'different-email').state, 'unlinked');
 });
 
 test('active access has an absolute verification deadline if every updater stops', () => {
@@ -293,7 +397,7 @@ test('active access has an absolute verification deadline if every updater stops
   assert.equal(safeEntitlement(active, NOW + 6 * DAY).effective, true);
   assert.equal(safeEntitlement(active, NOW + 8 * DAY).effective, false);
   assert.equal(safeEntitlement(active, NOW, true).linkRequired, false);
-  assert.equal(safeEntitlement(provisionalEntitlement({}, NOW, NOW), NOW, false).linkRequired, true);
+  assert.equal(safeEntitlement({}, NOW, false).connectionAction, 'connect');
 });
 
 test('verified email bootstrap requires a fresh completed campaign snapshot', async () => {
@@ -312,8 +416,44 @@ test('verified email bootstrap requires a fresh completed campaign snapshot', as
     hmacKey: HMAC_KEY,
     nowMs: NOW,
   });
-  assert.equal(fresh.state, 'grace');
-  assert.equal(fresh.linkRequired, true);
+  assert.equal(fresh.state, 'active');
+  assert.equal(fresh.effective, true);
+  assert.equal(fresh.source, 'patreon_email');
+  assert.equal(fresh.linkRequired, false);
+  assert.equal(fresh.connectionAction, 'none');
+  assert.equal(
+    freshDB.docs.get('patreonEntitlements/fresh-user').verificationExpiresAt.toMillis(),
+    NOW + 6 * DAY
+  );
+  assert.equal(freshDB.docs.get('patreonEntitlements/fresh-user').provisionalExpiresAt, null);
+
+  const legacyDB = new FakeDB({
+    'patreonPrivate/runtime': { currentSyncId: 's1', lastCompletedAt: ts(NOW - DAY) },
+    [`patreonEmailIndex/${snapshotIndexId('s1', hash)}`]: {
+      lastSyncId: 's1', isActiveEligible: true, memberId: 'm1', lastVerifiedAt: ts(NOW - DAY),
+    },
+    'patreonLinks/legacy-user': { subjectHash: 'legacy-null-link', memberId: null, memberHash: null },
+    'patreonEntitlements/legacy-user': {
+      state: 'grace',
+      effective: true,
+      source: 'patreon_email',
+      lastVerifiedAt: ts(NOW - DAY),
+      graceExpiresAt: ts(NOW + DAY),
+      provisionalExpiresAt: ts(NOW + DAY),
+    },
+  });
+  const migrated = await resolveEntitlement({
+    db: legacyDB,
+    uid: 'legacy-user',
+    authToken: { email: 'patron@example.com', email_verified: true },
+    api: null,
+    hmacKey: HMAC_KEY,
+    nowMs: NOW,
+  });
+  assert.equal(migrated.state, 'active');
+  assert.equal(migrated.source, 'patreon_email');
+  assert.equal(migrated.connectionAction, 'none');
+  assert.equal(legacyDB.docs.get('patreonEntitlements/legacy-user').provisionalExpiresAt, null);
 
   const staleDB = new FakeDB({
     'patreonPrivate/runtime': { currentSyncId: 's1', lastCompletedAt: ts(NOW - 30 * DAY) },
@@ -330,11 +470,135 @@ test('verified email bootstrap requires a fresh completed campaign snapshot', as
     nowMs: NOW,
   });
   assert.deepEqual({ state: stale.state, effective: stale.effective, linkRequired: stale.linkRequired }, {
-    state: 'unlinked', effective: false, linkRequired: true,
+    state: 'error', effective: false, linkRequired: false,
   });
 });
 
-test('OAuth state is opaque, expires, and can be consumed only once', async () => {
+test('verified-email proof is bound to the exact current verified claim', async () => {
+  const oldEmail = 'patron@example.com';
+  const newEmail = 'different@example.com';
+  const oldHash = emailIndex(HMAC_KEY, oldEmail);
+  const active = verifiedEmailEntitlement(NOW, NOW, oldHash);
+
+  const changedDB = new FakeDB({
+    'patreonPrivate/runtime': { currentSyncId: 's2', lastCompletedAt: ts(NOW + DAY) },
+    'patreonEntitlements/changed': active,
+  });
+  const changed = await resolveEntitlement({
+    db: changedDB,
+    uid: 'changed',
+    authToken: { email: newEmail, email_verified: true },
+    api: null,
+    hmacKey: HMAC_KEY,
+    nowMs: NOW + DAY,
+  });
+  assert.equal(changed.state, 'unlinked');
+  assert.equal(changed.effective, false);
+  assert.equal(
+    changedDB.docs.get('patreonEntitlements/changed').emailHash,
+    emailIndex(HMAC_KEY, newEmail)
+  );
+
+  const unverifiedDB = new FakeDB({
+    'patreonEntitlements/unverified': active,
+  });
+  const unverified = await resolveEntitlement({
+    db: unverifiedDB,
+    uid: 'unverified',
+    authToken: { email: oldEmail, email_verified: false },
+    api: null,
+    hmacKey: HMAC_KEY,
+    nowMs: NOW + DAY,
+  });
+  assert.equal(unverified.state, 'unlinked');
+  assert.equal(unverified.effective, false);
+  assert.equal(unverifiedDB.docs.get('patreonEntitlements/unverified').emailHash, null);
+
+  const legacy = { ...active };
+  delete legacy.emailHash;
+  const legacyDB = new FakeDB({
+    'patreonPrivate/runtime': { currentSyncId: 's2', lastCompletedAt: ts(NOW + DAY) },
+    'patreonEntitlements/legacy-mismatch': legacy,
+  });
+  const legacyMismatch = await resolveEntitlement({
+    db: legacyDB,
+    uid: 'legacy-mismatch',
+    authToken: { email: oldEmail, email_verified: true },
+    api: null,
+    hmacKey: HMAC_KEY,
+    nowMs: NOW + DAY,
+  });
+  assert.equal(legacyMismatch.state, 'unlinked');
+  assert.equal(legacyMismatch.effective, false);
+});
+
+test('email outages preserve only an exact bound proof through its absolute deadline', async () => {
+  const email = 'patron@example.com';
+  const hash = emailIndex(HMAC_KEY, email);
+  const active = verifiedEmailEntitlement(NOW, NOW, hash);
+  const staleRuntime = {
+    'patreonPrivate/runtime': {
+      currentSyncId: 'stale',
+      lastCompletedAt: ts(NOW - 30 * DAY),
+    },
+  };
+
+  const exactDB = new FakeDB({
+    ...staleRuntime,
+    'patreonEntitlements/exact': active,
+  });
+  const exact = await resolveEntitlement({
+    db: exactDB,
+    uid: 'exact',
+    authToken: { email, email_verified: true },
+    api: null,
+    hmacKey: HMAC_KEY,
+    nowMs: NOW + DAY,
+  });
+  assert.equal(exact.state, 'grace');
+  assert.equal(exact.effective, true);
+  assert.equal(exact.graceExpiresAt, NOW + 7 * DAY);
+
+  const legacy = { ...active };
+  delete legacy.emailHash;
+  const legacyDB = new FakeDB({
+    ...staleRuntime,
+    'patreonEntitlements/legacy': legacy,
+  });
+  const unavailableLegacy = await resolveEntitlement({
+    db: legacyDB,
+    uid: 'legacy',
+    authToken: { email, email_verified: true },
+    api: null,
+    hmacKey: HMAC_KEY,
+    nowMs: NOW + DAY,
+  });
+  assert.equal(unavailableLegacy.state, 'error');
+  assert.equal(unavailableLegacy.effective, false);
+
+  const malformedDB = new FakeDB({
+    'patreonPrivate/runtime': { currentSyncId: 's2', lastCompletedAt: ts(NOW + DAY) },
+    [`patreonEmailIndex/${snapshotIndexId('s2', hash)}`]: {
+      lastSyncId: 'wrong-snapshot',
+      isActiveEligible: true,
+      lastVerifiedAt: ts(NOW + DAY),
+    },
+    'patreonEntitlements/malformed': active,
+  });
+  const malformed = await resolveEntitlement({
+    db: malformedDB,
+    uid: 'malformed',
+    authToken: { email, email_verified: true },
+    api: null,
+    hmacKey: HMAC_KEY,
+    nowMs: NOW + DAY,
+  });
+  assert.equal(malformed.state, 'grace');
+  assert.equal(malformed.effective, true);
+  assert.equal(malformed.graceExpiresAt, NOW + 7 * DAY);
+});
+
+test('OAuth state is opaque, single-use, and permits one immediate account switch', async () => {
   const db = new FakeDB();
   const { authorizationURL } = await startOAuthCore({
     db, uid: 'firebase-uid', clientId: 'client', redirectURI: 'https://callback', nowMs: NOW,
@@ -360,12 +624,137 @@ test('OAuth state is opaque, expires, and can be consumed only once', async () =
     (error) => error instanceof OAuthFlowError && error.code === 'expired_state'
   );
 
+  const switched = await startOAuthCore({
+    db,
+    uid: 'firebase-uid',
+    clientId: 'client',
+    redirectURI: 'https://callback',
+    attemptKind: 'switch_account',
+    nowMs: NOW + 1000,
+  });
+  const switchedState = new URL(switched.authorizationURL).searchParams.get('state');
+  assert.equal(await consumeOAuthState({ db, state: switchedState, nowMs: NOW + 2000 }), 'firebase-uid');
   await assert.rejects(
     startOAuthCore({
-      db, uid: 'firebase-uid', clientId: 'client', redirectURI: 'https://callback', nowMs: NOW + 1000,
+      db, uid: 'firebase-uid', clientId: 'client', redirectURI: 'https://callback', nowMs: NOW + 2000,
     }),
     (error) => error instanceof OAuthFlowError && error.code === 'rate_limited'
   );
+
+  const replacementDB = new FakeDB();
+  const initial = await startOAuthCore({
+    db: replacementDB, uid: 'switcher', clientId: 'client', redirectURI: 'https://callback', nowMs: NOW,
+  });
+  const replacement = await startOAuthCore({
+    db: replacementDB, uid: 'switcher', clientId: 'client', redirectURI: 'https://callback',
+    attemptKind: 'switch_account', nowMs: NOW + 1,
+  });
+  await assert.rejects(
+    consumeOAuthState({
+      db: replacementDB,
+      state: new URL(initial.authorizationURL).searchParams.get('state'),
+      nowMs: NOW + 2,
+    }),
+    (error) => error instanceof OAuthFlowError && error.code === 'invalid_state'
+  );
+  assert.equal(
+    await consumeOAuthState({
+      db: replacementDB,
+      state: new URL(replacement.authorizationURL).searchParams.get('state'),
+      nowMs: NOW + 2,
+    }),
+    'switcher'
+  );
+});
+
+test('wrong or inactive Patreon OAuth attempts do not mutate an existing proof', async () => {
+  const identity = { data: { type: 'user', id: 'wrong-subject' } };
+  const prior = verifiedEmailEntitlement(NOW, NOW, 'email-hash');
+  const db = new FakeDB({
+    'patreonEntitlements/firebase-uid': prior,
+    'patreonLinks/firebase-uid': {
+      subjectHash: 'existing-subject', memberHash: 'existing-member', memberId: 'existing-member',
+    },
+  });
+  await assert.rejects(
+    linkPatreonIdentity({ db, uid: 'firebase-uid', identity, member: null, hmacKey: HMAC_KEY, nowMs: NOW }),
+    (error) => error instanceof OAuthFlowError && error.code === 'membership_not_found'
+  );
+  await assert.rejects(
+    linkPatreonIdentity({
+      db,
+      uid: 'firebase-uid',
+      identity,
+      member: parseMember(memberResource({ status: 'former_patron', tierIds: [] })),
+      hmacKey: HMAC_KEY,
+      nowMs: NOW,
+    }),
+    (error) => error instanceof OAuthFlowError && error.code === 'membership_inactive'
+  );
+  assert.equal(db.docs.get('patreonEntitlements/firebase-uid').source, 'patreon_email');
+  assert.equal(db.docs.get('patreonLinks/firebase-uid').memberId, 'existing-member');
+});
+
+test('a stale OAuth link cannot suppress or inherit a verified-email proof', async () => {
+  const activeEmail = verifiedEmailEntitlement(NOW, NOW, emailIndex(HMAC_KEY, 'patron@example.com'));
+  const staleLink = { subjectHash: 'subject', memberHash: 'member', memberId: 'member' };
+  const hash = emailIndex(HMAC_KEY, 'patron@example.com');
+  const activeDB = new FakeDB({
+    'patreonPrivate/runtime': { currentSyncId: 's1', lastCompletedAt: ts(NOW) },
+    [`patreonEmailIndex/${snapshotIndexId('s1', hash)}`]: {
+      lastSyncId: 's1', isActiveEligible: true, memberId: 'member', lastVerifiedAt: ts(NOW),
+    },
+    'patreonLinks/firebase-uid': staleLink,
+    'patreonEntitlements/firebase-uid': activeEmail,
+  });
+  const verified = await resolveEntitlement({
+    db: activeDB,
+    uid: 'firebase-uid',
+    authToken: { email: 'patron@example.com', email_verified: true },
+    api: { getMember: async () => null },
+    hmacKey: HMAC_KEY,
+    nowMs: NOW + 1,
+  });
+  assert.equal(verified.state, 'active');
+  assert.equal(verified.source, 'patreon_email');
+
+  const lapsedDB = new FakeDB({
+    'patreonPrivate/runtime': { currentSyncId: 's2', lastCompletedAt: ts(NOW + DAY) },
+    'patreonLinks/firebase-uid': staleLink,
+    'patreonEntitlements/firebase-uid': activeEmail,
+  });
+  const lapsed = await resolveEntitlement({
+    db: lapsedDB,
+    uid: 'firebase-uid',
+    authToken: { email: 'patron@example.com', email_verified: true },
+    api: { getMember: async () => null },
+    hmacKey: HMAC_KEY,
+    nowMs: NOW + DAY,
+  });
+  assert.equal(lapsed.state, 'inactive');
+  assert.equal(lapsed.source, 'patreon_oauth');
+  assert.equal(lapsed.effective, false);
+  assert.equal(lapsed.connectionAction, 'switch');
+  assert.equal(lapsedDB.docs.get('patreonLinks/firebase-uid').memberId, 'member');
+
+  const oauthStillActiveDB = new FakeDB({
+    'patreonPrivate/runtime': { currentSyncId: 's2', lastCompletedAt: ts(NOW + DAY) },
+    'patreonLinks/firebase-uid': staleLink,
+    'patreonEntitlements/firebase-uid': activeEmail,
+  });
+  const oauthStillActive = await resolveEntitlement({
+    db: oauthStillActiveDB,
+    uid: 'firebase-uid',
+    authToken: { email: 'patron@example.com', email_verified: true },
+    api: {
+      getMember: async () => parseMember(memberResource({ id: 'member' })),
+    },
+    hmacKey: HMAC_KEY,
+    nowMs: NOW + DAY,
+  });
+  assert.equal(oauthStillActive.state, 'active');
+  assert.equal(oauthStillActive.source, 'patreon_oauth');
+  assert.equal(oauthStillActive.effective, true);
 });
 
 test('Patreon subjects are unique across Gainmap Firebase accounts', async () => {
@@ -651,6 +1040,45 @@ test('full sync publishes the snapshot only after fetch, rejects suspicious empt
   assert.equal(emptyDB.docs.get('patreonPrivate/runtime').currentSyncId, 'old');
 });
 
+test('full sync migrates a same-subject link to the active duplicate and removes its old index', async () => {
+  const subjectId = 'returning-patron';
+  const oldId = 'former-membership';
+  const newId = 'active-membership';
+  const oldHash = memberIndex(HMAC_KEY, oldId);
+  const newHash = memberIndex(HMAC_KEY, newId);
+  const sHash = subjectIndex(HMAC_KEY, subjectId);
+  const before = activeEntitlement(NOW - DAY);
+  const db = new FakeDB({
+    'patreonPrivate/runtime': {
+      currentSyncId: 'old', memberCount: 2, lastCompletedAt: ts(NOW - DAY),
+    },
+    'patreonLinks/firebase-uid': {
+      memberId: oldId, memberHash: oldHash, subjectHash: sHash,
+    },
+    [`patreonMemberIndex/${oldHash}`]: { uid: 'firebase-uid', updatedAt: ts(NOW - DAY) },
+    'patreonEntitlements/firebase-uid': before,
+    'users/firebase-uid': { syncAdmitted: true, entitlement: before },
+  });
+  const former = parseMember(memberResource({
+    id: oldId, userId: subjectId, status: 'former_patron', tierIds: [],
+  }));
+  const active = parseMember(memberResource({ id: newId, userId: subjectId }));
+
+  await syncCampaignCore({
+    db,
+    api: { getAllCampaignMembers: async () => [former, active] },
+    hmacKey: HMAC_KEY,
+    nowMs: NOW,
+    syncId: 'returning-patron-scan',
+  });
+
+  assert.equal(db.docs.get('patreonLinks/firebase-uid').memberId, newId);
+  assert.equal(db.docs.get('patreonLinks/firebase-uid').memberHash, newHash);
+  assert.equal(db.docs.get('patreonEntitlements/firebase-uid').state, 'active');
+  assert.equal(db.docs.has(`patreonMemberIndex/${oldHash}`), false);
+  assert.equal(db.docs.get(`patreonMemberIndex/${newHash}`).uid, 'firebase-uid');
+});
+
 test('failed snapshot staging never punches holes in the published email index', async () => {
   const hash = emailIndex(HMAC_KEY, 'patron@example.com');
   class FailingStageDB extends FakeDB {
@@ -805,6 +1233,84 @@ test('stale webhook cannot overwrite a Patreon identity that was relinked', asyn
   assert.equal(db.docs.get('patreonLinks/firebase-uid').memberId, 'member-b');
   assert.equal(db.docs.get('patreonLinks/firebase-uid').subjectHash, bSubjectHash);
   assert.equal(db.docs.get('patreonEntitlements/firebase-uid').lastVerifiedAt.toMillis(), NOW - DAY);
+});
+
+test('same-subject webhook keeps an eligible current member instead of reviving an old duplicate', async () => {
+  const subjectId = 'same-subject';
+  const oldId = 'old-member';
+  const currentId = 'current-member';
+  const oldHash = memberIndex(HMAC_KEY, oldId);
+  const currentHash = memberIndex(HMAC_KEY, currentId);
+  const sHash = subjectIndex(HMAC_KEY, subjectId);
+  const before = activeEntitlement(NOW - DAY);
+  const db = new FakeDB({
+    'patreonPrivate/runtime': { currentSyncId: 'current', lastCompletedAt: ts(NOW - DAY) },
+    [`patreonSubjectIndex/${sHash}`]: { uid: 'firebase-uid' },
+    [`patreonMemberIndex/${currentHash}`]: { uid: 'firebase-uid' },
+    'patreonLinks/firebase-uid': {
+      memberId: currentId, memberHash: currentHash, subjectHash: sHash,
+    },
+    'patreonEntitlements/firebase-uid': before,
+    'users/firebase-uid': { syncAdmitted: true, entitlement: before },
+  });
+  const members = new Map([
+    [oldId, parseMember(memberResource({ id: oldId, userId: subjectId }))],
+    [currentId, parseMember(memberResource({ id: currentId, userId: subjectId }))],
+  ]);
+
+  const result = await reconcileMemberCore({
+    db,
+    api: { getMember: async (id) => members.get(id) || null },
+    hmacKey: HMAC_KEY,
+    memberId: oldId,
+    nowMs: NOW,
+  });
+
+  assert.equal(result.reconciled, false);
+  assert.equal(result.linked, true);
+  assert.equal(db.docs.get('patreonLinks/firebase-uid').memberId, currentId);
+  assert.equal(db.docs.has(`patreonMemberIndex/${oldHash}`), false);
+  assert.equal(db.docs.get('patreonEntitlements/firebase-uid').lastVerifiedAt.toMillis(), NOW - DAY);
+});
+
+test('same-subject webhook migrates to an active replacement and cleans the owned old index', async () => {
+  const subjectId = 'returning-subject';
+  const oldId = 'lapsed-member';
+  const replacementId = 'replacement-member';
+  const oldHash = memberIndex(HMAC_KEY, oldId);
+  const replacementHash = memberIndex(HMAC_KEY, replacementId);
+  const sHash = subjectIndex(HMAC_KEY, subjectId);
+  const before = activeEntitlement(NOW - DAY);
+  const db = new FakeDB({
+    'patreonPrivate/runtime': { currentSyncId: 'current', lastCompletedAt: ts(NOW - DAY) },
+    [`patreonSubjectIndex/${sHash}`]: { uid: 'firebase-uid' },
+    [`patreonMemberIndex/${oldHash}`]: { uid: 'firebase-uid' },
+    'patreonLinks/firebase-uid': {
+      memberId: oldId, memberHash: oldHash, subjectHash: sHash,
+    },
+    'patreonEntitlements/firebase-uid': before,
+    'users/firebase-uid': { syncAdmitted: true, entitlement: before },
+  });
+  const members = new Map([
+    [oldId, parseMember(memberResource({
+      id: oldId, userId: subjectId, status: 'former_patron', tierIds: [],
+    }))],
+    [replacementId, parseMember(memberResource({ id: replacementId, userId: subjectId }))],
+  ]);
+
+  const result = await reconcileMemberCore({
+    db,
+    api: { getMember: async (id) => members.get(id) || null },
+    hmacKey: HMAC_KEY,
+    memberId: replacementId,
+    nowMs: NOW,
+  });
+
+  assert.equal(result.reconciled, true);
+  assert.equal(result.active, true);
+  assert.equal(db.docs.get('patreonLinks/firebase-uid').memberId, replacementId);
+  assert.equal(db.docs.has(`patreonMemberIndex/${oldHash}`), false);
+  assert.equal(db.docs.get(`patreonMemberIndex/${replacementHash}`).uid, 'firebase-uid');
 });
 
 test('webhook defers all writes while a campaign snapshot is publishing', async () => {

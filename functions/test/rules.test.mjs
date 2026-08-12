@@ -161,7 +161,7 @@ async function seed({ syncEnabled = true, patreonEnforcementEnabled = true } = {
       createdAt: T(1000),
       hasCustomDefault: false,
       entitlement: {
-        state: 'active', effective: true,
+        state: 'active', effective: true, source: 'patreon_email',
         verificationExpiresAt: T(Date.now() + 7 * 24 * 3600 * 1000),
       },
     });

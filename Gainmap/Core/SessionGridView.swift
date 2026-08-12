@@ -7,6 +7,7 @@
 //  hydrates them through the SyncEngine, the Mac reads them off disk in P7).
 //
 
+import Foundation
 import SwiftUI
 
 /// One tile of the grid — a display model the host derives from Session (+
@@ -382,6 +383,266 @@ public struct SessionSyncMetrics {
     }
 }
 
+// MARK: - Cloud Sync presentation
+
+/// A single, platform-neutral vocabulary for Cloud Sync. Both apps project
+/// the auth/backend model through this type so an entitlement can never read
+/// as both "on" and "not connected" in different parts of the UI.
+public enum CloudSyncDisplayKind: Equatable, Sendable {
+    case signedOut
+    case signInFailed
+    case checking
+    case enabled
+    case needsPatreon
+    case inactive
+    case grace
+    case waitlist
+    case setupPending
+    case unavailable
+}
+
+public enum CloudSyncDisplayAction: Equatable, Sendable {
+    case none
+    case signIn
+    case connectPatreon
+    case switchPatreon
+    case retry
+
+    public var label: String? {
+        switch self {
+        case .none: return nil
+        case .signIn: return "Set Up Cloud Sync"
+        case .connectPatreon: return "Connect Patreon"
+        case .switchPatreon: return "Try Another Patreon Account"
+        case .retry: return "Refresh Status"
+        }
+    }
+}
+
+public struct CloudSyncDisplayState: Equatable, Sendable {
+    public let kind: CloudSyncDisplayKind
+    public let title: String
+    public let detail: String
+    public let action: CloudSyncDisplayAction
+    public let graceExpiresAt: Date?
+
+    public init(
+        kind: CloudSyncDisplayKind,
+        title: String,
+        detail: String,
+        action: CloudSyncDisplayAction,
+        graceExpiresAt: Date? = nil
+    ) {
+        self.kind = kind
+        self.title = title
+        self.detail = detail
+        self.action = action
+        self.graceExpiresAt = graceExpiresAt
+    }
+
+    public static func resolve(
+        authState: AuthState,
+        access: CloudSyncAccess?,
+        signedInEmail: String? = nil,
+        preferPatreonAccountSwitch: Bool = false
+    ) -> CloudSyncDisplayState {
+        switch authState {
+        case .signedOut:
+            return .init(
+                kind: .signedOut,
+                title: "Set up Cloud Sync",
+                detail: "Sign in to sync sessions and photos between iPhone and Mac.",
+                action: .signIn)
+        case .failed:
+            return .init(
+                kind: .signInFailed,
+                title: "Sign-in failed",
+                detail: "Try Apple or Google again.",
+                action: .signIn)
+        case .checking:
+            return .init(
+                kind: .checking,
+                title: "Checking Patreon…",
+                detail: "Verifying Cloud Sync access.",
+                action: .none)
+        case .ready, .localOnly:
+            break
+        }
+
+        guard let access else {
+            return .init(
+                kind: .unavailable,
+                title: "Couldn’t check access",
+                detail: "Your local sessions are safe. Try again.",
+                action: .retry)
+        }
+
+        if access.canSync {
+            if access.entitlement.status == .grace {
+                return .init(
+                    kind: .grace,
+                    title: "Cloud Sync is temporarily on",
+                    detail: "Patreon access is being rechecked.",
+                    action: .none,
+                    graceExpiresAt: access.entitlement.graceExpiresAt)
+            }
+            switch access.entitlement.source {
+            case .patreonEmail:
+                let email = signedInEmail?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .nilIfEmpty
+                return .init(
+                    kind: .enabled,
+                    title: "Membership verified",
+                    detail: email.map { "Cloud Sync is on for \($0)." }
+                        ?? "Cloud Sync is on.",
+                    action: .none)
+            case .patreonOAuth:
+                return .init(
+                    kind: .enabled,
+                    title: "Patreon connected",
+                    detail: "Cloud Sync is on.",
+                    action: .none)
+            case .none:
+                return .init(
+                    kind: .enabled,
+                    title: "Cloud Sync is on",
+                    detail: "Patreon access verified.",
+                    action: .none)
+            }
+        }
+
+        if access.isWaitlisted {
+            return .init(
+                kind: .waitlist,
+                title: "Patreon verified",
+                detail: "Cloud Sync is full right now. You’re on the waitlist.",
+                action: .retry)
+        }
+
+        if access.entitlement.effective {
+            return .init(
+                kind: .setupPending,
+                title: "Patreon verified",
+                detail: "Cloud Sync setup didn’t finish. Try again.",
+                action: .retry)
+        }
+
+        switch access.entitlement.status {
+        case .unlinked:
+            let action: CloudSyncDisplayAction
+            if preferPatreonAccountSwitch {
+                action = .switchPatreon
+            } else {
+                switch access.entitlement.connectionAction {
+                case .switchAccount: action = .switchPatreon
+                case .connect, .none: action = .connectPatreon
+                }
+            }
+            return .init(
+                kind: .needsPatreon,
+                title: action == .switchPatreon
+                    ? "Try another Patreon account" : "Connect Patreon",
+                detail: action == .switchPatreon
+                    ? "Use a different Patreon account, or refresh after reactivating."
+                    : "No active membership matched this sign-in. Your Patreon email can be different.",
+                action: action)
+        case .inactive:
+            return .init(
+                kind: .inactive,
+                title: "Membership not active",
+                detail: "Try another Patreon account or check again after reactivating.",
+                action: .switchPatreon)
+        case .active, .grace, .error:
+            return .init(
+                kind: .unavailable,
+                title: "Couldn’t check access",
+                detail: "Your local sessions are safe. Try again.",
+                action: .retry)
+        }
+    }
+}
+
+// MARK: - Empty-library coachmark
+
+/// Pure rules for the versioned, deliberately short-lived onboarding nudge.
+/// A future copy/design revision can use a new key without conflating its two
+/// eligible launches with this version's impressions.
+public enum EmptyLibraryCloudCoachmarkPolicy {
+    public static let impressionsKey =
+        "gainmap.empty-library-cloud-coachmark.impressions.v1"
+    public static let maximumImpressions = 2
+
+    public static func isEligible(
+        libraryIsEmpty: Bool,
+        signedOut: Bool,
+        impressionCount: Int
+    ) -> Bool {
+        libraryIsEmpty
+            && signedOut
+            && max(0, impressionCount) < maximumImpressions
+    }
+}
+
+/// Process-level claim around the pure policy. SwiftUI may rebuild a root view
+/// many times, but an eligible app launch consumes at most one impression.
+/// Observing any real session exhausts this version permanently, so deleting a
+/// library later cannot make first-run coaching return.
+@MainActor
+public enum EmptyLibraryCloudCoachmarkGate {
+    private static var launchDecision: Bool?
+
+    public static func visibility(
+        libraryIsEmpty: Bool,
+        signedOut: Bool,
+        authStateRestored: Bool = true,
+        defaults: UserDefaults = .standard
+    ) -> Bool {
+        guard authStateRestored else { return false }
+        guard libraryIsEmpty else {
+            complete(defaults: defaults)
+            return false
+        }
+        guard signedOut else {
+            // Once shown, an auth attempt suppresses the nudge for the rest of
+            // this process even if the user signs out again immediately.
+            if launchDecision != nil { launchDecision = false }
+            return false
+        }
+        if let launchDecision { return launchDecision }
+
+        let count = defaults.integer(
+            forKey: EmptyLibraryCloudCoachmarkPolicy.impressionsKey)
+        let shouldShow = EmptyLibraryCloudCoachmarkPolicy.isEligible(
+            libraryIsEmpty: true,
+            signedOut: true,
+            impressionCount: count)
+        if shouldShow {
+            defaults.set(
+                min(count + 1,
+                    EmptyLibraryCloudCoachmarkPolicy.maximumImpressions),
+                forKey: EmptyLibraryCloudCoachmarkPolicy.impressionsKey)
+        }
+        launchDecision = shouldShow
+        return shouldShow
+    }
+
+    public static func complete(defaults: UserDefaults = .standard) {
+        defaults.set(
+            EmptyLibraryCloudCoachmarkPolicy.maximumImpressions,
+            forKey: EmptyLibraryCloudCoachmarkPolicy.impressionsKey)
+        launchDecision = false
+    }
+
+    static func resetForTesting() {
+        launchDecision = nil
+    }
+}
+
+private extension String {
+    var nilIfEmpty: String? { isEmpty ? nil : self }
+}
+
 public struct SessionGridView: View {
     let cards: [SessionCard]
     let onCreate: (() -> Void)?
@@ -390,6 +651,8 @@ public struct SessionGridView: View {
     let onRename: ((SessionCard) -> Void)?
     let onDelete: ((UUID) -> Void)?
     let syncState: ((SessionCard) -> SessionCardSyncState)?
+    let showsCloudSyncCoachmark: Bool
+    let onSetUpCloudSync: (() -> Void)?
 
     public init(cards: [SessionCard],
                 onCreate: (() -> Void)? = nil,
@@ -397,7 +660,9 @@ public struct SessionGridView: View {
                 onExport: ((UUID) -> Void)? = nil,
                 onRename: ((SessionCard) -> Void)? = nil,
                 onDelete: ((UUID) -> Void)? = nil,
-                syncState: ((SessionCard) -> SessionCardSyncState)? = nil) {
+                syncState: ((SessionCard) -> SessionCardSyncState)? = nil,
+                showsCloudSyncCoachmark: Bool = false,
+                onSetUpCloudSync: (() -> Void)? = nil) {
         self.cards = cards
         self.onCreate = onCreate
         self.onOpen = onOpen
@@ -405,26 +670,42 @@ public struct SessionGridView: View {
         self.onRename = onRename
         self.onDelete = onDelete
         self.syncState = syncState
+        self.showsCloudSyncCoachmark = showsCloudSyncCoachmark
+        self.onSetUpCloudSync = onSetUpCloudSync
     }
 
     private let columns = [GridItem(.adaptive(minimum: 160, maximum: 260), spacing: 14)]
 
     public var body: some View {
-        ScrollView {
-            LazyVGrid(columns: columns, spacing: 14) {
-                ForEach(cards) { card in
-                    cardButton(card)
-                }
-                if let onCreate {
-                    Button(action: onCreate) {
-                        NewSessionCardView()
+        GeometryReader { geometry in
+            ScrollView {
+                ZStack(alignment: .top) {
+                    if cards.isEmpty {
+                        EmptyLibraryBackdrop(
+                            showsCloudSyncCoachmark: showsCloudSyncCoachmark,
+                            onSetUpCloudSync: onSetUpCloudSync)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: max(geometry.size.height, 460))
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("New Session")
-                    .accessibilityHint("Choose photos to start a new session")
+
+                    LazyVGrid(columns: columns, spacing: 14) {
+                        ForEach(cards) { card in
+                            cardButton(card)
+                        }
+                        if let onCreate {
+                            Button(action: onCreate) {
+                                NewSessionCardView()
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("New Session")
+                            .accessibilityHint("Choose photos to start a new session")
+                        }
+                    }
+                    .padding(16)
                 }
+                .frame(width: geometry.size.width)
+                .frame(minHeight: geometry.size.height, alignment: .top)
             }
-            .padding(16)
         }
     }
 
@@ -461,6 +742,87 @@ public struct SessionGridView: View {
             }
         } else {
             button
+        }
+    }
+}
+
+private struct EmptyLibraryBackdrop: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let showsCloudSyncCoachmark: Bool
+    let onSetUpCloudSync: (() -> Void)?
+    @State private var pulse = false
+
+    var body: some View {
+        ZStack {
+            RadialGradient(
+                colors: [Theme.accent.opacity(0.09), .clear],
+                center: .center,
+                startRadius: 0,
+                endRadius: 270)
+                .accessibilityHidden(true)
+
+            VStack(spacing: 24) {
+                Spacer(minLength: 175)
+                GainmapEmblem()
+                    .frame(maxWidth: 280)
+                    .padding(.horizontal, 58)
+                    .opacity(0.12)
+                    .saturation(0.72)
+                    .shadow(color: Theme.accent.opacity(0.18), radius: 30)
+                    .accessibilityHidden(true)
+
+                if showsCloudSyncCoachmark, let onSetUpCloudSync {
+                    Button(action: onSetUpCloudSync) {
+                        HStack(spacing: 10) {
+                            Image(systemName: "icloud")
+                                .font(.system(size: 15, weight: .semibold))
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text("Set Up Cloud Sync")
+                                    .font(Theme.ui(13, .semibold))
+                                Text("OPTIONAL")
+                                    .font(Theme.mono(8, .bold))
+                                    .tracking(1)
+                                    .foregroundStyle(Theme.stoneDim)
+                            }
+                        }
+                        .foregroundStyle(Theme.stone)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 11)
+                        .background(
+                            Theme.surface.opacity(0.96),
+                            in: Capsule())
+                        .overlay {
+                            Capsule()
+                                .stroke(
+                                    Theme.accent.opacity(
+                                        reduceMotion ? 0.72
+                                            : (pulse ? 0.9 : 0.35)),
+                                    lineWidth: reduceMotion ? 2 : 1.5)
+                        }
+                        .shadow(
+                            color: Theme.accent.opacity(
+                                reduceMotion ? 0.12 : (pulse ? 0.28 : 0.08)),
+                            radius: pulse && !reduceMotion ? 14 : 5)
+                        .scaleEffect(
+                            reduceMotion ? 1 : (pulse ? 1.025 : 1))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityHint(
+                        "Sign in to sync sessions and photos between iPhone and Mac")
+                    .onAppear {
+                        guard !reduceMotion else { return }
+                        withAnimation(
+                            .easeInOut(duration: 1.15)
+                                .repeatForever(autoreverses: true)) {
+                            pulse = true
+                        }
+                    }
+                    .onChange(of: reduceMotion) { _, reduced in
+                        if reduced { pulse = false }
+                    }
+                }
+                Spacer(minLength: 36)
+            }
         }
     }
 }

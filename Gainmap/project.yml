@@ -29,7 +29,7 @@ settings:
     DEVELOPMENT_TEAM: S8HQ5TEYDE
     SWIFT_VERSION: "5.0"
     MARKETING_VERSION: "1.6"
-    CURRENT_PROJECT_VERSION: "11"
+    CURRENT_PROJECT_VERSION: "12"
     CODE_SIGN_STYLE: Automatic
 
 packages:
@@ -48,8 +48,8 @@ packages:
   # GTMSessionFetcher < 4, which downgrades the fetcher under Firebase 12's
   # Auth/Storage/Functions from 4.5.0 to 3.5.0 and broke every authenticated
   # call (P5 regression, found by bisecting Package.resolved). Google
-  # sign-in uses FirebaseAuth's generic OAuthProvider("google.com") web flow
-  # instead — no extra dependency, same one-uid outcome.
+  # sign-in uses a small authorization-code + PKCE flow and hands the resulting
+  # credential to FirebaseAuth — no extra dependency, same one-uid outcome.
 
 targets:
   GainmapCore:
@@ -140,11 +140,15 @@ targets:
         LD_RUNPATH_SEARCH_PATHS: "@executable_path/../Frameworks"
       configs:
         Debug:
-          # + keychain-access-groups (FirebaseAuth on macOS; S3 finding).
-          # Release keeps the profile-free entitlements until the first
-          # sync-enabled release ships.
+          # Development signing uses Xcode's Mac Team profile.
           CODE_SIGN_ENTITLEMENTS: Mac/Support/Gainmap-Debug.entitlements
         Release:
+          # FirebaseAuth requires the keychain group in Gainmap.entitlements.
+          # Developer ID capabilities are authorized by this portal-created,
+          # non-Xcode-managed profile; release.sh validates it before archiving.
+          CODE_SIGN_STYLE: Manual
+          CODE_SIGN_IDENTITY: "Developer ID Application: Sam Hurd (S8HQ5TEYDE)"
+          PROVISIONING_PROFILE_SPECIFIER: "Gainmap Developer ID"
           # gainmap project in the sam-hurd-photo Sentry org.
           SENTRY_DSN: "https://553956a1d0e59a781e1ec7dedeee33ba@o4510926726365184.ingest.us.sentry.io/4511583301795840"
 

@@ -365,19 +365,26 @@ final class RemoteSchemaTests: XCTestCase {
         let payload: [String: Any] = [
             "state": "grace",
             "effective": NSNumber(value: true),
-            "linkRequired": NSNumber(value: true),
+            "source": "patreon_email",
+            "connectionAction": "none",
+            "linkRequired": NSNumber(value: false),
             "graceExpiresAt": NSNumber(value: 1_800_000_123_000 as Int64),
             "lastVerifiedAt": NSNumber(value: 1_799_000_000_000 as Int64),
+            "verificationExpiresAt": NSNumber(value: 1_800_100_000_000 as Int64),
             "message": "Patreon is temporarily unavailable.",
         ]
         let value = try XCTUnwrap(PatreonEntitlement(payload: payload))
         XCTAssertEqual(value.status, .grace)
         XCTAssertTrue(value.effective)
-        XCTAssertTrue(value.linkRequired)
+        XCTAssertEqual(value.source, .patreonEmail)
+        XCTAssertEqual(value.connectionAction, .none)
+        XCTAssertFalse(value.linkRequired)
         XCTAssertEqual(try XCTUnwrap(value.graceExpiresAt).timeIntervalSince1970,
                        1_800_000_123, accuracy: 0.001)
         XCTAssertEqual(try XCTUnwrap(value.lastVerifiedAt).timeIntervalSince1970,
                        1_799_000_000, accuracy: 0.001)
+        XCTAssertEqual(try XCTUnwrap(value.verificationExpiresAt).timeIntervalSince1970,
+                       1_800_100_000, accuracy: 0.001)
     }
 
     func testPatreonEntitlementRejectsUnknownOrIncompleteResponses() {
@@ -389,22 +396,28 @@ final class RemoteSchemaTests: XCTestCase {
         ]))
     }
 
-    func testPatreonLinkRequirementDistinguishesProvisionalFromLinkedGrace() throws {
-        let provisional = try XCTUnwrap(PatreonEntitlement(payload: [
-            "state": "grace",
-            "effective": true,
+    func testPatreonConnectionActionDistinguishesConnectFromSwitch() throws {
+        let unlinked = try XCTUnwrap(PatreonEntitlement(payload: [
+            "state": "unlinked",
+            "effective": false,
+            "source": "none",
+            "connectionAction": "connect",
             "linkRequired": true,
-            "message": "Connect Patreon before temporary access expires.",
+            "message": "Connect Patreon.",
         ]))
-        XCTAssertTrue(provisional.linkRequired)
+        XCTAssertEqual(unlinked.connectionAction, .connect)
+        XCTAssertTrue(unlinked.linkRequired)
 
-        let linked = try XCTUnwrap(PatreonEntitlement(payload: [
-            "state": "grace",
-            "effective": true,
+        let linkedButIneligible = try XCTUnwrap(PatreonEntitlement(payload: [
+            "state": "unlinked",
+            "effective": false,
+            "source": "none",
+            "connectionAction": "switch",
             "linkRequired": false,
-            "message": "Membership verification is temporarily unavailable.",
+            "message": "Try another Patreon account.",
         ]))
-        XCTAssertFalse(linked.linkRequired)
+        XCTAssertEqual(linkedButIneligible.connectionAction, .switchAccount)
+        XCTAssertFalse(linkedButIneligible.linkRequired)
 
         // Safe rollout compatibility: legacy responses offer linking only for
         // an explicitly unlinked account, without mislabeling linked grace.
@@ -416,6 +429,7 @@ final class RemoteSchemaTests: XCTestCase {
             "state": "grace", "effective": true, "message": "Grace access.",
         ]))
         XCTAssertFalse(legacyGrace.linkRequired)
+        XCTAssertEqual(legacyGrace.connectionAction, .none)
     }
 
     func testCloudSyncRequiresBothEffectiveEntitlementAndAdmission() {
@@ -437,5 +451,356 @@ final class RemoteSchemaTests: XCTestCase {
             entitlement: PatreonEntitlement(
                 status: .inactive, effective: false, message: "Inactive"),
             admitted: true).canSync)
+    }
+
+    // MARK: Cloud Sync display state
+
+    func testCloudSyncDisplayStagesSignInThenPatreon() {
+        let signedOut = CloudSyncDisplayState.resolve(
+            authState: .signedOut,
+            access: nil)
+        XCTAssertEqual(signedOut.kind, .signedOut)
+        XCTAssertEqual(signedOut.title, "Set up Cloud Sync")
+        XCTAssertEqual(signedOut.action, .signIn)
+
+        let unlinked = CloudSyncAccess(
+            entitlement: PatreonEntitlement(
+                status: .unlinked,
+                effective: false,
+                linkRequired: true,
+                message: "Backend copy is intentionally not displayed."),
+            admitted: false)
+        let needsPatreon = CloudSyncDisplayState.resolve(
+            authState: .localOnly(uid: "u1"),
+            access: unlinked)
+        XCTAssertEqual(needsPatreon.kind, .needsPatreon)
+        XCTAssertEqual(needsPatreon.title, "Connect Patreon")
+        XCTAssertEqual(needsPatreon.action, .connectPatreon)
+        XCTAssertEqual(
+            needsPatreon.detail,
+            "No active membership matched this sign-in. Your Patreon email can be different.")
+    }
+
+    func testCloudSyncDisplayTreatsVerifiedEmailEntitlementAsFullAccess() {
+        // A verified-email match can remain linkRequired while it is effective;
+        // it is full access, not a contradictory "Patreon not connected" state.
+        let verifiedEmailAccess = CloudSyncAccess(
+            entitlement: PatreonEntitlement(
+                status: .active,
+                effective: true,
+                source: .patreonEmail,
+                connectionAction: PatreonConnectionAction.none,
+                linkRequired: false,
+                message: "Matched by verified email."),
+            admitted: true)
+        let display = CloudSyncDisplayState.resolve(
+            authState: .ready(uid: "u1"),
+            access: verifiedEmailAccess,
+            signedInEmail: "patron@example.com")
+        XCTAssertEqual(display.kind, .enabled)
+        XCTAssertEqual(display.title, "Membership verified")
+        XCTAssertEqual(display.detail, "Cloud Sync is on for patron@example.com.")
+        XCTAssertEqual(display.action, .none)
+
+        let blankEmail = CloudSyncDisplayState.resolve(
+            authState: .ready(uid: "u1"),
+            access: verifiedEmailAccess,
+            signedInEmail: "   \n")
+        XCTAssertEqual(blankEmail.detail, "Cloud Sync is on.")
+    }
+
+    func testCloudSyncDisplaySeparatesReuseAndSwitchActions() {
+        let linkedButMissing = CloudSyncAccess(
+            entitlement: PatreonEntitlement(
+                status: .unlinked,
+                effective: false,
+                connectionAction: .switchAccount,
+                linkRequired: false,
+                message: "No membership."),
+            admitted: false)
+        XCTAssertEqual(
+            CloudSyncDisplayState.resolve(
+                authState: .localOnly(uid: "u1"),
+                access: linkedButMissing).action,
+            .switchPatreon)
+
+        let inactive = CloudSyncAccess(
+            entitlement: PatreonEntitlement(
+                status: .inactive,
+                effective: false,
+                linkRequired: false,
+                message: "Inactive."),
+            admitted: false)
+        let display = CloudSyncDisplayState.resolve(
+            authState: .localOnly(uid: "u1"),
+            access: inactive)
+        XCTAssertEqual(display.kind, .inactive)
+        XCTAssertEqual(display.action, .switchPatreon)
+        XCTAssertEqual(display.title, "Membership not active")
+
+        let callbackSwitch = CloudSyncDisplayState.resolve(
+            authState: .localOnly(uid: "u1"),
+            access: CloudSyncAccess(
+                entitlement: PatreonEntitlement(
+                    status: .unlinked,
+                    effective: false,
+                    connectionAction: .connect,
+                    message: "No match."),
+                admitted: false),
+            preferPatreonAccountSwitch: true)
+        XCTAssertEqual(callbackSwitch.title, "Try another Patreon account")
+        XCTAssertFalse(callbackSwitch.detail.contains("No active membership found"))
+    }
+
+    func testCloudSyncDisplayGraceWaitlistPendingAndUnavailable() {
+        let expiry = Date(timeIntervalSince1970: 1_900_000_000)
+        let grace = CloudSyncAccess(
+            entitlement: PatreonEntitlement(
+                status: .grace,
+                effective: true,
+                linkRequired: false,
+                graceExpiresAt: expiry,
+                message: "Grace."),
+            admitted: true)
+        let graceDisplay = CloudSyncDisplayState.resolve(
+            authState: .ready(uid: "u1"), access: grace)
+        XCTAssertEqual(graceDisplay.kind, .grace)
+        XCTAssertEqual(graceDisplay.graceExpiresAt, expiry)
+
+        let active = PatreonEntitlement(
+            status: .active, effective: true, message: "Active.")
+        let waitlist = CloudSyncDisplayState.resolve(
+            authState: .localOnly(uid: "u1"),
+            access: .init(
+                entitlement: active,
+                admitted: false,
+                admissionReason: "waitlist"))
+        XCTAssertEqual(waitlist.kind, .waitlist)
+        XCTAssertEqual(waitlist.title, "Patreon verified")
+
+        let pending = CloudSyncDisplayState.resolve(
+            authState: .localOnly(uid: "u1"),
+            access: .init(entitlement: active, admitted: false))
+        XCTAssertEqual(pending.kind, .setupPending)
+        XCTAssertEqual(pending.detail, "Cloud Sync setup didn’t finish. Try again.")
+
+        let unavailable = CloudSyncDisplayState.resolve(
+            authState: .localOnly(uid: "u1"),
+            access: .init(entitlement: .unavailable, admitted: false))
+        XCTAssertEqual(unavailable.kind, .unavailable)
+        XCTAssertEqual(unavailable.action, .retry)
+        XCTAssertEqual(
+            unavailable.detail,
+            "Your local sessions are safe. Try again.")
+    }
+
+    func testEmptyLibraryCoachmarkOnlyUsesTwoEligibleLaunches() {
+        XCTAssertTrue(EmptyLibraryCloudCoachmarkPolicy.isEligible(
+            libraryIsEmpty: true, signedOut: true, impressionCount: 0))
+        XCTAssertTrue(EmptyLibraryCloudCoachmarkPolicy.isEligible(
+            libraryIsEmpty: true, signedOut: true, impressionCount: 1))
+        XCTAssertFalse(EmptyLibraryCloudCoachmarkPolicy.isEligible(
+            libraryIsEmpty: true, signedOut: true, impressionCount: 2))
+        XCTAssertFalse(EmptyLibraryCloudCoachmarkPolicy.isEligible(
+            libraryIsEmpty: false, signedOut: true, impressionCount: 0))
+        XCTAssertFalse(EmptyLibraryCloudCoachmarkPolicy.isEligible(
+            libraryIsEmpty: true, signedOut: false, impressionCount: 0))
+    }
+
+    @MainActor
+    func testEmptyLibraryCoachmarkWaitsForAuthRestorationAndCountsOncePerProcess() throws {
+        let suiteName = "gainmap-coachmark-tests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer {
+            EmptyLibraryCloudCoachmarkGate.resetForTesting()
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+        EmptyLibraryCloudCoachmarkGate.resetForTesting()
+
+        XCTAssertFalse(EmptyLibraryCloudCoachmarkGate.visibility(
+            libraryIsEmpty: true,
+            signedOut: true,
+            authStateRestored: false,
+            defaults: defaults))
+        XCTAssertEqual(defaults.integer(
+            forKey: EmptyLibraryCloudCoachmarkPolicy.impressionsKey), 0)
+
+        XCTAssertTrue(EmptyLibraryCloudCoachmarkGate.visibility(
+            libraryIsEmpty: true,
+            signedOut: true,
+            authStateRestored: true,
+            defaults: defaults))
+        XCTAssertTrue(EmptyLibraryCloudCoachmarkGate.visibility(
+            libraryIsEmpty: true,
+            signedOut: true,
+            authStateRestored: true,
+            defaults: defaults))
+        XCTAssertEqual(defaults.integer(
+            forKey: EmptyLibraryCloudCoachmarkPolicy.impressionsKey), 1)
+
+        EmptyLibraryCloudCoachmarkGate.complete(defaults: defaults)
+        XCTAssertFalse(EmptyLibraryCloudCoachmarkGate.visibility(
+            libraryIsEmpty: true,
+            signedOut: true,
+            authStateRestored: true,
+            defaults: defaults))
+        XCTAssertEqual(defaults.integer(
+            forKey: EmptyLibraryCloudCoachmarkPolicy.impressionsKey), 2)
+    }
+
+    // MARK: Google OAuth + PKCE
+
+    func testGoogleOAuthAttemptUsesPKCEAndAlwaysChoosesAnAccount() throws {
+        let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+        let state = "state-for-one-immutable-attempt"
+        let attempt = try GoogleOAuthPKCE.makeAttempt(
+            clientID: "123-abc.apps.googleusercontent.com",
+            state: state,
+            verifier: verifier,
+            generation: 7)
+
+        XCTAssertEqual(attempt.generation, 7)
+        XCTAssertEqual(attempt.callbackScheme, "com.googleusercontent.apps.123-abc")
+        XCTAssertEqual(
+            attempt.redirectURI,
+            "com.googleusercontent.apps.123-abc:/oauth2redirect")
+        XCTAssertEqual(attempt.state, state)
+        XCTAssertEqual(attempt.verifier, verifier)
+        XCTAssertEqual(
+            GoogleOAuthPKCE.codeChallenge(for: verifier),
+            "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM")
+
+        let query = try XCTUnwrap(URLComponents(
+            url: attempt.authorizationURL,
+            resolvingAgainstBaseURL: false)?.queryItems)
+        let values = Dictionary(uniqueKeysWithValues: query.compactMap { item in
+            item.value.map { (item.name, $0) }
+        })
+        XCTAssertEqual(values["client_id"], attempt.clientID)
+        XCTAssertEqual(values["redirect_uri"], attempt.redirectURI)
+        XCTAssertEqual(values["response_type"], "code")
+        XCTAssertEqual(values["scope"], "openid email profile")
+        XCTAssertEqual(values["state"], state)
+        XCTAssertEqual(values["code_challenge_method"], "S256")
+        XCTAssertEqual(values["prompt"], "select_account")
+    }
+
+    func testGoogleOAuthCallbackRequiresExactSchemePathAndState() throws {
+        let attempt = try GoogleOAuthPKCE.makeAttempt(
+            clientID: "123-abc.apps.googleusercontent.com",
+            state: "expected-state-value",
+            verifier: String(repeating: "v", count: 64),
+            generation: 1)
+
+        func callback(scheme: String? = nil,
+                      path: String = GoogleOAuthPKCE.callbackPath,
+                      items: [URLQueryItem]) throws -> URL {
+            var components = URLComponents()
+            components.scheme = scheme ?? attempt.callbackScheme
+            components.path = path
+            components.queryItems = items
+            return try XCTUnwrap(components.url)
+        }
+
+        let success = try callback(items: [
+            .init(name: "code", value: "authorization-code"),
+            .init(name: "state", value: attempt.state),
+        ])
+        XCTAssertEqual(
+            try GoogleOAuthPKCE.authorizationCode(from: success, for: attempt),
+            "authorization-code")
+
+        XCTAssertThrowsError(try GoogleOAuthPKCE.authorizationCode(
+            from: callback(scheme: "wrong.scheme", items: [
+                .init(name: "code", value: "authorization-code"),
+                .init(name: "state", value: attempt.state),
+            ]),
+            for: attempt)) { error in
+                XCTAssertEqual(error as? GoogleOAuthError, .invalidCallback)
+            }
+        XCTAssertThrowsError(try GoogleOAuthPKCE.authorizationCode(
+            from: callback(path: "/wrong", items: [
+                .init(name: "code", value: "authorization-code"),
+                .init(name: "state", value: attempt.state),
+            ]),
+            for: attempt)) { error in
+                XCTAssertEqual(error as? GoogleOAuthError, .invalidCallback)
+            }
+        XCTAssertThrowsError(try GoogleOAuthPKCE.authorizationCode(
+            from: callback(items: [
+                .init(name: "code", value: "authorization-code"),
+                .init(name: "state", value: "wrong-state"),
+            ]),
+            for: attempt)) { error in
+                XCTAssertEqual(error as? GoogleOAuthError, .stateMismatch)
+            }
+        XCTAssertThrowsError(try GoogleOAuthPKCE.authorizationCode(
+            from: callback(items: [
+                .init(name: "code", value: "authorization-code"),
+                .init(name: "state", value: attempt.state),
+                .init(name: "state", value: attempt.state),
+            ]),
+            for: attempt)) { error in
+                XCTAssertEqual(error as? GoogleOAuthError, .stateMismatch)
+            }
+
+        XCTAssertThrowsError(try GoogleOAuthPKCE.authorizationCode(
+            from: callback(items: [
+                .init(name: "error", value: "access_denied"),
+                .init(name: "state", value: attempt.state),
+            ]),
+            for: attempt)) { error in
+                XCTAssertEqual(error as? GoogleOAuthError, .cancelled)
+            }
+        XCTAssertThrowsError(try GoogleOAuthPKCE.authorizationCode(
+            from: callback(items: [
+                .init(name: "error", value: "server_error"),
+                .init(name: "state", value: attempt.state),
+            ]),
+            for: attempt)) { error in
+                XCTAssertEqual(error as? GoogleOAuthError, .provider("server_error"))
+            }
+    }
+
+    func testGoogleOAuthTokenExchangeIsEncodedAndRequiresSuccessfulIDToken() throws {
+        let attempt = try GoogleOAuthPKCE.makeAttempt(
+            clientID: "123-abc.apps.googleusercontent.com",
+            state: "expected-state-value",
+            verifier: String(repeating: "v", count: 64),
+            generation: 1)
+        let code = "a+b/c="
+        let request = GoogleOAuthPKCE.tokenRequest(code: code, for: attempt)
+        XCTAssertEqual(request.httpMethod, "POST")
+        XCTAssertEqual(
+            request.value(forHTTPHeaderField: "Content-Type"),
+            "application/x-www-form-urlencoded")
+        let body = try XCTUnwrap(request.httpBody)
+        var form = URLComponents()
+        form.percentEncodedQuery = try XCTUnwrap(String(data: body, encoding: .utf8))
+        let values = Dictionary(uniqueKeysWithValues:
+            (form.queryItems ?? []).compactMap { item in
+                item.value.map { (item.name, $0) }
+            })
+        XCTAssertEqual(values["code"], code)
+        XCTAssertEqual(values["client_id"], attempt.clientID)
+        XCTAssertEqual(values["redirect_uri"], attempt.redirectURI)
+        XCTAssertEqual(values["code_verifier"], attempt.verifier)
+        XCTAssertEqual(values["grant_type"], "authorization_code")
+
+        let valid = Data(#"{"id_token":"id-value","access_token":"access-value"}"#.utf8)
+        XCTAssertEqual(
+            try GoogleOAuthPKCE.tokens(data: valid, statusCode: 200),
+            GoogleOAuthTokens(idToken: "id-value", accessToken: "access-value"))
+        XCTAssertThrowsError(try GoogleOAuthPKCE.tokens(data: valid, statusCode: 400))
+        XCTAssertThrowsError(try GoogleOAuthPKCE.tokens(
+            data: Data(#"{"access_token":"access-value"}"#.utf8),
+            statusCode: 200))
+    }
+
+    func testPatreonConnectionModesUseBackendContractAndPrivateSwitchSession() {
+        XCTAssertEqual(PatreonConnectionMode.reuseSession.attemptKind, "reuse_session")
+        XCTAssertFalse(PatreonConnectionMode.reuseSession.prefersEphemeralBrowserSession)
+        XCTAssertEqual(PatreonConnectionMode.switchAccount.attemptKind, "switch_account")
+        XCTAssertTrue(PatreonConnectionMode.switchAccount.prefersEphemeralBrowserSession)
     }
 }

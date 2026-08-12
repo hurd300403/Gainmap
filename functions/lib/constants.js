@@ -60,11 +60,11 @@ const DELETED_ACCOUNT_MARKER_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const PATREON_GRACE_MS = 7 * 24 * 60 * 60 * 1000;
 
 /**
- * A verified Firebase email may bootstrap sync for seven days when it matches
- * the current campaign snapshot. Patreon OAuth must be linked before this
- * window ends; an email is an account-recovery hint, not a durable identity.
+ * A verified Firebase email is a full proof while its active Patreon campaign
+ * snapshot remains inside this absolute verification window. A new completed
+ * campaign snapshot rolls the window forward; a client refresh cannot.
  */
-const PATREON_EMAIL_PROVISIONAL_MS = 7 * 24 * 60 * 60 * 1000;
+const PATREON_EMAIL_VERIFICATION_MS = 7 * 24 * 60 * 60 * 1000;
 
 /** Cloud data is retained after entitlement expiry for recovery/reactivation. */
 const PATREON_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
@@ -75,7 +75,7 @@ const PATREON_INDEX_TTL_MS = 14 * 24 * 60 * 60 * 1000;
 /** OAuth state is opaque, single-use, and deliberately short lived. */
 const PATREON_OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
 
-/** Per-Firebase-account OAuth state creation throttle. */
+/** Per-Firebase-account OAuth rolling window; at most two starts are allowed. */
 const PATREON_OAUTH_START_COOLDOWN_MS = 60 * 1000;
 
 /** Avoid turning a client refresh loop into Patreon API traffic. */
@@ -142,7 +142,7 @@ module.exports = {
   RECENT_AUTH_SEC,
   DELETED_ACCOUNT_MARKER_TTL_MS,
   PATREON_GRACE_MS,
-  PATREON_EMAIL_PROVISIONAL_MS,
+  PATREON_EMAIL_VERIFICATION_MS,
   PATREON_RETENTION_MS,
   PATREON_INDEX_TTL_MS,
   PATREON_OAUTH_STATE_TTL_MS,

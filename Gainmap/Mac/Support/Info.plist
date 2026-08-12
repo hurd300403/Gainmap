@@ -16,14 +16,15 @@
     <string>$(MARKETING_VERSION)</string>
     <key>CFBundleVersion</key>
     <string>$(CURRENT_PROJECT_VERSION)</string>
-    <!-- Sign in with Apple and Patreon OAuth return through an active
-         ASWebAuthenticationSession. The callback carries no tokens or PII. -->
+    <!-- Apple, Google, and Patreon OAuth return through an active
+         ASWebAuthenticationSession. -->
     <key>CFBundleURLTypes</key>
     <array>
         <dict>
             <key>CFBundleURLSchemes</key>
             <array>
                 <string>gainmapauth</string>
+                <string>com.googleusercontent.apps.937169591841-ibfut223q9cfsta6nr0hkv280bks0d3j</string>
             </array>
         </dict>
     </array>

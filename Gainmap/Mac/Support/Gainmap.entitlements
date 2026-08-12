@@ -5,8 +5,13 @@
     <!-- Direct (Developer ID) distribution, not the Mac App Store: App Sandbox
          is off so the app can read user-chosen files and spawn the bundled,
          co-signed uhdrtool helper freely. Hardened Runtime stays ON (set in the
-         build settings) for notarization. -->
+         build settings) for notarization. The Developer ID provisioning profile
+         expands AppIdentifierPrefix and authorizes FirebaseAuth's keychain use. -->
     <key>com.apple.security.app-sandbox</key>
     <false/>
+    <key>keychain-access-groups</key>
+    <array>
+        <string>$(AppIdentifierPrefix)com.legacylab.gainmap</string>
+    </array>
 </dict>
 </plist>

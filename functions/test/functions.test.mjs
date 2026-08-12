@@ -193,6 +193,7 @@ async function seedPatreonEntitlement(uid, data) {
   await db.doc(`patreonEntitlements/${uid}`).set(data || {
     state: 'active',
     effective: true,
+    source: 'patreon_email',
     lastVerifiedAt: now(NOW0),
     verificationExpiresAt: now(NOW0 + 30 * 24 * 3600 * 1000),
   });

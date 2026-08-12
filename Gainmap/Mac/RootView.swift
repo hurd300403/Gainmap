@@ -130,6 +130,7 @@ struct MacRootView: View {
 private struct MacSessionLibrary: View {
     @EnvironmentObject private var auth: AuthController
     @EnvironmentObject private var sync: SyncCoordinator
+    @Environment(\.openSettings) private var openSettings
 
     let onOpen: (UUID) async -> Bool
     let onStart: ([URL]) async -> Bool
@@ -140,6 +141,7 @@ private struct MacSessionLibrary: View {
     @State private var noticeTask: Task<Void, Never>?
     @State private var renaming: SessionCard?
     @State private var renameText = ""
+    @State private var showsEmptyLibraryCloudCoachmark = false
 
     var body: some View {
         ZStack {
@@ -170,7 +172,10 @@ private struct MacSessionLibrary: View {
                             onDelete: { id in
                                 Task { await sync.deleteSession(id: id) }
                             },
-                            syncState: cardSyncState)
+                            syncState: cardSyncState,
+                            showsCloudSyncCoachmark:
+                                showsEmptyLibraryCloudCoachmark,
+                            onSetUpCloudSync: { openSettings() })
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -215,7 +220,23 @@ private struct MacSessionLibrary: View {
         .frame(minWidth: 900, minHeight: 620)
         .preferredColorScheme(.dark)
         .tint(Theme.accent)
-        .task { await sync.refresh() }
+        .task {
+            await sync.refresh()
+            refreshEmptyLibraryCloudCoachmark()
+        }
+        .onChange(of: sync.initialLoadDone) { _, loaded in
+            guard loaded else { return }
+            refreshEmptyLibraryCloudCoachmark()
+        }
+        .onChange(of: sync.cards.count) {
+            refreshEmptyLibraryCloudCoachmark()
+        }
+        .onChange(of: auth.state) {
+            refreshEmptyLibraryCloudCoachmark()
+        }
+        .onChange(of: auth.hasRestoredAuthState) {
+            refreshEmptyLibraryCloudCoachmark()
+        }
         .onReceive(NotificationCenter.default.publisher(for: .gainmapNewSession)) { _ in
             browse()
         }
@@ -339,28 +360,20 @@ private struct MacSessionLibrary: View {
     private var statusText: String {
         switch auth.state {
         case .signedOut:
-            return "Saved on this Mac · Cloud Sync optional"
+            return cloudDisplayState.title
         case .failed:
-            return "Saved on this Mac · sign-in needs attention"
+            return cloudDisplayState.title
         case .checking:
-            return "Checking Cloud Sync access…"
+            return cloudDisplayState.title
         case .localOnly:
-            if auth.cloudAccess?.isWaitlisted == true {
-                return "Saved on this Mac · Cloud Sync waitlist"
-            }
-            if auth.cloudAccess?.entitlement.status == .inactive {
-                return "Saved on this Mac · Patreon inactive"
-            }
-            if auth.cloudAccess?.entitlement.status == .unlinked {
-                return "Saved on this Mac · connect Patreon to sync"
-            }
-            return "Saved on this Mac · Cloud Sync off"
+            return cloudDisplayState.title
         case .ready:
             if sync.hasSyncIssue { return "Sync needs attention" }
             if sync.pendingWorkCount > 0 {
                 return "Syncing \(sync.pendingWorkCount) item\(sync.pendingWorkCount == 1 ? "" : "s")…"
             }
-            return "Up to date"
+            return cloudDisplayState.kind == .grace
+                ? cloudDisplayState.title : "Up to date"
         }
     }
 
@@ -374,6 +387,14 @@ private struct MacSessionLibrary: View {
         case .signedOut, .failed, .localOnly:
             return Theme.stoneFaint
         }
+    }
+
+    private var cloudDisplayState: CloudSyncDisplayState {
+        .resolve(
+            authState: auth.state,
+            access: auth.cloudAccess,
+            signedInEmail: auth.email,
+            preferPatreonAccountSwitch: auth.shouldOfferPatreonAccountSwitch)
     }
 
     private var headerSyncState: HeaderSyncState {
@@ -414,6 +435,24 @@ private struct MacSessionLibrary: View {
     private func beginRename(_ card: SessionCard) {
         renameText = card.title
         renaming = card
+    }
+
+    private func refreshEmptyLibraryCloudCoachmark() {
+        guard sync.initialLoadDone, auth.hasRestoredAuthState else {
+            showsEmptyLibraryCloudCoachmark = false
+            return
+        }
+        let signedOut: Bool
+        if case .signedOut = auth.state {
+            signedOut = true
+        } else {
+            signedOut = false
+        }
+        showsEmptyLibraryCloudCoachmark =
+            EmptyLibraryCloudCoachmarkGate.visibility(
+                libraryIsEmpty: sync.cards.isEmpty,
+                signedOut: signedOut,
+                authStateRestored: auth.hasRestoredAuthState)
     }
 
     private func open(_ id: UUID) {

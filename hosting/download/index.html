@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Download Gainmap</title>
+  <meta name="description" content="Download Gainmap for iPhone and Mac.">
+  <meta name="theme-color" content="#171717">
+  <link rel="canonical" href="https://gainmap-production.web.app/download/">
+  <link rel="icon" href="/download/icon.png" type="image/png">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="Download Gainmap">
+  <meta property="og:description" content="Gainmap for iPhone and Mac.">
+  <meta property="og:url" content="https://gainmap-production.web.app/download/">
+  <meta property="og:image" content="https://gainmap-production.web.app/download/og.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Gainmap shown on a Mac and iPhone.">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Download Gainmap">
+  <meta name="twitter:description" content="Gainmap for iPhone and Mac.">
+  <meta name="twitter:image" content="https://gainmap-production.web.app/download/og.png">
+  <meta name="twitter:image:alt" content="Gainmap shown on a Mac and iPhone.">
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #171717;
+      --card: #22211f;
+      --text: #f3f0eb;
+      --muted: #aaa39b;
+      --accent: #ef725f;
+      --line: #3a3734;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-width: 320px;
+      min-height: 100vh;
+      background:
+        radial-gradient(circle at 50% -10%, rgba(239, 114, 95, .19), transparent 31rem),
+        var(--bg);
+      color: var(--text);
+      font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .shell { width: min(880px, calc(100% - 32px)); margin: 0 auto; }
+    header {
+      display: flex;
+      min-height: 70px;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid rgba(255,255,255,.07);
+    }
+
+    .brand {
+      color: var(--text);
+      font-size: 19px;
+      font-weight: 760;
+      letter-spacing: -.04em;
+      text-decoration: none;
+    }
+
+    .brand span { color: var(--accent); }
+    header nav { display: flex; gap: 18px; }
+    header nav a, footer a {
+      display: inline-flex;
+      min-height: 44px;
+      align-items: center;
+      color: var(--muted);
+      font-size: 13px;
+      text-decoration: none;
+    }
+
+    header nav a:hover, footer a:hover { color: var(--text); }
+    main { padding: clamp(64px, 10vw, 104px) 0 72px; }
+    .intro { max-width: 610px; margin-bottom: 36px; }
+    h1 {
+      margin: 0;
+      font-size: clamp(44px, 8vw, 68px);
+      line-height: 1;
+      letter-spacing: -.058em;
+    }
+
+    .intro p { margin: 16px 0 0; color: var(--muted); font-size: 18px; }
+    .downloads { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+    .download-card {
+      display: flex;
+      min-height: 260px;
+      flex-direction: column;
+      padding: 28px;
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      background: linear-gradient(145deg, #262523, var(--card));
+      box-shadow: 0 22px 58px rgba(0,0,0,.2);
+    }
+
+    .platform {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+    }
+
+    .icon {
+      display: block;
+      width: 64px;
+      height: 64px;
+      border-radius: 15px;
+      object-fit: contain;
+      filter: drop-shadow(0 8px 15px rgba(0,0,0,.22));
+    }
+
+    .status {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+    }
+
+    h2 { margin: 26px 0 6px; font-size: 26px; letter-spacing: -.035em; }
+    .requirements { margin: 0; color: var(--muted); font-size: 13px; }
+    .action {
+      display: flex;
+      width: 100%;
+      min-height: 48px;
+      align-items: center;
+      justify-content: space-between;
+      margin-top: auto;
+      padding: 0 15px;
+      border: 1px solid rgba(255,255,255,.1);
+      border-radius: 11px;
+      background: rgba(255,255,255,.04);
+      color: #c3bcb4;
+      cursor: not-allowed;
+      font: inherit;
+      font-size: 14px;
+      font-weight: 700;
+      text-align: left;
+    }
+
+    .note {
+      margin: 22px auto 0;
+      color: var(--muted);
+      font-size: 13px;
+      text-align: center;
+    }
+
+    footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 24px;
+      margin-top: 70px;
+      padding-top: 24px;
+      border-top: 1px solid rgba(255,255,255,.07);
+      color: #858078;
+      font-size: 12px;
+    }
+
+    footer nav { display: flex; gap: 18px; }
+    :focus-visible { outline: 2px solid #ff907c; outline-offset: 4px; }
+
+    @media (max-width: 660px) {
+      main { padding-top: 55px; }
+      .downloads { grid-template-columns: 1fr; }
+      .download-card { min-height: 235px; }
+      footer { align-items: flex-start; flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+  <header class="shell">
+    <a class="brand" href="/">Gain<span>map</span></a>
+    <nav aria-label="Site navigation">
+      <a href="/support/">Support</a>
+      <a href="/privacy/">Privacy</a>
+    </nav>
+  </header>
+
+  <main class="shell">
+    <div class="intro">
+      <h1>Download Gainmap</h1>
+      <p>Choose your platform.</p>
+    </div>
+
+    <div class="downloads">
+      <section class="download-card" aria-labelledby="iphone-heading">
+        <div class="platform">
+          <img class="icon" src="/download/gainmap-ios.png" alt="Gainmap for iPhone app icon" width="64" height="64">
+          <span class="status">Coming soon</span>
+        </div>
+        <h2 id="iphone-heading">iPhone</h2>
+        <p class="requirements">iOS 17 or later · TestFlight</p>
+        <button class="action" type="button" disabled title="The TestFlight build is being prepared">
+          <span>Open in TestFlight</span><span aria-hidden="true">→</span>
+        </button>
+      </section>
+
+      <section class="download-card" aria-labelledby="mac-heading">
+        <div class="platform">
+          <img class="icon" src="/download/gainmap-macos.png" alt="Gainmap for Mac app icon" width="64" height="64">
+          <span class="status">Coming soon</span>
+        </div>
+        <h2 id="mac-heading">Mac</h2>
+        <p class="requirements">macOS 14 or later · Apple silicon</p>
+        <button class="action" type="button" disabled title="The signed Mac build is being prepared">
+          <span>Download for Mac</span><span aria-hidden="true">↓</span>
+        </button>
+      </section>
+    </div>
+
+    <p class="note">No account is required for local use. Cloud Sync is optional.</p>
+
+    <footer>
+      <span>© 2026 Legacy Lab</span>
+      <nav aria-label="Footer navigation">
+        <a href="/support/">Help</a>
+        <a href="https://www.patreon.com/samhurd">Patreon</a>
+      </nav>
+    </footer>
+  </main>
+</body>
+</html>

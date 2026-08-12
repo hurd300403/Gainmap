@@ -103,14 +103,34 @@ final class SyncEmulatorTests: XCTestCase {
             "syncEnabled": ["booleanValue": true],
             "signupsOpen": ["booleanValue": true],
             "maxUsers": ["integerValue": "200"],
+            "patreonEnforcementEnabled": ["booleanValue": true],
         ])
     }
 
     private func seedUser(uid: String, quotaBytes: Int64) async throws {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let now = Date()
+        let entitlement: [String: Any] = [
+            "state": ["stringValue": "active"],
+            "effective": ["booleanValue": true],
+            "source": ["stringValue": "patreon_email"],
+            "lastVerifiedAt": ["timestampValue": formatter.string(from: now)],
+            "verificationExpiresAt": [
+                "timestampValue": formatter.string(
+                    from: now.addingTimeInterval(30 * 24 * 60 * 60))
+            ],
+        ]
+
+        // Production keeps the canonical Patreon proof and the rules-facing
+        // user mirror in lockstep. Seed both so rules, callables, and storage
+        // triggers exercise the real entitlement gate instead of bypassing it.
+        try await restPatch("patreonEntitlements/\(uid)", fields: entitlement)
         try await restPatch("users/\(uid)", fields: [
             "schemaVersion": ["integerValue": "1"],
             "syncAdmitted": ["booleanValue": true],
             "quotaBytes": ["integerValue": String(quotaBytes)],
+            "entitlement": ["mapValue": ["fields": entitlement]],
         ])
     }
 
@@ -183,6 +203,22 @@ final class SyncEmulatorTests: XCTestCase {
         XCTFail("timed out waiting for \(label)")
         throw NSError(domain: "waitUntil", code: 408,
                       userInfo: [NSLocalizedDescriptionKey: "timeout: \(label)"])
+    }
+
+    /// Wait for a transfer-queue outcome even when a listener already owns
+    /// the engine's re-entrancy-safe pump. Only nudge the pump when the desired
+    /// state is not already visible; an in-flight owner will ignore the nudge
+    /// and continue, while a gap between passes is picked up deterministically.
+    private func waitForTransfers(_ label: String, engine: SyncEngine,
+                                  timeout: TimeInterval = 30,
+                                  condition: @escaping (TransferQueue) -> Bool) async throws {
+        try await waitUntil(label, timeout: timeout) {
+            var snapshot = await engine.transferSnapshot
+            if condition(snapshot) { return true }
+            await engine.pumpTransfers()
+            snapshot = await engine.transferSnapshot
+            return condition(snapshot)
+        }
     }
 
     /// Force-unwrap-free session load: missing session fails the test
@@ -565,9 +601,18 @@ final class SyncEmulatorTests: XCTestCase {
         await engineA.drainOnce()          // creates docs + enqueues transfers
         await engineA.pumpTransfers()      // reserve + upload thumb, then original
 
-        let queue = await engineA.transferSnapshot
         let thumbID = SyncSchema.reservationId(tier: "thumbs", contentHash: p1.hash)
         let origID = SyncSchema.reservationId(tier: "originals", contentHash: p1.hash)
+        // start() listeners can already own the re-entrancy-safe transfer pump.
+        // In that case the explicit call above intentionally returns instead
+        // of joining the in-flight pass. Wait for the observable outcome and
+        // nudge any work left between passes rather than assuming this call
+        // was the pump owner.
+        try await waitForTransfers("both upload transfers finish", engine: engineA) {
+            $0.transfer(id: thumbID)?.status == .done
+                && $0.transfer(id: origID)?.status == .done
+        }
+        let queue = await engineA.transferSnapshot
         XCTAssertEqual(queue.transfer(id: thumbID)?.status, .done)
         XCTAssertEqual(queue.transfer(id: origID)?.status, .done)
 
@@ -640,6 +685,9 @@ final class SyncEmulatorTests: XCTestCase {
                                  root: engineRoot)
         await engine2.start()
         await engine2.pumpTransfers()
+        try await waitForTransfers("relaunch upload finishes", engine: engine2) {
+            $0.transfer(id: "originals_\(p1.hash)")?.status == .done
+        }
         let queue = await engine2.transferSnapshot
         XCTAssertEqual(queue.activeCount, 0, "everything finishes after relaunch")
         let origExists = try await backend.objectExists(
@@ -660,6 +708,9 @@ final class SyncEmulatorTests: XCTestCase {
         await engineA.noteLocalSession(session1)
         await engineA.drainOnce()
         await engineA.pumpTransfers()
+        try await waitForTransfers("first deduplicated upload finishes", engine: engineA) {
+            $0.transfer(id: "originals_\(p1.hash)")?.status == .done
+        }
         let firstPass = await engineA.transferSnapshot
         XCTAssertEqual(firstPass.transfer(id: "originals_\(p1.hash)")?.status, .done)
 
@@ -668,6 +719,9 @@ final class SyncEmulatorTests: XCTestCase {
         await engineA.noteLocalSession(session2)
         await engineA.drainOnce()
         await engineA.pumpTransfers()
+        try await waitForTransfers("deduplicated queue settles", engine: engineA) {
+            $0.activeCount == 0 && !$0.hasParked
+        }
 
         // Photo doc exists in BOTH sessions, one blob doc, nothing stuck.
         let backend = FirebaseSyncBackend()
@@ -691,6 +745,9 @@ final class SyncEmulatorTests: XCTestCase {
         await engineA.noteLocalSession(session)
         await engineA.drainOnce()
         await engineA.pumpTransfers()
+        try await waitForTransfers("quota rejection reaches terminal state", engine: engineA) {
+            $0.isQuotaExceeded
+        }
         let queue = await engineA.transferSnapshot
         XCTAssertTrue(queue.isQuotaExceeded, "quota exhaustion must be a first-class terminal state")
         await engineA.stop()
