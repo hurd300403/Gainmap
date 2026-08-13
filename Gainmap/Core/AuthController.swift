@@ -1022,7 +1022,7 @@ public final class AuthController: ObservableObject {
                         }
                         return
                     }
-                    self.state = .failed(error.localizedDescription)
+                    self.state = .failed(Self.signInFailureMessage(for: error))
                     if let googleGeneration {
                         self.completeGoogleOAuthAttempt(generation: googleGeneration)
                     }
@@ -1441,6 +1441,24 @@ public final class AuthController: ObservableObject {
     }
 
     // ------------------------------------------------- helpers
+
+    /// Firebase's keychain and internal errors use diagnostic descriptions
+    /// intended for developers. Keep actionable provider copy for every other
+    /// failure, but never surface those implementation details in sign-in UI.
+    static func signInFailureMessage(for error: NSError) -> String {
+        guard error.domain == AuthErrors.domain,
+              let code = AuthErrorCode(rawValue: error.code) else {
+            return error.localizedDescription
+        }
+        switch code {
+        case .keychainError:
+            return "Gainmap couldn't securely save your sign-in. Restart Gainmap and try again."
+        case .internalError:
+            return "Sign-in couldn't finish. Try again."
+        default:
+            return error.localizedDescription
+        }
+    }
 
     private func invalidatePatreonConnection() {
         patreonConnectionGeneration &+= 1

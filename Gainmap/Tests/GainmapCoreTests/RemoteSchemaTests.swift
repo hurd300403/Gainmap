@@ -837,6 +837,50 @@ final class RemoteSchemaTests: XCTestCase {
             statusCode: 200))
     }
 
+    @MainActor
+    func testFirebaseAuthImplementationFailuresUseSafeSignInCopy() {
+        let keychain = NSError(
+            domain: "FIRAuthErrorDomain",
+            code: 17_995,
+            userInfo: [
+                NSLocalizedDescriptionKey:
+                    "An error occurred when accessing the keychain. The NSLocalizedFailureReasonErrorKey field contains more information.",
+                NSLocalizedFailureReasonErrorKey:
+                    "SecItemAdd (-34018) A required entitlement is missing.",
+            ])
+        XCTAssertEqual(
+            AuthController.signInFailureMessage(for: keychain),
+            "Gainmap couldn't securely save your sign-in. Restart Gainmap and try again.")
+
+        let internalFailure = NSError(
+            domain: "FIRAuthErrorDomain",
+            code: 17_999,
+            userInfo: [NSLocalizedDescriptionKey: "Internal assertion details"])
+        XCTAssertEqual(
+            AuthController.signInFailureMessage(for: internalFailure),
+            "Sign-in couldn't finish. Try again.")
+    }
+
+    @MainActor
+    func testFirebaseAuthProviderFailuresKeepUsefulCopy() {
+        let providerFailure = NSError(
+            domain: "FIRAuthErrorDomain",
+            code: 17_020,
+            userInfo: [NSLocalizedDescriptionKey:
+                "Network error. Check your connection and try again."])
+        XCTAssertEqual(
+            AuthController.signInFailureMessage(for: providerFailure),
+            "Network error. Check your connection and try again.")
+
+        let unrelatedFailure = NSError(
+            domain: "ExampleProviderErrorDomain",
+            code: 17_995,
+            userInfo: [NSLocalizedDescriptionKey: "Provider-specific guidance"])
+        XCTAssertEqual(
+            AuthController.signInFailureMessage(for: unrelatedFailure),
+            "Provider-specific guidance")
+    }
+
     func testPatreonConnectionModesUseBackendContractAndPrivateSwitchSession() {
         XCTAssertEqual(PatreonConnectionMode.reuseSession.attemptKind, "reuse_session")
         XCTAssertFalse(PatreonConnectionMode.reuseSession.prefersEphemeralBrowserSession)
