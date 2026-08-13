@@ -125,14 +125,9 @@ public struct LookControlsPanel: View {
             if model.items.count > 1 {
                 HStack(spacing: 10) {
                     Toggle(isOn: sameLookBinding) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("SAME LOOK FOR ALL")
-                                .font(Theme.mono(10, .semibold)).tracking(1.5)
-                                .foregroundStyle(model.sameLookForAll ? Theme.gold : Theme.stone)
-                            Text(model.sameLookForAll ? "All photos use this look"
-                                                      : "Each photo has its own look")
-                                .font(Theme.mono(9)).foregroundStyle(Theme.stoneDim)
-                        }
+                        Text("Same Look for All")
+                            .font(Theme.mono(10, .semibold)).tracking(1.5)
+                            .foregroundStyle(model.sameLookForAll ? Theme.gold : Theme.stone)
                     }
                     .toggleStyle(.switch)
                     .controlSize(.small)
@@ -154,29 +149,6 @@ public struct LookControlsPanel: View {
                 sliderRow("INTENSITY", intensityBinding, 0...1, fmt: "%.0f%%", "subtle", "full", scale: 100,
                           resetTo: 1.0,
                           help: "Overall strength of the HDR pop. Slide down for a subtle effect, up for full punch — it blends all the Advanced settings at once.")
-
-                // Teaser for the headline per-photo option, otherwise buried three
-                // levels deep (Advanced ▸ HDR & Screens ▸ toggle).
-                Button {
-                    withAnimation(.easeOut(duration: 0.22)) {
-                        showAdvancedLook = true
-                        expandedGroups.insert("hdr")
-                    }
-                } label: {
-                    HStack(spacing: 5) {
-                        Image(systemName: model.bloom.bakeGlowIntoSDR ? "sun.max.fill" : "sun.max")
-                            .font(.system(size: 9))
-                        Text(model.bloom.bakeGlowIntoSDR
-                             ? (model.sameLookForAll ? "Glow in SDR is ON for all photos"
-                                                     : "Glow in SDR is ON for this photo")
-                             : "Want the glow on non-HDR screens too?")
-                            .font(Theme.mono(9.5))
-                    }
-                    .foregroundStyle(model.bloom.bakeGlowIntoSDR ? Theme.gold : Theme.stoneDim)
-                }
-                .buttonStyle(.plain)
-                .help("Opens Advanced controls ▸ HDR & Screens, where GLOW IN SDR lives")
-                .frame(maxWidth: .infinity, alignment: .leading)
 
                 Divider().overlay(Theme.line)
                 Button(action: { withAnimation(.easeOut(duration: 0.22)) { showAdvancedLook.toggle() } }) {

@@ -126,9 +126,9 @@ public final class MergeModel: ObservableObject {
         for i in items.indices { items[i].look = shared }
         runningLook = shared
         sameLookForAll = on
-        // The visible result does not change, but each photo now starts from an
-        // explicit identical baseline and Intensity reads that baseline as 100%.
-        loadAsAnchor(shared)
+        // `bloom`, `anchorLook`, and `intensity` are the active photo's live
+        // controls. The mode switch must not re-anchor or normalize any of
+        // them: only ownership changes, while the visible result stays exact.
         schedulePersist()
     }
 

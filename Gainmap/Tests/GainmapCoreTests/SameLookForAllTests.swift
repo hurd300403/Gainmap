@@ -131,40 +131,110 @@ final class SameLookForAllTests: XCTestCase {
 
     // MARK: Shared-mode transitions
 
-    func testDisableFreezesSharedLookOntoEveryPhoto() {
+    func testDisablePreservesActiveControlsAndLetsPhotosDivergeFromSharedLook() {
         let m = stubbedModel()
-        m.addFiles([url("a"), url("b")])
-        m.bloom.glow = 0.3
-        m.selectNext()                            // commits 0.3 onto a; b owns nothing yet
-        m.bloom.glow = 0.6
-        m.selectPrevious()                        // commits 0.6 onto b; back on a (0.3)
+        m.addFiles([url("a"), url("b"), url("c")])
+        let activeID = m.items[1].id
+        m.select(activeID)
+
+        var anchor = AutoHDR.BloomParams()
+        anchor.hdrLookEnabled = true
+        anchor.glow = 1.21
+        anchor.threshold = 0.32
+        anchor.spread = 0.021
+        anchor.punch = 0.76
+        anchor.peak = 4.4
+        anchor.falloff = 1.72
+        anchor.saturation = 1.18
+        anchor.tint = -0.63
+        anchor.headroom = 2.3
+        anchor.bakeGlowIntoSDR = true
+        m.bloom = anchor
+        m.setIntensity(0.72)
+        let entryShared = m.bloom
+        XCTAssertEqual(m.intensity, 0.72, accuracy: 1e-9)
 
         m.setSameLookForAll(true)
-        m.bloom.glow = 1.5                        // shared look
+        // Shared mode stays live: the final snapshot must include changes made
+        // after entry, not the look that was stamped when the mode turned on.
+        m.bloom.threshold = 0.47
+        let finalAnchor = m.bloom
+        m.setIntensity(0.46)
+        let shared = m.bloom
+        let activeIntensity = m.intensity
+        XCTAssertNotEqual(shared, entryShared)
+        XCTAssertEqual(shared.threshold, 0.47, accuracy: 1e-9)
+        XCTAssertEqual(activeIntensity, 0.46, accuracy: 1e-9)
 
         m.setSameLookForAll(false)
-        XCTAssertEqual(m.bloom.glow, 1.5, accuracy: 1e-9,
-                       "disable keeps exactly what was visible")
-        XCTAssertEqual(m.items[0].look?.glow ?? 0, 1.5, accuracy: 1e-9)
-        XCTAssertEqual(m.items[1].look?.glow ?? 0, 1.5, accuracy: 1e-9,
-                       "every photo starts from the shared look")
-        m.selectNext()
-        XCTAssertEqual(m.bloom.glow, 1.5, accuracy: 1e-9)
-        m.bloom.glow = 0.8
-        m.selectPrevious()
-        XCTAssertEqual(m.bloom.glow, 1.5, accuracy: 1e-9,
-                       "photos can diverge independently after disabling")
+        XCTAssertEqual(m.selectedID, activeID)
+        XCTAssertEqual(m.bloom, shared,
+                       "disable must preserve every active HDR Look control")
+        XCTAssertEqual(m.intensity, activeIntensity, accuracy: 1e-9,
+                       "disable must not normalize Intensity")
+        XCTAssertTrue(m.items.allSatisfy { $0.look == shared },
+                      "every photo must start from the final shared look")
+
+        // The active photo retains the same 100% anchor as well as its current
+        // effective look, so a later Intensity move behaves exactly as before.
+        m.setIntensity(1.0)
+        XCTAssertEqual(m.bloom, finalAnchor)
+        m.setIntensity(activeIntensity)
+        XCTAssertEqual(m.bloom, shared)
+
+        m.select(m.items[0].id)
+        XCTAssertEqual(m.bloom, shared)
+        m.bloom.tint = 0.84
+        let divergent = m.bloom
+        m.select(activeID)
+        XCTAssertEqual(m.bloom, shared,
+                       "editing another photo must not change the former shared look")
+        XCTAssertEqual(m.items[0].look, divergent)
+        XCTAssertEqual(m.items[1].look, shared)
+        XCTAssertEqual(m.items[2].look, shared)
     }
 
-    func testEnableAppliesCurrentLookToEveryPhotoImmediately() {
+    func testEnableUsesActivePhotoAndPreservesIntensityAndEveryControl() {
         let m = stubbedModel()
         m.addFiles([url("a"), url("b")])
-        m.bloom.glow = 0.7                        // live edit, never committed (look == nil)
+
+        var other = AutoHDR.BloomParams()
+        other.glow = 0.17
+        other.threshold = 0.81
+        other.tint = 0.92
+        m.bloom = other
+        m.selectNext()                            // commit the first photo's unique look
+
+        var anchor = AutoHDR.BloomParams()
+        anchor.hdrLookEnabled = true
+        anchor.glow = 1.34
+        anchor.threshold = 0.29
+        anchor.spread = 0.027
+        anchor.punch = 0.82
+        anchor.peak = 4.8
+        anchor.falloff = 1.91
+        anchor.saturation = 1.27
+        anchor.tint = -0.71
+        anchor.headroom = 2.6
+        anchor.bakeGlowIntoSDR = true
+        m.bloom = anchor
+        m.setIntensity(0.37)
+        let active = m.bloom
+        XCTAssertTrue(m.needsSameLookForAllConfirmation)
+
         m.setSameLookForAll(true)
-        XCTAssertEqual(m.items[0].look?.glow, 0.7)
-        XCTAssertEqual(m.items[1].look?.glow, 0.7,
-                       "the selected/current look becomes the durable unified baseline")
-        XCTAssertEqual(m.intensity, 1.0, accuracy: 1e-9, "the shared look re-anchors to 100%")
+        XCTAssertEqual(m.bloom, active,
+                       "the active photo's exact controls must remain live")
+        XCTAssertEqual(m.intensity, 0.37, accuracy: 1e-9,
+                       "enable must not normalize Intensity")
+        XCTAssertEqual(m.runningLook, active)
+        XCTAssertTrue(m.items.allSatisfy { $0.look == active },
+                      "the active photo, not the first photo, is the shared source")
+
+        // Preserving the anchor proves the transition changed no hidden slider
+        // state either; 100% must still resolve to the pre-toggle full look.
+        m.setIntensity(1.0)
+        XCTAssertEqual(m.bloom, anchor)
     }
 
     func testDifferentEffectiveLooksRequireConfirmation() {
@@ -192,16 +262,26 @@ final class SameLookForAllTests: XCTestCase {
 
     func testHDRLookTogglePreservesDialsIntensityAndBakeChoice() {
         let m = stubbedModel()
-        m.addFiles([url("a")])
+        m.addFiles([url("a"), url("b")])
         m.setIntensity(0.42)
         m.bloom.bakeGlowIntoSDR = true
         let dialed = m.bloom
 
         m.setHDRLookEnabled(false)
+        let disabled = m.bloom
         XCTAssertFalse(m.bloom.hdrLookEnabled)
         XCTAssertEqual(m.intensity, 0.42, accuracy: 1e-9)
         XCTAssertEqual(m.bloom.glow, dialed.glow, accuracy: 1e-9)
         XCTAssertTrue(m.bloom.bakeGlowIntoSDR, "OFF remembers the bake preference")
+
+        m.setSameLookForAll(true)
+        XCTAssertEqual(m.bloom, disabled)
+        XCTAssertEqual(m.intensity, 0.42, accuracy: 1e-9)
+        XCTAssertTrue(m.items.allSatisfy { $0.look == disabled })
+        m.setSameLookForAll(false)
+        XCTAssertEqual(m.bloom, disabled,
+                       "shared-mode transitions preserve every hidden OFF control")
+        XCTAssertEqual(m.intensity, 0.42, accuracy: 1e-9)
 
         m.setHDRLookEnabled(true)
         XCTAssertEqual(m.bloom, dialed, "ON restores the exact dialed look")
