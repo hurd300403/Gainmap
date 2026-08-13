@@ -266,7 +266,7 @@ private struct MacSessionLibrary: View {
                     .font(Theme.mono(11, .semibold))
                     .tracking(2)
                     .foregroundStyle(Theme.gold)
-                Text("Turn your SDR JPEG into an UltraHDR that glows on HDR screens — clean fallback everywhere else.")
+                Text("Turn your SDR JPEG into an UltraHDR that glows on HDR screens // clean fallback everywhere else.")
                     .font(Theme.ui(14))
                     .foregroundStyle(Theme.stoneDim)
                     .lineLimit(1)
